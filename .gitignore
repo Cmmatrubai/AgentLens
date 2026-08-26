@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+.worktrees/
+.superpowers/
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+
+# Raw experimental traces stay local. Only sanitized fixtures are committed.
+research/agentlens-v0-codex-probes/*.log
+
+# Local AgentLens runtime data.
+.agentlens-data/
+
