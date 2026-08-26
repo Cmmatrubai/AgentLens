@@ -337,7 +337,10 @@ Assert valid object JSON returns `provider_record`; malformed JSON, primitives, 
 it("preserves failed command then later recovery activity as separate events", async () => {
   const drafts = await normalizeFixture("failure-recovery.jsonl");
   expect(drafts.filter(e => e.kind === "command").map(e => e.status)).toEqual([
-    "in_progress", "failed", "in_progress", "completed"
+    "in_progress", "failed",
+    "in_progress", "completed",
+    "in_progress", "completed",
+    "in_progress", "completed"
   ]);
 });
 
