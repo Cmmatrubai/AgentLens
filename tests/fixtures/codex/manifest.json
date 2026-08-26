@@ -1,0 +1,29 @@
+{
+  "observedCodexVersion": "0.149.0-alpha.4",
+  "fixtures": [
+    {
+      "file": "read-success.jsonl",
+      "behavior": "read-success",
+      "sourceFixtureClass": "read-only success",
+      "sanitizedClasses": ["machine-paths", "identifiers", "prompts-messages", "repository-content", "tool-payloads"]
+    },
+    {
+      "file": "edit-success.jsonl",
+      "behavior": "edit-success",
+      "sourceFixtureClass": "edit and test success",
+      "sanitizedClasses": ["machine-paths", "identifiers", "prompts-messages", "repository-content", "tool-payloads"]
+    },
+    {
+      "file": "failure-recovery.jsonl",
+      "behavior": "failure-recovery",
+      "sourceFixtureClass": "failed command followed by recovery activity",
+      "sanitizedClasses": ["machine-paths", "identifiers", "prompts-messages", "repository-content", "tool-payloads"]
+    },
+    {
+      "file": "interrupted.jsonl",
+      "behavior": "interrupted",
+      "sourceFixtureClass": "open command at interruption",
+      "sanitizedClasses": ["machine-paths", "identifiers", "prompts-messages", "repository-content", "tool-payloads"]
+    }
+  ]
+}

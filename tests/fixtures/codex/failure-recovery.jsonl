@@ -1,0 +1,17 @@
+{"type":"thread.started","thread_id":"fixture-thread-recovery-001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"fixture-item-recovery-message-001","type":"agent_message","text":"fixture agent message"}}
+{"type":"item.started","item":{"id":"fixture-item-recovery-command-001","type":"command_execution","command":"fixture_command_fails","aggregated_output":"fixture failed output","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"fixture-item-recovery-command-001","type":"command_execution","command":"fixture_command_fails","aggregated_output":"fixture failed output","exit_code":1,"status":"failed"}}
+{"type":"item.completed","item":{"id":"fixture-item-recovery-message-002","type":"agent_message","text":"fixture recovery message"}}
+{"type":"item.started","item":{"id":"fixture-item-recovery-command-002","type":"command_execution","command":"fixture_command_recover_one","aggregated_output":"fixture recovery output","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"fixture-item-recovery-command-002","type":"command_execution","command":"fixture_command_recover_one","aggregated_output":"fixture recovery output","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"fixture-item-recovery-command-003","type":"command_execution","command":"fixture_command_recover_two","aggregated_output":"fixture recovery output","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"fixture-item-recovery-command-003","type":"command_execution","command":"fixture_command_recover_two","aggregated_output":"fixture recovery output","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"fixture-item-recovery-message-003","type":"agent_message","text":"fixture progress message"}}
+{"type":"item.started","item":{"id":"fixture-item-recovery-change-001","type":"file_change","changes":[{"path":"fixture/recovery.ts","kind":"modify"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"fixture-item-recovery-change-001","type":"file_change","changes":[{"path":"fixture/recovery.ts","kind":"modify"}],"status":"completed"}}
+{"type":"item.started","item":{"id":"fixture-item-recovery-command-004","type":"command_execution","command":"fixture_command_verify","aggregated_output":"fixture verification output","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"fixture-item-recovery-command-004","type":"command_execution","command":"fixture_command_verify","aggregated_output":"fixture verification output","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"fixture-item-recovery-message-004","type":"agent_message","text":"fixture completion message"}}
+{"type":"turn.completed","usage":{"input_tokens":505,"cached_input_tokens":55,"output_tokens":606,"reasoning_output_tokens":91,"cache_write_input_tokens":13}}

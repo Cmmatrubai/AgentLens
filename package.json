@@ -1,0 +1,22 @@
+{
+  "name": "agentlens",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "agentlens": "tsx apps/cli/src/main.ts",
+    "test": "vitest --run",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

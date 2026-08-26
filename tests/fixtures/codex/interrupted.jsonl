@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"fixture-thread-interrupted-001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"fixture-item-interrupted-message-001","type":"agent_message","text":"fixture agent message"}}
+{"type":"item.started","item":{"id":"fixture-item-interrupted-command-001","type":"command_execution","command":"fixture_command_wait","aggregated_output":"fixture command output","exit_code":null,"status":"in_progress"}}
