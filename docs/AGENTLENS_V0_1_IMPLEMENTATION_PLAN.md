@@ -44,8 +44,10 @@ research/.../*.log           ignored raw local probes
 - Create: `package.json`
 - Create: `pnpm-workspace.yaml`
 - Create: `tsconfig.base.json`
+- Create: `tsconfig.json`
 - Create: `vitest.workspace.ts`
 - Create: `packages/core/package.json`
+- Create: `packages/core/tsconfig.json`
 - Create: `packages/core/src/events.ts`
 - Create: `packages/core/src/capabilities.ts`
 - Create: `packages/core/src/fixtureManifest.ts`
@@ -81,7 +83,7 @@ Root `package.json` must contain:
 }
 ```
 
-Add Zod, TypeScript, Vitest, tsx, and Node types. Configure strict TypeScript with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`.
+Add Zod, TypeScript, Vitest, tsx, and Node types. Configure strict TypeScript with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`. Create a root composite `tsconfig.json` that references each workspace package as it is added; every package owns a composite `tsconfig.json` extending `tsconfig.base.json`. Add `.codebase-memory/` to `.gitignore`; the generated graph artifact is local tooling state, not product source.
 
 - [ ] **Step 2: Write failing canonical-contract tests**
 
@@ -139,7 +141,7 @@ Expected: FAIL because schemas and sanitized fixtures do not exist.
 
 - [ ] **Step 5: Implement the minimal schemas and sanitized fixtures**
 
-Implement exact types from the frozen spec. Sanitize the local probes by replacing all machine paths, user identifiers, prompts/messages, repository content, native identifiers, and tool payload content with deterministic fake values while keeping ordering, event/item types, statuses, exit codes, and usage shape. Do not copy the raw logs unchanged.
+Implement exact types from the frozen spec. Sanitize the local probes from the canonical checkout's ignored `research/agentlens-v0-codex-probes/*.log` files by replacing all machine paths, user identifiers, prompts/messages, repository content, native identifiers, and tool payload content with deterministic fake values while keeping ordering, event/item types, statuses, exit codes, and usage shape. Do not copy the raw logs unchanged.
 
 - [ ] **Step 6: Verify GREEN, typecheck, and diff scope**
 
@@ -149,7 +151,7 @@ Expected: PASS. Then run `git diff --check && git status --short` and confirm no
 - [ ] **Step 7: Commit**
 
 ```bash
-git add package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json vitest.workspace.ts packages/core tests/fixtures/codex
+git add .gitignore package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json tsconfig.json vitest.workspace.ts packages/core tests/fixtures/codex
 git commit -m "feat: freeze AgentLens evidence contracts"
 ```
 
@@ -237,6 +239,7 @@ git commit -m "feat: redact content before durable storage"
 
 **Files:**
 - Create: `packages/storage/package.json`
+- Create: `packages/storage/tsconfig.json`
 - Create: `packages/storage/migrations/001_initial.sql`
 - Create: `packages/storage/src/database.ts`
 - Create: `packages/storage/src/runRepository.ts`
@@ -307,6 +310,7 @@ git commit -m "feat: persist append-only AgentLens runs"
 
 **Files:**
 - Create: `packages/codex/package.json`
+- Create: `packages/codex/tsconfig.json`
 - Create: `packages/codex/src/lineDecoder.ts`
 - Create: `packages/codex/src/normalize.ts`
 - Create: `packages/codex/src/capabilities.ts`
@@ -404,7 +408,7 @@ git commit -m "feat: normalize Codex JSONL evidence"
 
 Name the breaks: AgentLens could inject flags/change argv, or fail to preserve stdin prompts.
 
-Assert exact child argv equality for ordinary prompts; reject missing delimiter/non-Codex/missing exec/missing `--json`; buffer `codex exec -` and promptless piped stdin in memory; forward original bytes unchanged; store only redacted/omitted representation; reject prompt-required TTY stdin.
+Assert exact child argv equality for ordinary prompts; reject missing delimiter/non-Codex/missing exec/missing `--json`; buffer and forward every non-TTY stdin stream unchanged (including `codex exec -`, promptless piped prompts, and prompt-plus-stdin context); store only redacted/omitted representation; reject explicit `codex exec -` with TTY stdin.
 
 - [ ] **Step 2: Write failing Git evidence tests**
 
@@ -429,7 +433,7 @@ Expected: FAIL because the CLI vertical slice does not exist.
 
 - [ ] **Step 7: Implement argument/prompt and Git preflight**
 
-Keep child argv bytes/ordering exact. Implement stdin buffering only for the Codex prompt cases defined in the spec. Use `spawnFile`/`execFile` argument arrays for the exact read-only Git commands. Refuse dirty/non-Git before child spawn.
+Keep child argv bytes/ordering exact. Buffer every non-TTY stdin stream fully in memory, capture it under policy, and forward the original bytes unchanged. Use Node `spawn` with argument arrays for the child and `execFile` with argument arrays for exact read-only Git commands. Refuse dirty/non-Git before child spawn.
 
 - [ ] **Step 8: Implement streaming persistence and reconciliation**
 
@@ -437,7 +441,7 @@ Create run `starting`, print id, spawn child with separate pipes/no PTY, mark `r
 
 - [ ] **Step 9: Implement `runs` and `inspect`**
 
-Support text and JSON output with the exact fields/labels in the spec. `--native` refuses non-standard capture and otherwise loads only redacted inline/artifact native content.
+Set `apps/cli/package.json` to expose `{ "bin": { "agentlens": "dist/main.js" } }` and add a Node shebang to the compiled entry point. Support text and JSON output with the exact fields/labels in the spec. `--native` refuses non-standard capture and otherwise loads only redacted inline/artifact native content.
 
 - [ ] **Step 10: Verify GREEN, typecheck, and diff scope**
 

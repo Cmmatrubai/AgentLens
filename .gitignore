@@ -4,6 +4,7 @@ coverage/
 .DS_Store
 .worktrees/
 .superpowers/
+.codebase-memory/
 *.sqlite
 *.sqlite3
 *.sqlite-shm
@@ -14,4 +15,3 @@ research/agentlens-v0-codex-probes/*.log
 
 # Local AgentLens runtime data.
 .agentlens-data/
-

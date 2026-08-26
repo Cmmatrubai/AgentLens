@@ -266,7 +266,7 @@ agentlens inspect RUN_ID [--data-root PATH] [--json] [--native]
 
 For an argv prompt, the exact child argument vector is forwarded; any displayed/stored command or possible prompt text passes capture policy. AgentLens does not attempt to semantically parse every future Codex option.
 
-For `codex exec -`, or `codex exec` with no prompt argument and piped stdin, AgentLens reads stdin fully into memory before spawning, applies capture policy to the prompt representation, then writes the **unchanged original bytes** to child stdin and closes it. Original stdin bytes are never written before redaction. If a stdin prompt is required but AgentLens stdin is a TTY, preflight fails with instructions to provide a prompt or pipe stdin. Other child stdin is inherited only when it cannot be a Codex prompt.
+For every non-TTY stdin stream—including `codex exec -`, `codex exec` with no argv prompt, and prompt-plus-stdin context—AgentLens reads stdin fully into memory before spawning, applies capture policy to its representation, then writes the **unchanged original bytes** to child stdin and closes it. Original stdin bytes are never written before redaction. Explicit `codex exec -` with TTY stdin fails preflight with instructions to pipe input. Other TTY stdin is inherited unchanged.
 
 `runs` shows id, status, provider, start time, duration, child exit/signal, and Git HEAD/branch-change flags. `inspect` shows chronological immutable events with provenance labels, source identifiers, relationships, process/provider contradictions, tracked final diff availability, and untracked-file metadata availability. `--native` displays redacted inline/artifact native payloads only in standard mode.
 
