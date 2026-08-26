@@ -98,6 +98,42 @@ function requireDerivedSources(
       message: "Derived events require a derived_from relationship."
     });
   }
+
+  if (!value.derivation) return;
+
+  const sourceEventIds = value.derivation.sourceEventIds;
+  const derivedFromEventIds = value.relationships
+    .filter((relationship) => relationship.type === "derived_from")
+    .map((relationship) => relationship.eventId);
+  const sourceEventIdSet = new Set(sourceEventIds);
+  const derivedFromEventIdSet = new Set(derivedFromEventIds);
+
+  if (sourceEventIdSet.size !== sourceEventIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["derivation", "sourceEventIds"],
+      message: "Derived event source IDs must be unique."
+    });
+  }
+
+  if (derivedFromEventIdSet.size !== derivedFromEventIds.length) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["relationships"],
+      message: "Derived event source relationships must be unique."
+    });
+  }
+
+  if (
+    sourceEventIdSet.size !== derivedFromEventIdSet.size ||
+    [...sourceEventIdSet].some((eventId) => !derivedFromEventIdSet.has(eventId))
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["relationships"],
+      message: "Derived event source relationships must match derivation source IDs."
+    });
+  }
 }
 
 export const traceEventV1Schema = z

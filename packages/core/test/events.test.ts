@@ -37,6 +37,60 @@ describe("frozen event evidence contracts", () => {
     ).toThrow();
   });
 
+  it("rejects derived relationships that do not exactly name their sources", () => {
+    const derivedEvent = {
+      ...validEvent,
+      provenance: "derived" as const,
+      derivation: {
+        name: "test-command",
+        version: "1",
+        sourceEventIds: ["fixture-event-a", "fixture-event-b"]
+      }
+    };
+
+    expect(() =>
+      traceEventV1Schema.parse({
+        ...derivedEvent,
+        relationships: [
+          { type: "derived_from", eventId: "fixture-event-a" },
+          { type: "derived_from", eventId: "fixture-event-c" }
+        ]
+      })
+    ).toThrow();
+
+    expect(() =>
+      traceEventV1Schema.parse({
+        ...derivedEvent,
+        relationships: [
+          { type: "derived_from", eventId: "fixture-event-a" },
+          { type: "derived_from", eventId: "fixture-event-a" },
+          { type: "derived_from", eventId: "fixture-event-b" }
+        ]
+      })
+    ).toThrow();
+
+    expect(() =>
+      traceEventV1Schema.parse({
+        ...derivedEvent,
+        derivation: {
+          ...derivedEvent.derivation,
+          sourceEventIds: ["fixture-event-a", "fixture-event-a"]
+        },
+        relationships: [{ type: "derived_from", eventId: "fixture-event-a" }]
+      })
+    ).toThrow();
+
+    expect(
+      traceEventV1Schema.parse({
+        ...derivedEvent,
+        relationships: [
+          { type: "derived_from", eventId: "fixture-event-a" },
+          { type: "derived_from", eventId: "fixture-event-b" }
+        ]
+      })
+    ).toBeTruthy();
+  });
+
   it("supports redacted inline, artifact, and omitted native payloads", () => {
     for (const nativePayload of [
       { storage: "inline", redacted: { future_field: 7 } },
