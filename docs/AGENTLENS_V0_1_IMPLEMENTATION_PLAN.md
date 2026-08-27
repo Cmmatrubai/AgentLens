@@ -384,6 +384,8 @@ git commit -m "feat: normalize Codex JSONL evidence"
 ### Task 5: Read-only Git evidence, process recorder, `runs`, and `inspect`
 
 **Files:**
+- Modify: `pnpm-lock.yaml`
+- Modify: `tsconfig.json`
 - Create: `apps/cli/package.json`
 - Create: `apps/cli/tsconfig.json`
 - Create: `apps/cli/src/args.ts`
@@ -449,7 +451,7 @@ Create run `starting`, print id, spawn child with separate pipes/no PTY, mark `r
 
 - [ ] **Step 9: Implement `runs` and `inspect`**
 
-Set `apps/cli/package.json` to expose `{ "bin": { "agentlens": "dist/main.js" } }` and add a Node shebang to the compiled entry point. Support text and JSON output with the exact fields/labels in the spec. `--native` refuses non-standard capture and otherwise loads only redacted inline/artifact native content.
+Set `apps/cli/package.json` to expose `{ "bin": { "agentlens": "dist/main.js" } }`, add the CLI package to the root TypeScript references and lockfile workspace importer, and add a Node shebang to the compiled entry point. Support text and JSON output with the exact fields/labels in the spec. `--native` refuses non-standard capture and otherwise loads only redacted inline/artifact native content.
 
 - [ ] **Step 10: Verify GREEN, typecheck, and diff scope**
 
@@ -463,7 +465,7 @@ Use clean disposable repositories and isolated `--data-root` directories for suc
 - [ ] **Step 12: Commit**
 
 ```bash
-git add apps/cli package.json pnpm-lock.yaml
+git add apps/cli pnpm-lock.yaml tsconfig.json
 git commit -m "feat: record and inspect Codex trajectories"
 ```
 
