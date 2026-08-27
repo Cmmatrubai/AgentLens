@@ -42,6 +42,84 @@ describe("ArtifactStore", () => {
     ).toThrow("RedactedBytes require an in-memory redaction result");
   });
 
+  it("cannot persist text mutated after redaction", async () => {
+    const dataRoot = await createRoot();
+    const store = new ArtifactStore(dataRoot);
+    const redacted = redactText("Bearer ORIGINAL_IMMUTABILITY_SECRET", {
+      policy: "standard",
+      key: Buffer.alloc(32, 0x41),
+      contentClass: "output"
+    });
+
+    try {
+      (redacted as { text: string }).text = "POST_REDACTION_TEXT_SENTINEL";
+    } catch {
+      // Frozen results reject the adversarial mutation in strict mode.
+    }
+
+    const completed = await store.writeRedacted({
+      runId: "run-immutable-text",
+      kind: "command-output",
+      redactedBytes: redactedTextBytes(redacted),
+      mediaType: "text/plain"
+    });
+    const stored = await readFile(completed.path, "utf8");
+
+    expect(stored).not.toContain("POST_REDACTION_TEXT_SENTINEL");
+    expect(stored).not.toContain("ORIGINAL_IMMUTABILITY_SECRET");
+    expect(Object.isFrozen(redacted)).toBe(true);
+  });
+
+  it("prepares inline native payloads from an immutable byte snapshot", async () => {
+    const dataRoot = await createRoot();
+    const store = new ArtifactStore(dataRoot);
+    const redacted = redactJson(
+      { future: { nested: "safe" }, token: "NATIVE_IMMUTABILITY_SECRET" },
+      {
+        policy: "standard",
+        key: Buffer.alloc(32, 0x41),
+        contentClass: "native",
+        runId: "run-immutable-native"
+      }
+    );
+    if (redacted.storage !== "content") throw new Error("expected redacted JSON content");
+
+    try {
+      (redacted.redacted as { future: { nested: string } }).future.nested =
+        "NESTED_PREPARE_SENTINEL";
+    } catch {
+      // Deep-frozen JSON rejects the adversarial mutation in strict mode.
+    }
+    try {
+      (redacted as { redacted: unknown }).redacted = {
+        future: { nested: "REPLACED_PREPARE_SENTINEL" }
+      };
+    } catch {
+      // Frozen result objects reject replacement in strict mode.
+    }
+
+    const nativePayload = await prepareNativePayload(redacted, store);
+    expect(nativePayload.storage).toBe("inline");
+    if (nativePayload.storage !== "inline") throw new Error("expected inline native payload");
+
+    try {
+      (nativePayload.redacted as { future: { nested: string } }).future.nested =
+        "POST_PREPARE_SENTINEL";
+    } catch {
+      // Prepared inline JSON is also deeply frozen.
+    }
+
+    const serialized = JSON.stringify(nativePayload);
+    expect(serialized).not.toContain("NESTED_PREPARE_SENTINEL");
+    expect(serialized).not.toContain("REPLACED_PREPARE_SENTINEL");
+    expect(serialized).not.toContain("POST_PREPARE_SENTINEL");
+    expect(serialized).not.toContain("NATIVE_IMMUTABILITY_SECRET");
+    expect(Object.isFrozen(redacted)).toBe(true);
+    expect(Object.isFrozen(redacted.redacted)).toBe(true);
+    expect(Object.isFrozen(nativePayload)).toBe(true);
+    expect(Object.isFrozen(nativePayload.redacted)).toBe(true);
+  });
+
   it("writes only explicitly redacted bytes and resolves after the owner-only final file exists", async () => {
     const dataRoot = await createRoot();
     const sourceSentinel = "ORIGINAL_ARTIFACT_SENTINEL";
@@ -158,6 +236,44 @@ describe("ArtifactStore", () => {
     expect(files).toHaveLength(0);
     await expect(access(join(dataRoot, "artifacts", "tmp"))).resolves.toBeUndefined();
     expect((await readdir(join(dataRoot, "artifacts", "tmp"))).length).toBe(0);
+  });
+
+  it("surfaces a temporary-file cleanup failure without returning a completed artifact", async () => {
+    const dataRoot = await createRoot();
+    const store = new ArtifactStore(dataRoot, {
+      rename: async () => {
+        throw new Error("injected primary rename failure");
+      },
+      unlink: async () => {
+        throw new Error("injected temp cleanup failure");
+      }
+    });
+    const redacted = redactText("safe redacted content", {
+      policy: "standard",
+      key: Buffer.alloc(32, 0x41),
+      contentClass: "output"
+    });
+
+    let failure: unknown;
+    try {
+      await store.writeRedacted({
+        runId: "run-cleanup-failure",
+        kind: "command-output",
+        redactedBytes: redactedTextBytes(redacted),
+        mediaType: "text/plain"
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).message).toBe(
+      "Artifact write failed and temporary-file cleanup also failed."
+    );
+    expect((failure as AggregateError).errors).toEqual([
+      expect.objectContaining({ message: "injected primary rename failure" }),
+      expect.objectContaining({ message: "injected temp cleanup failure" })
+    ]);
   });
 
   it("places temporary and final artifact paths on the same filesystem tree", async () => {

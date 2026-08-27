@@ -26,16 +26,17 @@ export interface JsonRedactionContext extends RedactionContext {
 }
 
 export interface RedactionAudit {
-  reason: string;
-  count: number;
+  readonly reason: string;
+  readonly count: number;
 }
 
 const redactedResultBrand: unique symbol = Symbol("agentlens.redacted-result");
+const authenticRedactionResults = new WeakSet<object>();
 
 export interface RedactionResult {
   readonly [redactedResultBrand]: true;
-  text: string;
-  audits: readonly RedactionAudit[];
+  readonly text: string;
+  readonly audits: readonly RedactionAudit[];
 }
 
 export class RedactedBytes {
@@ -43,10 +44,17 @@ export class RedactedBytes {
 
   private constructor(bytes: Buffer) {
     this.#bytes = Buffer.from(bytes);
+    Object.freeze(this);
   }
 
   static fromText(result: RedactionResult): RedactedBytes {
-    if (result[redactedResultBrand] !== true) {
+    if (
+      result[redactedResultBrand] !== true ||
+      !authenticRedactionResults.has(result) ||
+      !Object.isFrozen(result) ||
+      !Object.isFrozen(result.audits) ||
+      result.audits.some((audit) => !Object.isFrozen(audit))
+    ) {
       throw new TypeError("RedactedBytes require an in-memory redaction result.");
     }
     return new RedactedBytes(Buffer.from(result.text, "utf8"));
@@ -61,19 +69,75 @@ export class RedactedBytes {
   }
 }
 
+export type ImmutableJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly ImmutableJsonValue[]
+  | { readonly [key: string]: ImmutableJsonValue };
+
 export type RedactedJsonResult =
-  | {
-      storage: "content";
-      runId: string;
-      redacted: unknown;
-      redactedBytes: RedactedBytes;
-      audits: readonly RedactionAudit[];
-    }
-  | {
-      storage: "omitted";
-      runId: string;
-      reason: "metadata-only" | "strict";
-    };
+  | Readonly<{
+      readonly storage: "content";
+      readonly runId: string;
+      readonly redacted: ImmutableJsonValue;
+      readonly redactedBytes: RedactedBytes;
+      readonly audits: readonly RedactionAudit[];
+    }>
+  | Readonly<{
+      readonly storage: "omitted";
+      readonly runId: string;
+      readonly reason: "metadata-only" | "strict";
+    }>;
+
+function freezeAudits(audits: readonly RedactionAudit[]): readonly RedactionAudit[] {
+  return Object.freeze(
+    audits.map((audit) => Object.freeze({ reason: audit.reason, count: audit.count }))
+  );
+}
+
+function createResult(text: string, audits: readonly RedactionAudit[]): RedactionResult {
+  const result: RedactionResult = {
+    [redactedResultBrand]: true,
+    text,
+    audits: freezeAudits(audits)
+  };
+  authenticRedactionResults.add(result);
+  return Object.freeze(result);
+}
+
+function immutableJsonArray(values: ImmutableJsonValue[]): readonly ImmutableJsonValue[] {
+  return Object.freeze(values);
+}
+
+function immutableJsonObject(
+  values: Record<string, ImmutableJsonValue>
+): { readonly [key: string]: ImmutableJsonValue } {
+  return Object.freeze(values);
+}
+
+function immutableJsonResult(
+  runId: string,
+  redacted: ImmutableJsonValue,
+  redactedBytes: RedactedBytes,
+  audits: readonly RedactionAudit[]
+): RedactedJsonResult {
+  return Object.freeze({
+    storage: "content" as const,
+    runId,
+    redacted,
+    redactedBytes,
+    audits
+  });
+}
+
+function omittedJsonResult(
+  runId: string,
+  reason: "metadata-only" | "strict"
+): RedactedJsonResult {
+  return Object.freeze({ storage: "omitted" as const, reason, runId });
+}
 
 export const fixedMetadataText: Readonly<Record<ContentClass, string>> = {
   summary: "Event summary",
@@ -93,10 +157,6 @@ export const fixedMetadataText: Readonly<Record<ContentClass, string>> = {
 function marker(reason: string, value: string, key: Buffer): string {
   const digest = createHmac("sha256", key).update(value, "utf8").digest("hex").slice(0, 32);
   return `[[REDACTED:${reason}:hmac-sha256:${digest}]]`;
-}
-
-function createResult(text: string, audits: readonly RedactionAudit[]): RedactionResult {
-  return { [redactedResultBrand]: true, text, audits };
 }
 
 function strictLabelReason(contentClass: "command" | "path"): string {
@@ -172,7 +232,7 @@ function redactJsonValue(
   key: Buffer,
   audits: Map<string, number>,
   propertyName?: string
-): unknown {
+): ImmutableJsonValue {
   const reason = propertyName ? sensitiveJsonReason(propertyName) : undefined;
   if (reason) {
     audits.set(reason, (audits.get(reason) ?? 0) + 1);
@@ -188,35 +248,35 @@ function redactJsonValue(
   }
 
   if (Array.isArray(value)) {
-    return value.map((entry) => redactJsonValue(entry, key, audits));
+    return immutableJsonArray(value.map((entry) => redactJsonValue(entry, key, audits)));
   }
 
   if (value !== null && typeof value === "object") {
-    const output: Record<string, unknown> = {};
+    const output: Record<string, ImmutableJsonValue> = {};
     for (const [entryKey, entryValue] of Object.entries(value)) {
       output[entryKey] = redactJsonValue(entryValue, key, audits, entryKey);
     }
-    return output;
+    return immutableJsonObject(output);
   }
 
-  return value;
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  throw new TypeError("Native payload must contain only JSON values.");
 }
 
 export function redactJson(input: unknown, context: JsonRedactionContext): RedactedJsonResult {
   if (context.policy !== "standard") {
-    return { storage: "omitted", reason: context.policy, runId: context.runId };
+    return omittedJsonResult(context.runId, context.policy);
   }
 
   const auditCounts = new Map<string, number>();
   const redacted = redactJsonValue(input, context.key, auditCounts);
-  const audits = [...auditCounts].map(([reason, count]) => ({ reason, count }));
+  const audits = freezeAudits([...auditCounts].map(([reason, count]) => ({ reason, count })));
   const serialized = JSON.stringify(redacted);
   if (serialized === undefined) throw new Error("Native payload must be JSON-serializable.");
-  return {
-    storage: "content",
-    runId: context.runId,
+  return immutableJsonResult(
+    context.runId,
     redacted,
-    redactedBytes: RedactedBytes.fromText(createResult(serialized, audits)),
+    RedactedBytes.fromText(createResult(serialized, audits)),
     audits
-  };
+  );
 }

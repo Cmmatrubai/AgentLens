@@ -42,6 +42,29 @@ describe("redaction key", () => {
 });
 
 describe("text redaction", () => {
+  it("keeps the redacted result and audit records immutable", () => {
+    const result = redactText("Bearer IMMUTABLE_AUDIT_SOURCE", standardContext);
+
+    try {
+      (result.audits as RedactionResultMutation["audits"]).push({
+        reason: "MUTATED_AUDIT_SENTINEL",
+        count: 99
+      });
+    } catch {
+      // Frozen results reject the adversarial mutation in strict mode.
+    }
+    try {
+      (result.audits[0] as { reason: string }).reason = "MUTATED_REASON_SENTINEL";
+    } catch {
+      // Frozen audit entries reject the adversarial mutation in strict mode.
+    }
+
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(Object.isFrozen(result.audits)).toBe(true);
+    expect(result.audits.every((audit) => Object.isFrozen(audit))).toBe(true);
+    expect(result.audits).toEqual([{ reason: "auth-bearer", count: 1 }]);
+  });
+
   it("uses a stable keyed HMAC marker without exposing an ordinary digest", () => {
     const first = redactText("Bearer SENTINEL_TOKEN_91", standardContext);
     const second = redactText("Bearer SENTINEL_TOKEN_91", standardContext);
@@ -121,6 +144,10 @@ describe("text redaction", () => {
     }
   );
 });
+
+interface RedactionResultMutation {
+  audits: Array<{ reason: string; count: number }>;
+}
 
 describe("JSON redaction", () => {
   it.each(["metadata-only", "strict"] as const)(

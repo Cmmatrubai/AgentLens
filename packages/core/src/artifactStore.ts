@@ -6,12 +6,13 @@ import {
   open,
   rename as fsRename,
   stat,
-  unlink
+  unlink as fsUnlink
 } from "node:fs/promises";
 import { join } from "node:path";
 import type { NativePayloadRefV1 } from "./events.js";
 import {
   RedactedBytes,
+  type ImmutableJsonValue,
   type RedactedJsonResult,
   type RedactionResult
 } from "./redaction.js";
@@ -22,9 +23,11 @@ const TRUNCATION_MARKER = Buffer.from("\n[[TRUNCATED:artifact:max-bytes:10485760
 const UNSUPPORTED_DIRECTORY_FSYNC_CODES = new Set(["EINVAL", "ENOTSUP", "EOPNOTSUPP"]);
 
 type Rename = (oldPath: string, newPath: string) => Promise<void>;
+type Unlink = (path: string) => Promise<void>;
 
 export interface ArtifactStoreOptions {
-  rename?: Rename;
+  readonly rename?: Rename;
+  readonly unlink?: Unlink;
 }
 
 export interface WriteRedactedArtifact {
@@ -46,6 +49,14 @@ export interface CompletedArtifact {
   truncated: boolean;
   originalByteLength: number;
 }
+
+type NativePayloadCompatible<T extends NativePayloadRefV1> = T;
+
+export type PreparedNativePayloadRefV1 = NativePayloadCompatible<
+  | Readonly<{ storage: "inline"; redacted: ImmutableJsonValue }>
+  | Readonly<{ storage: "artifact"; artifactId: string }>
+  | Readonly<{ storage: "omitted"; reason: string }>
+>;
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
@@ -92,13 +103,33 @@ export function redactedTextBytes(result: RedactionResult): RedactedBytes {
   return RedactedBytes.fromText(result);
 }
 
+function immutableJsonSnapshot(value: unknown): ImmutableJsonValue {
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "number" ||
+    typeof value === "string"
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) return Object.freeze(value.map(immutableJsonSnapshot));
+  if (typeof value === "object") {
+    const snapshot: Record<string, ImmutableJsonValue> = {};
+    for (const [key, entry] of Object.entries(value)) snapshot[key] = immutableJsonSnapshot(entry);
+    return Object.freeze(snapshot);
+  }
+  throw new TypeError("Redacted native payload bytes must decode to JSON.");
+}
+
 export class ArtifactStore {
   readonly #dataRoot: string;
   readonly #rename: Rename;
+  readonly #unlink: Unlink;
 
   constructor(dataRoot: string, options: ArtifactStoreOptions = {}) {
     this.#dataRoot = dataRoot;
     this.#rename = options.rename ?? fsRename;
+    this.#unlink = options.unlink ?? fsUnlink;
   }
 
   pathForArtifactId(artifactId: string): string {
@@ -119,9 +150,11 @@ export class ArtifactStore {
     await ensureOwnerOnlyDirectory(finalDirectory);
 
     let handle;
+    let tempCreated = false;
     let renamed = false;
     try {
       handle = await open(tempPath, "wx", 0o600);
+      tempCreated = true;
       await handle.writeFile(capped.bytes);
       await handle.sync();
       await handle.close();
@@ -149,8 +182,28 @@ export class ArtifactStore {
         originalByteLength: capped.originalByteLength
       };
     } catch (error) {
-      await handle?.close().catch(() => undefined);
-      if (!renamed) await unlink(tempPath).catch(() => undefined);
+      const cleanupFailures: unknown[] = [];
+      if (handle) {
+        try {
+          await handle.close();
+        } catch (cleanupFailure) {
+          cleanupFailures.push(cleanupFailure);
+        }
+      }
+      if (tempCreated && !renamed) {
+        try {
+          await this.#unlink(tempPath);
+        } catch (cleanupFailure) {
+          cleanupFailures.push(cleanupFailure);
+        }
+      }
+      if (cleanupFailures.length > 0) {
+        throw new AggregateError(
+          [error, ...cleanupFailures],
+          "Artifact write failed and temporary-file cleanup also failed.",
+          { cause: error }
+        );
+      }
       throw error;
     }
   }
@@ -159,13 +212,16 @@ export class ArtifactStore {
 export async function prepareNativePayload(
   redactedJson: RedactedJsonResult,
   artifactStore: ArtifactStore
-): Promise<NativePayloadRefV1> {
+): Promise<PreparedNativePayloadRefV1> {
   if (redactedJson.storage === "omitted") {
-    return { storage: "omitted", reason: redactedJson.reason };
+    return Object.freeze({ storage: "omitted" as const, reason: redactedJson.reason });
   }
 
   if (redactedJson.redactedBytes.byteLength <= INLINE_NATIVE_BYTES) {
-    return { storage: "inline", redacted: redactedJson.redacted };
+    const snapshot = immutableJsonSnapshot(
+      JSON.parse(redactedJson.redactedBytes.copy().toString("utf8")) as unknown
+    );
+    return Object.freeze({ storage: "inline" as const, redacted: snapshot });
   }
 
   const artifact = await artifactStore.writeRedacted({
@@ -174,5 +230,5 @@ export async function prepareNativePayload(
     redactedBytes: redactedJson.redactedBytes,
     mediaType: "application/json"
   });
-  return { storage: "artifact", artifactId: artifact.id };
+  return Object.freeze({ storage: "artifact" as const, artifactId: artifact.id });
 }

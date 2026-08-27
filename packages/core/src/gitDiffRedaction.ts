@@ -7,11 +7,15 @@ export interface ExclusionDecision {
 }
 
 export interface SensitivePathPolicy {
-  capture: CapturePolicy;
-  denyGlobs?: readonly string[];
+  readonly capture: CapturePolicy;
+  readonly denyGlobs?: readonly string[];
 }
 
 type PathPolicy = CapturePolicy | SensitivePathPolicy;
+
+export interface GitDiffRedactionContext extends RedactionContext {
+  readonly sensitivePathPolicy?: SensitivePathPolicy;
+}
 
 const pathRules: readonly { reason: string; matches: (path: string, segments: string[]) => boolean }[] = [
   {
@@ -55,18 +59,33 @@ function normalizedPath(path: string): string {
     }
   }
   normalized = normalized.replaceAll("\\", "/");
-  normalized = normalized.replace(/^\.\//, "").replace(/^[ab]\//, "");
+  normalized = normalized.replace(/^\.\//, "");
   return normalized;
 }
 
 function globMatches(path: string, glob: string): boolean {
-  const escaped = glob
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replaceAll("**", "\u0000")
-    .replaceAll("*", "[^/]*")
-    .replaceAll("\u0000", ".*")
-    .replaceAll("?", "[^/]");
-  return new RegExp(`^${escaped}$`, "i").test(path);
+  let pattern = "";
+  for (let index = 0; index < glob.length; ) {
+    if (glob.startsWith("**/", index)) {
+      pattern += "(?:.*/)?";
+      index += 3;
+    } else if (glob.startsWith("**", index)) {
+      pattern += ".*";
+      index += 2;
+    } else if (glob[index] === "*") {
+      pattern += "[^/]*";
+      index += 1;
+    } else if (glob[index] === "?") {
+      pattern += "[^/]";
+      index += 1;
+    } else {
+      const character = glob[index];
+      if (character === undefined) break;
+      pattern += /[.+^${}()|[\]\\]/.test(character) ? `\\${character}` : character;
+      index += 1;
+    }
+  }
+  return new RegExp(`^${pattern}$`, "i").test(path);
 }
 
 export function shouldExcludePath(path: string, policy: PathPolicy): ExclusionDecision {
@@ -89,13 +108,14 @@ export function shouldExcludePath(path: string, policy: PathPolicy): ExclusionDe
 
 function parseQuotedTokens(line: string): string[] {
   const matches = line.match(/"(?:\\.|[^"\\])*"|\S+/g) ?? [];
-  return matches.map((token) => normalizedPath(token));
+  return matches.map((token) => normalizedPath(token).replace(/^[ab]\//, ""));
 }
 
 function pathFromHeader(line: string): string | undefined {
   if (line.startsWith("--- ") || line.startsWith("+++ ")) {
     const value = line.slice(4).split("\t", 1)[0];
-    return value === "/dev/null" ? undefined : value;
+    if (value === undefined || value === "/dev/null") return undefined;
+    return normalizedPath(value).replace(/^[ab]\//, "");
   }
 
   const operation = /^(?:rename|copy) (?:from|to) (.+)$/.exec(line);
@@ -117,8 +137,13 @@ function pathsInBlock(block: string): string[] {
   return paths;
 }
 
-export function redactGitDiff(input: string, context: RedactionContext): RedactionResult {
+export function redactGitDiff(input: string, context: GitDiffRedactionContext): RedactionResult {
   if (context.policy !== "standard") return redactText(input, context);
+
+  const pathPolicy = context.sensitivePathPolicy ?? context.policy;
+  if (typeof pathPolicy !== "string" && pathPolicy.capture !== context.policy) {
+    throw new Error("Sensitive path policy capture mode must match the redaction context.");
+  }
 
   const blocks = input.split(/(?=^diff --git )/m);
   const retained: string[] = [];
@@ -130,7 +155,7 @@ export function redactGitDiff(input: string, context: RedactionContext): Redacti
 
     let exclusion: ExclusionDecision | undefined;
     for (const path of pathsInBlock(block)) {
-      const decision = shouldExcludePath(path, context.policy);
+      const decision = shouldExcludePath(path, pathPolicy);
       if (decision.exclude) {
         exclusion = decision;
         break;

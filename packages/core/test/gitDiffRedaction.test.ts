@@ -30,9 +30,52 @@ describe("sensitive path policy", () => {
       })
     ).toEqual({ exclude: true, reason: "sensitive-path.configured" });
   });
+
+  it.each([
+    ["private/file.txt", "**/private/**"],
+    ["nested/private/file.txt", "**/private/**"],
+    ["a/b", "a/**/b"],
+    ["a/x/y/b", "a/**/b"]
+  ])("lets globstar match zero or more path segments: %s against %s", (path, glob) => {
+    expect(
+      shouldExcludePath(path, {
+        capture: "standard",
+        denyGlobs: [glob]
+      })
+    ).toEqual({ exclude: true, reason: "sensitive-path.configured" });
+  });
 });
 
 describe("Git diff redaction", () => {
+  it("threads configured sensitive path globs through whole-block diff filtering", () => {
+    const input = [
+      "diff --git a/private/session.txt b/private/session.txt",
+      "--- a/private/session.txt",
+      "+++ b/private/session.txt",
+      "@@ -1 +1 @@",
+      "-CUSTOM_GLOB_OLD_SENTINEL",
+      "+CUSTOM_GLOB_NEW_SENTINEL",
+      "diff --git a/src/safe.ts b/src/safe.ts",
+      "--- a/src/safe.ts",
+      "+++ b/src/safe.ts",
+      "@@ -1 +1 @@",
+      "-const safe = 1;",
+      "+const safe = 2;",
+      ""
+    ].join("\n");
+
+    const result = redactGitDiff(input, {
+      ...standardContext,
+      sensitivePathPolicy: { capture: "standard", denyGlobs: ["private/**"] }
+    });
+
+    expect(result.text).not.toContain("private/session.txt");
+    expect(result.text).not.toContain("CUSTOM_GLOB_OLD_SENTINEL");
+    expect(result.text).not.toContain("CUSTOM_GLOB_NEW_SENTINEL");
+    expect(result.text).toContain("[[EXCLUDED:sensitive-path.configured]]");
+    expect(result.text).toContain("diff --git a/src/safe.ts b/src/safe.ts");
+  });
+
   it("removes an entire sensitive-path diff block before token redaction", () => {
     const input = [
       "diff --git a/.env.production b/.env.production",
