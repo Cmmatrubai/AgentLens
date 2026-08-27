@@ -4,7 +4,7 @@ export default defineWorkspace([
   {
     test: {
       environment: "node",
-      include: ["packages/*/test/**/*.test.ts"]
+      include: ["{packages,apps}/*/test/**/*.test.ts"]
     }
   }
 ]);

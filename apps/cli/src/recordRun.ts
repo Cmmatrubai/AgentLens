@@ -1,0 +1,632 @@
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import {
+  ArtifactStore,
+  loadOrCreateRedactionKey,
+  redactGitDiff,
+  redactText,
+  redactedTextBytes,
+  shouldExcludePath,
+  type CapturePolicy,
+  type ContentClass,
+  type EventDraftV1,
+  type RedactionAudit,
+  type TraceEventV1
+} from "@agentlens/core";
+import { decodeCodexLine, normalizeCodexRecord } from "@agentlens/codex";
+import {
+  openDatabase,
+  RunRepository,
+  type GitEvidenceInput,
+  type OptionalGitEvidenceRef,
+  type RequiredGitEvidenceRef,
+  type RunRecord
+} from "@agentlens/storage";
+import type { RecordCommand } from "./args.js";
+import { captureGitAfter, captureGitBefore, type GitAfterEvidence, type GitBeforeEvidence } from "./gitEvidence.js";
+import { persistEventDraft } from "./persistEvent.js";
+import { ChildSpawnError, runChildProcess, type ChildProcessResult } from "./processRunner.js";
+import { resolvePromptInput } from "./promptInput.js";
+
+interface OutputWriter {
+  write(chunk: string | Uint8Array): unknown;
+}
+
+export interface RecordRunDependencies {
+  readonly cwd?: string;
+  readonly stdin?: NodeJS.ReadStream;
+  readonly stdout?: OutputWriter;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly signal?: AbortSignal;
+  readonly now?: () => number;
+  readonly nextId?: () => string;
+  readonly onRunIdPrinted?: (runId: string) => void | Promise<void>;
+}
+
+export interface RecordResult {
+  readonly runId: string;
+  readonly status: RunRecord["status"];
+  readonly exitCode: number | null;
+  readonly terminatingSignal: string | null;
+  readonly cliExitCode: number;
+  readonly databasePath: string;
+}
+
+interface RecordingState {
+  sequence: number;
+  providerTerminalEventId?: string;
+}
+
+interface GitPersistenceContext {
+  readonly runId: string;
+  readonly capturePolicy: CapturePolicy;
+  readonly key: Buffer;
+  readonly artifactStore: ArtifactStore;
+  readonly repository: RunRepository;
+  readonly committedArtifactIds: Set<string>;
+}
+
+const VERSION = "0.1.0";
+
+function iso(now: () => number): string {
+  return new Date(now()).toISOString();
+}
+
+function cliExitCode(run: RunRecord): number {
+  if (run.exitCode !== null && run.exitCode !== 0) return run.exitCode;
+  return run.status === "completed" ? 0 : 1;
+}
+
+function result(run: RunRecord, databasePath: string): RecordResult {
+  return Object.freeze({
+    runId: run.id,
+    status: run.status,
+    exitCode: run.exitCode,
+    terminatingSignal: run.terminatingSignal,
+    cliExitCode: cliExitCode(run),
+    databasePath
+  });
+}
+
+async function ensureDataRoot(dataRoot: string): Promise<void> {
+  await mkdir(dataRoot, { recursive: true, mode: 0o700 });
+  await chmod(dataRoot, 0o700);
+}
+
+async function ownerOnlyDatabaseFiles(databasePath: string): Promise<void> {
+  for (const path of [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]) {
+    await chmod(path, 0o600).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  }
+}
+
+function repositoryFingerprint(repositoryRoot: string, key: Buffer): string {
+  return redactText(repositoryRoot, { policy: "strict", key, contentClass: "path" }).text;
+}
+
+function redactedOptionalText(
+  value: string | undefined,
+  policy: CapturePolicy,
+  key: Buffer,
+  contentClass: ContentClass
+): string | undefined {
+  if (value === undefined) return undefined;
+  return redactText(value, { policy, key, contentClass }).text;
+}
+
+function appendInternalEvent(
+  repository: RunRepository,
+  state: RecordingState,
+  input: Omit<TraceEventV1, "id" | "sequence">,
+  nextId: () => string,
+  audits: readonly RedactionAudit[] = []
+): TraceEventV1 {
+  return repository.appendEvent({
+    ...input,
+    id: nextId(),
+    sequence: state.sequence++
+  }, audits);
+}
+
+function decodedGitPath(value: string): string {
+  const candidate = value.trim();
+  if (!candidate.startsWith('"')) return candidate;
+  try {
+    return JSON.parse(candidate) as string;
+  } catch {
+    return candidate;
+  }
+}
+
+function evidencePathFromStatusLine(line: string): string[] {
+  if (line.startsWith("? ") || line.startsWith("! ")) return [decodedGitPath(line.slice(2))];
+  if (line.startsWith("1 ")) return [decodedGitPath(line.split(" ").slice(8).join(" "))];
+  if (line.startsWith("2 ")) {
+    const paths = line.split(" ").slice(9).join(" ").split("\t").map(decodedGitPath);
+    return paths;
+  }
+  if (line.startsWith("u ")) return [decodedGitPath(line.split(" ").slice(10).join(" "))];
+  return [];
+}
+
+function filterSensitiveStatus(status: string): string {
+  return status
+    .split("\n")
+    .map((line) => {
+      if (line.length === 0) return line;
+      for (const path of evidencePathFromStatusLine(line)) {
+        const decision = shouldExcludePath(path, "standard");
+        if (decision.exclude) return `[[EXCLUDED:${decision.reason ?? "sensitive-path"}]]`;
+      }
+      return line;
+    })
+    .join("\n");
+}
+
+function filterSensitiveDiffCheck(output: string): string {
+  const filtered: string[] = [];
+  let excludeDetail = false;
+  for (const line of output.split("\n")) {
+    const header = /^(.*):\d+:\s.*$/.exec(line);
+    if (header?.[1]) {
+      const decision = shouldExcludePath(decodedGitPath(header[1]), "standard");
+      excludeDetail = decision.exclude;
+      filtered.push(decision.exclude
+        ? `[[EXCLUDED:${decision.reason ?? "sensitive-path"}]]`
+        : line);
+      continue;
+    }
+    if (!excludeDetail) filtered.push(line);
+  }
+  return filtered.join("\n");
+}
+
+async function commitRedactedArtifact(
+  context: GitPersistenceContext,
+  kind: string,
+  mediaType: string,
+  redacted: ReturnType<typeof redactText>
+): Promise<string> {
+  const completed = await context.artifactStore.writeRedacted({
+    runId: context.runId,
+    kind,
+    redactedBytes: redactedTextBytes(redacted),
+    mediaType
+  });
+  if (!context.committedArtifactIds.has(completed.id)) {
+    await context.repository.commitArtifactMetadata(completed, redacted.audits);
+    context.committedArtifactIds.add(completed.id);
+  }
+  return completed.id;
+}
+
+async function requiredTextEvidence(
+  context: GitPersistenceContext,
+  kind: string,
+  raw: string,
+  contentClass: ContentClass,
+  mediaType = "text/plain"
+): Promise<RequiredGitEvidenceRef> {
+  if (context.capturePolicy !== "standard") {
+    return Object.freeze({ state: "omitted" as const, reason: context.capturePolicy });
+  }
+  const redacted = contentClass === "git-diff"
+    ? redactGitDiff(raw, {
+        policy: context.capturePolicy,
+        key: context.key,
+        contentClass,
+        sensitivePathPolicy: { capture: context.capturePolicy }
+      })
+    : redactText(raw, { policy: context.capturePolicy, key: context.key, contentClass });
+  const artifactId = await commitRedactedArtifact(context, kind, mediaType, redacted);
+  return Object.freeze({ state: "artifact" as const, artifactId });
+}
+
+async function optionalTextEvidence(
+  context: GitPersistenceContext,
+  kind: string,
+  raw: string,
+  contentClass: ContentClass,
+  mediaType = "text/plain"
+): Promise<OptionalGitEvidenceRef> {
+  if (raw.length === 0) return Object.freeze({ state: "absent" as const });
+  return requiredTextEvidence(context, kind, raw, contentClass, mediaType);
+}
+
+function redactedBranch(value: string | null, policy: CapturePolicy, key: Buffer): string | null {
+  if (value === null) return null;
+  return redactText(value, { policy, key, contentClass: "path" }).text;
+}
+
+async function persistInitialGit(
+  before: GitBeforeEvidence,
+  context: GitPersistenceContext,
+  repository: RunRepository,
+  state: RecordingState,
+  nextId: () => string,
+  receivedAt: string
+): Promise<RequiredGitEvidenceRef> {
+  const status = context.capturePolicy === "standard"
+    ? filterSensitiveStatus(before.initialStatus)
+    : before.initialStatus;
+  const initialStatus = await requiredTextEvidence(
+    context,
+    "git-initial-status",
+    status,
+    "path"
+  );
+  appendInternalEvent(repository, state, {
+    runId: context.runId,
+    receivedAt,
+    kind: "git.snapshot",
+    status: "completed",
+    provenance: "git_recovered",
+    source: { provider: "codex-exec", correlationId: context.runId },
+    relationships: [],
+    summary: "Initial Git snapshot",
+    normalizedPayload: {
+      initialHead: before.initialHead,
+      initialBranch: redactedBranch(before.initialBranch, context.capturePolicy, context.key),
+      initialStatus
+    }
+  }, nextId);
+  return initialStatus;
+}
+
+async function persistFinalGit(
+  before: GitBeforeEvidence,
+  after: GitAfterEvidence,
+  initialStatus: RequiredGitEvidenceRef,
+  context: GitPersistenceContext,
+  repository: RunRepository,
+  state: RecordingState,
+  nextId: () => string,
+  receivedAt: string,
+  capturedAt: number
+): Promise<void> {
+  const finalStatusText = context.capturePolicy === "standard"
+    ? filterSensitiveStatus(after.finalStatus)
+    : after.finalStatus;
+  const finalStatus = await requiredTextEvidence(context, "git-final-status", finalStatusText, "path");
+  const trackedFinalDiff = await optionalTextEvidence(
+    context,
+    "git-tracked-final-diff",
+    after.trackedFinalDiff,
+    "git-diff",
+    "text/x-diff"
+  );
+  const diffCheckRaw = JSON.stringify({
+    passed: after.diffCheck.passed,
+    output: context.capturePolicy === "standard"
+      ? filterSensitiveDiffCheck(after.diffCheck.output)
+      : after.diffCheck.output
+  });
+  const diffCheck = await requiredTextEvidence(
+    context,
+    "git-diff-check",
+    diffCheckRaw,
+    "diagnostic",
+    "application/json"
+  );
+  const filteredUntracked = after.untrackedMetadata.map((entry) => {
+    const decision = shouldExcludePath(entry.path, context.capturePolicy);
+    return decision.exclude
+      ? { ...entry, path: `[[EXCLUDED:${decision.reason ?? "sensitive-path"}]]` }
+      : entry;
+  });
+  const untrackedMetadata = await optionalTextEvidence(
+    context,
+    "git-untracked-file-metadata",
+    filteredUntracked.length === 0 ? "" : JSON.stringify(filteredUntracked),
+    "path",
+    "application/json"
+  );
+  const input: GitEvidenceInput = {
+    initialHead: before.initialHead,
+    finalHead: after.finalHead,
+    initialBranch: redactedBranch(before.initialBranch, context.capturePolicy, context.key),
+    finalBranch: redactedBranch(after.finalBranch, context.capturePolicy, context.key),
+    initialStatus,
+    finalStatus,
+    trackedFinalDiff,
+    diffCheck,
+    diffCheckPassed: after.diffCheck.passed,
+    untrackedMetadata,
+    headChanged: after.headChanged,
+    branchChanged: after.branchChanged,
+    capturedAt
+  };
+  repository.saveGitEvidence(context.runId, input);
+  appendInternalEvent(repository, state, {
+    runId: context.runId,
+    receivedAt,
+    kind: "git.final_evidence",
+    status: after.diffCheck.passed ? "completed" : "failed",
+    provenance: "git_recovered",
+    source: { provider: "codex-exec", correlationId: context.runId },
+    relationships: [],
+    summary: "Final Git evidence",
+    normalizedPayload: {
+      headChanged: after.headChanged,
+      branchChanged: after.branchChanged,
+      finalStatus,
+      trackedFinalDiff,
+      diffCheck,
+      diffCheckPassed: after.diffCheck.passed,
+      untrackedMetadata
+    }
+  }, nextId);
+}
+
+function processStatus(processResult: ChildProcessResult): TraceEventV1["status"] {
+  if (processResult.terminatingSignal !== null) return "interrupted";
+  if (processResult.exitCode === null) return "unknown";
+  return processResult.exitCode === 0 ? "completed" : "failed";
+}
+
+function appendRecorderFailure(
+  repository: RunRepository,
+  state: RecordingState,
+  runId: string,
+  phase: string,
+  nextId: () => string,
+  receivedAt: string
+): TraceEventV1 {
+  return appendInternalEvent(repository, state, {
+    runId,
+    receivedAt,
+    kind: "error",
+    status: "failed",
+    provenance: "recorder",
+    source: { provider: "codex-exec", correlationId: runId },
+    relationships: [],
+    summary: "Recorder failure",
+    normalizedPayload: { recorderFailure: true, phase }
+  }, nextId);
+}
+
+export async function recordRun(
+  command: RecordCommand,
+  dependencies: RecordRunDependencies = {}
+): Promise<RecordResult> {
+  const cwd = dependencies.cwd ?? process.cwd();
+  const stdin = dependencies.stdin ?? process.stdin;
+  const stdout = dependencies.stdout ?? process.stdout;
+  const env = dependencies.env ?? process.env;
+  const now = dependencies.now ?? Date.now;
+  const nextId = dependencies.nextId ?? randomUUID;
+
+  const before = await captureGitBefore(cwd);
+  const promptInput = await resolvePromptInput(command.childArgs, stdin);
+  const dataRoot = resolve(command.dataRoot);
+  await ensureDataRoot(dataRoot);
+  const key = await loadOrCreateRedactionKey(dataRoot);
+  const databasePath = join(dataRoot, "agentlens.sqlite");
+  const database = openDatabase(databasePath);
+  await ownerOnlyDatabaseFiles(databasePath);
+  const artifactRoot = join(dataRoot, "artifacts", "sha256");
+  const repository = new RunRepository(database, { artifactRoot });
+  const artifactStore = new ArtifactStore(dataRoot);
+  const runId = nextId();
+  const state: RecordingState = { sequence: 0 };
+  const committedArtifactIds = new Set<string>();
+  const gitContext: GitPersistenceContext = {
+    runId,
+    capturePolicy: command.capture,
+    key,
+    artifactStore,
+    repository,
+    committedArtifactIds
+  };
+
+  let initialStatus: RequiredGitEvidenceRef | undefined;
+  let markedRunning = false;
+  let recorderFailureEventId: string | undefined;
+  let interruptionEventId: string | undefined;
+  try {
+    const redactedLabel = redactedOptionalText(command.label, command.capture, key, "label");
+    repository.createRun({
+      id: runId,
+      schemaVersion: 1,
+      provider: "codex-exec",
+      integrationVersion: VERSION,
+      agentVersion: "unknown",
+      capturePolicy: command.capture,
+      capturePolicyVersion: "1",
+      redactionVersion: "1",
+      ...(redactedLabel === undefined ? {} : { label: redactedLabel }),
+      promptSource: promptInput.mode === "buffered" ? "stdin-buffered" : "tty-inherited",
+      repositoryFingerprint: repositoryFingerprint(before.repositoryRoot, key),
+      repositoryDisplay: redactedOptionalText(
+        before.repositoryRoot.split("/").filter(Boolean).at(-1) ?? "repository",
+        command.capture,
+        key,
+        "path"
+      ) ?? "repository",
+      startedAt: now()
+    });
+    stdout.write(`Run ID: ${runId}\n`);
+    stdout.write(
+      "Warning: secret detection reduces risk but cannot guarantee captured content is free of sensitive material; review before any future export.\n"
+    );
+    await dependencies.onRunIdPrinted?.(runId);
+
+    initialStatus = await persistInitialGit(
+      before,
+      gitContext,
+      repository,
+      state,
+      nextId,
+      iso(now)
+    );
+
+    if (dependencies.signal?.aborted) {
+      const interruption = appendInternalEvent(repository, state, {
+        runId,
+        receivedAt: iso(now),
+        kind: "recorder.interruption",
+        status: "interrupted",
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        relationships: [],
+        summary: "Explicit interruption",
+        normalizedPayload: { explicitInterruption: true }
+      }, nextId);
+      interruptionEventId = interruption.id;
+      const after = await captureGitAfter(before);
+      await persistFinalGit(before, after, initialStatus, gitContext, repository, state, nextId, iso(now), now());
+      const run = repository.reconcileRun(runId, {
+        eventId: nextId(),
+        receivedAt: iso(now),
+        endedAt: now(),
+        interruptionEventId
+      });
+      return result(run, databasePath);
+    }
+
+    let lineQueue = Promise.resolve();
+    const childResult = await runChildProcess({
+      childArgs: command.childArgs,
+      cwd,
+      env,
+      promptInput,
+      ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+      onSpawn: (pid) => {
+        repository.markRunning(runId, { childPid: pid });
+        markedRunning = true;
+      },
+      onLine: (stream, line) => {
+        lineQueue = lineQueue.then(async () => {
+          const decoded = decodeCodexLine(line, stream);
+          const drafts: readonly EventDraftV1[] = decoded.type === "diagnostic"
+            ? [decoded.draft]
+            : normalizeCodexRecord(decoded.record);
+          for (const draft of drafts) {
+            const persisted = await persistEventDraft(draft, {
+              runId,
+              capturePolicy: command.capture,
+              redactionKey: key,
+              artifactStore,
+              repository,
+              committedArtifactIds,
+              nextEventId: nextId,
+              nextSequence: () => state.sequence++,
+              receivedAt: () => iso(now)
+            });
+            if (
+              persisted.provenance === "observed" &&
+              (persisted.kind === "turn.completed" || persisted.kind === "turn.failed")
+            ) state.providerTerminalEventId = persisted.id;
+          }
+        });
+        return lineQueue;
+      }
+    });
+    await lineQueue;
+
+    if (childResult.explicitlyInterrupted) {
+      const interruption = appendInternalEvent(repository, state, {
+        runId,
+        receivedAt: iso(now),
+        kind: "recorder.interruption",
+        status: "interrupted",
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        relationships: [],
+        summary: "Explicit interruption",
+        normalizedPayload: { explicitInterruption: true }
+      }, nextId);
+      interruptionEventId = interruption.id;
+    }
+
+    const processEvent = appendInternalEvent(repository, state, {
+      runId,
+      receivedAt: iso(now),
+      kind: "recorder.process_exit",
+      status: processStatus(childResult),
+      provenance: "recorder",
+      source: { provider: "codex-exec", correlationId: runId },
+      relationships: [],
+      summary: "Child process terminal fact",
+      normalizedPayload: {
+        exitCode: childResult.exitCode,
+        terminatingSignal: childResult.terminatingSignal
+      }
+    }, nextId);
+    repository.recordProcessFact(runId, { eventId: processEvent.id });
+
+    const after = await captureGitAfter(before);
+    await persistFinalGit(before, after, initialStatus, gitContext, repository, state, nextId, iso(now), now());
+    repository.appendRecoveryForOpenEvents(runId, {
+      receivedAt: iso(now),
+      eventIdFor: () => nextId()
+    });
+    const run = repository.reconcileRun(runId, {
+      eventId: nextId(),
+      receivedAt: iso(now),
+      endedAt: now(),
+      ...(state.providerTerminalEventId === undefined
+        ? {}
+        : { providerTerminalEventId: state.providerTerminalEventId }),
+      ...(interruptionEventId === undefined ? {} : { interruptionEventId })
+    });
+    return result(run, databasePath);
+  } catch (error) {
+    const failurePhase = error instanceof ChildSpawnError ? "spawn" : "recording";
+    try {
+      const failure = appendRecorderFailure(
+        repository,
+        state,
+        runId,
+        failurePhase,
+        nextId,
+        iso(now)
+      );
+      recorderFailureEventId = failure.id;
+
+      if (initialStatus !== undefined && repository.getRunDetail(runId).gitEvidence === null) {
+        try {
+          const after = await captureGitAfter(before);
+          await persistFinalGit(
+            before,
+            after,
+            initialStatus,
+            gitContext,
+            repository,
+            state,
+            nextId,
+            iso(now),
+            now()
+          );
+        } catch {
+          // The recorder-failure event still permits terminal reconciliation when final Git
+          // evidence cannot be recovered (for example, if the child removed repository state).
+        }
+      }
+      if (markedRunning) {
+        repository.appendRecoveryForOpenEvents(runId, {
+          receivedAt: iso(now),
+          eventIdFor: () => nextId()
+        });
+      }
+      const run = repository.reconcileRun(runId, {
+        eventId: nextId(),
+        receivedAt: iso(now),
+        endedAt: now(),
+        recorderFailureEventId
+      });
+      return result(run, databasePath);
+    } catch (recoveryError) {
+      throw new AggregateError(
+        [error, recoveryError],
+        "AgentLens recording failed and terminal reconciliation could not be persisted.",
+        { cause: error }
+      );
+    }
+  } finally {
+    database.close();
+    await ownerOnlyDatabaseFiles(databasePath);
+  }
+}

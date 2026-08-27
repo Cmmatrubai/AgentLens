@@ -1,0 +1,154 @@
+#!/usr/bin/env node
+
+import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+
+const args = process.argv.slice(2);
+const modeArg = args.find((argument) => argument.startsWith("--fake-mode="));
+const mode = modeArg?.slice("--fake-mode=".length) ?? "success";
+
+if (process.env.AGENTLENS_FAKE_STARTED_FILE && mode !== "hang") {
+  appendFileSync(process.env.AGENTLENS_FAKE_STARTED_FILE, "child-started\n");
+}
+if (process.env.AGENTLENS_ARGV_CAPTURE) {
+  writeFileSync(process.env.AGENTLENS_ARGV_CAPTURE, JSON.stringify(args));
+}
+
+const emit = (record) => process.stdout.write(`${JSON.stringify(record)}\n`);
+const started = (id, type = "command_execution") => emit({
+  type: "item.started",
+  thread_id: "fixture-thread",
+  turn_id: "fixture-turn",
+  item: { id, type, command: "fixture command", status: "in_progress" }
+});
+const completed = (id, status = "completed", exitCode = 0) => emit({
+  type: "item.completed",
+  thread_id: "fixture-thread",
+  turn_id: "fixture-turn",
+  item: {
+    id,
+    type: "command_execution",
+    command: "fixture command",
+    aggregated_output: "fixture output",
+    exit_code: exitCode,
+    status
+  }
+});
+const terminal = () => emit({
+  type: "turn.completed",
+  thread_id: "fixture-thread",
+  turn_id: "fixture-turn",
+  usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 2 }
+});
+
+if (mode !== "hang") {
+  emit({ type: "thread.started", thread_id: "fixture-thread" });
+  emit({ type: "turn.started", thread_id: "fixture-thread", turn_id: "fixture-turn" });
+}
+
+switch (mode) {
+  case "success":
+    emit({
+      type: "item.completed",
+      item: { id: "message-1", type: "agent_message", text: "fixture success", status: "completed" }
+    });
+    terminal();
+    break;
+  case "failed-then-recovery":
+    started("command-failed");
+    completed("command-failed", "failed", 1);
+    started("command-recovery");
+    completed("command-recovery", "completed", 0);
+    terminal();
+    break;
+  case "nonzero":
+    terminal();
+    process.exitCode = 7;
+    break;
+  case "malformed-unknown-stderr":
+    process.stdout.write("not-json\n");
+    emit({ type: "future.event", future: { nested: 7 } });
+    process.stderr.write("fixture stderr diagnostic\n");
+    terminal();
+    break;
+  case "unknown-small":
+    emit({ type: "future.event", future: { nested: 7 }, authorization: "Bearer SMALL_NATIVE_TOKEN" });
+    terminal();
+    break;
+  case "unknown-large":
+    emit({ type: "future.event", future: { large: "x".repeat(40 * 1024) } });
+    terminal();
+    break;
+  case "unknown-large-repeated": {
+    const record = { type: "future.event", future: { large: "x".repeat(40 * 1024) } };
+    emit(record);
+    emit(record);
+    terminal();
+    break;
+  }
+  case "stdin-echo": {
+    const bytes = readFileSync(0);
+    if (process.env.AGENTLENS_STDIN_CAPTURE) writeFileSync(process.env.AGENTLENS_STDIN_CAPTURE, bytes);
+    emit({
+      type: "item.completed",
+      item: { id: "stdin-message", type: "agent_message", text: bytes.toString("base64"), status: "completed" }
+    });
+    terminal();
+    break;
+  }
+  case "commit":
+    writeFileSync("tracked.txt", "child committed change\n");
+    execFileSync("git", ["add", "tracked.txt"]);
+    execFileSync("git", ["commit", "-qm", "fake child commit"]);
+    terminal();
+    break;
+  case "branch-change":
+    execFileSync("git", ["checkout", "-qb", "fake-child-branch"]);
+    terminal();
+    break;
+  case "remove-git":
+    terminal();
+    rmSync(".git", { recursive: true, force: true });
+    break;
+  case "untracked":
+    writeFileSync("fake-untracked.txt", "UNTRACKED_FAKE_CONTENT");
+    terminal();
+    break;
+  case "privacy":
+    writeFileSync("tracked.txt", "Bearer STANDARD_TOKEN_SENTINEL\nMETADATA_DIFF_SENTINEL\n");
+    writeFileSync(".env.production", "ENV_DIFF_ARBITRARY_SENTINEL   \n");
+    writeFileSync(".env.SENSITIVE_PATH_SENTINEL with space", "UNTRACKED_CONTENT_SENTINEL\n");
+    emit({
+      type: "item.completed",
+      item: {
+        id: "privacy-message",
+        type: "agent_message",
+        text: "METADATA_MESSAGE_SENTINEL Bearer STANDARD_TOKEN_SENTINEL",
+        status: "completed"
+      },
+      future: { native: "METADATA_NATIVE_SENTINEL" }
+    });
+    emit({
+      type: "item.completed",
+      item: {
+        id: "privacy-command",
+        type: "command_execution",
+        command: "printf METADATA_COMMAND_SENTINEL",
+        aggregated_output: "METADATA_OUTPUT_SENTINEL",
+        exit_code: 0,
+        status: "completed"
+      }
+    });
+    process.stderr.write("METADATA_STDERR_SENTINEL\n");
+    terminal();
+    break;
+  case "hang":
+    started("hanging-command");
+    if (process.env.AGENTLENS_FAKE_STARTED_FILE) {
+      appendFileSync(process.env.AGENTLENS_FAKE_STARTED_FILE, "child-started\n");
+    }
+    setInterval(() => {}, 1_000);
+    break;
+  default:
+    throw new Error(`Unknown fake mode ${mode}`);
+}

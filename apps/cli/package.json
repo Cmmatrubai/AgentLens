@@ -1,0 +1,13 @@
+{
+  "name": "@agentlens/cli",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agentlens": "dist/main.js"
+  },
+  "dependencies": {
+    "@agentlens/codex": "workspace:*",
+    "@agentlens/core": "workspace:*",
+    "@agentlens/storage": "workspace:*"
+  }
+}
