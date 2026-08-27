@@ -191,6 +191,28 @@ describe("read-only Git evidence", () => {
     });
   });
 
+  it.each([
+    ["U+2028", "\u2028", "342\\200\\250", "LINE_SEPARATOR_DETAIL_SECRET"],
+    ["U+2029", "\u2029", "342\\200\\251", "PARAGRAPH_SEPARATOR_DETAIL_SECRET"]
+  ])("keeps a valid %s path framing-safe for downstream policy", async (
+    _name,
+    separator,
+    octal,
+    detail
+  ) => {
+    const root = await cleanRepository();
+    const after = await captureIndexPathChange(
+      root,
+      Buffer.from(`.env/${separator}file`),
+      `${detail}   \n`
+    );
+
+    expect(after.diffCheck).toEqual({
+      passed: false,
+      output: `".env/\\${octal}file":1: trailing whitespace.\n+${detail}   \n`
+    });
+  });
+
   it("keeps included ordinary and quoted diff-check paths stable", async () => {
     const ordinaryRoot = await cleanRepository();
     const ordinaryBefore = await captureGitBefore(ordinaryRoot);

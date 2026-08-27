@@ -79,6 +79,8 @@ describe("recorder privacy and artifact durability", () => {
       Buffer.from("/.env")
     ]);
     const controlName = Buffer.from(".env/\nfile");
+    const lineSeparatorName = Buffer.from(".env/\u2028file");
+    const paragraphSeparatorName = Buffer.from(".env/\u2029file");
     const result = await recordRun(
       {
         name: "record",
@@ -108,11 +110,17 @@ describe("recorder privacy and artifact durability", () => {
     expect(diffCheckBody).toContain("[[EXCLUDED:unrepresentable-git-path]]");
     expect(diffCheckBody).toContain("[[EXCLUDED:sensitive-path.env]]");
     expect(diffCheckBody).not.toContain(".env/\\nfile");
+    expect(diffCheckBody).not.toContain("\u2028");
+    expect(diffCheckBody).not.toContain("\u2029");
     expect(durable.includes(Buffer.from("NONUTF8_PATH_SENTINEL"))).toBe(false);
     expect(durable.includes(rawName)).toBe(false);
     expect(durable.includes(controlName)).toBe(false);
+    expect(durable.includes(lineSeparatorName)).toBe(false);
+    expect(durable.includes(paragraphSeparatorName)).toBe(false);
     expect(durable.includes(Buffer.from("INVALID_DETAIL_SECRET"))).toBe(false);
     expect(durable.includes(Buffer.from("CONTROL_DETAIL_SECRET"))).toBe(false);
+    expect(durable.includes(Buffer.from("LINE_SEPARATOR_DETAIL_SECRET"))).toBe(false);
+    expect(durable.includes(Buffer.from("PARAGRAPH_SEPARATOR_DETAIL_SECRET"))).toBe(false);
   });
 
   it("keeps every metadata-only source sentinel out of the entire closed data root", async () => {

@@ -207,7 +207,7 @@ function statusDisplayPath(path: Buffer): string {
   const decoded = displayGitPath(path);
   if (decoded === UNREPRESENTABLE_GIT_PATH) return decoded;
   if (!/[\s"\\\u0000-\u001f\u007f]/u.test(decoded)) return decoded;
-  return `"${decoded.replace(/["\\\u0000-\u001f\u007f]/gu, (character) => {
+  return `"${decoded.replace(/["\\\u0000-\u001f\u007f\u2028\u2029]/gu, (character) => {
     if (character === '"') return '\\"';
     if (character === "\\") return "\\\\";
     if (character === "\t") return "\\t";

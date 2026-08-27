@@ -125,6 +125,8 @@ switch (mode) {
       Buffer.from("/.env")
     ]);
     const controlRawName = Buffer.from(".env/\nfile");
+    const lineSeparatorRawName = Buffer.from(".env/\u2028file");
+    const paragraphSeparatorRawName = Buffer.from(".env/\u2029file");
     const initialBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
       input: Buffer.from("before\n"),
       encoding: "utf8"
@@ -132,7 +134,9 @@ switch (mode) {
     execFileSync("git", ["update-index", "-z", "--index-info"], {
       input: Buffer.concat([
         Buffer.from(`100644 ${initialBlob}\t`), invalidRawName, Buffer.from([0]),
-        Buffer.from(`100644 ${initialBlob}\t`), controlRawName, Buffer.from([0])
+        Buffer.from(`100644 ${initialBlob}\t`), controlRawName, Buffer.from([0]),
+        Buffer.from(`100644 ${initialBlob}\t`), lineSeparatorRawName, Buffer.from([0]),
+        Buffer.from(`100644 ${initialBlob}\t`), paragraphSeparatorRawName, Buffer.from([0])
       ])
     });
     execFileSync("git", ["commit", "-qm", "raw path fixture"]);
@@ -144,15 +148,28 @@ switch (mode) {
       input: Buffer.from("CONTROL_DETAIL_SECRET   \n"),
       encoding: "utf8"
     }).trim();
+    const lineSeparatorFinalBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      input: Buffer.from("LINE_SEPARATOR_DETAIL_SECRET   \n"),
+      encoding: "utf8"
+    }).trim();
+    const paragraphSeparatorFinalBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      input: Buffer.from("PARAGRAPH_SEPARATOR_DETAIL_SECRET   \n"),
+      encoding: "utf8"
+    }).trim();
     execFileSync("git", ["update-index", "-z", "--index-info"], {
       input: Buffer.concat([
         Buffer.from(`100644 ${invalidFinalBlob}\t`), invalidRawName, Buffer.from([0]),
-        Buffer.from(`100644 ${controlFinalBlob}\t`), controlRawName, Buffer.from([0])
+        Buffer.from(`100644 ${controlFinalBlob}\t`), controlRawName, Buffer.from([0]),
+        Buffer.from(`100644 ${lineSeparatorFinalBlob}\t`), lineSeparatorRawName, Buffer.from([0]),
+        Buffer.from(`100644 ${paragraphSeparatorFinalBlob}\t`), paragraphSeparatorRawName, Buffer.from([0])
       ])
     });
     execFileSync("git", ["update-index", "--skip-worktree", "-z", "--stdin"], {
       input: Buffer.concat([
-        invalidRawName, Buffer.from([0]), controlRawName, Buffer.from([0])
+        invalidRawName, Buffer.from([0]),
+        controlRawName, Buffer.from([0]),
+        lineSeparatorRawName, Buffer.from([0]),
+        paragraphSeparatorRawName, Buffer.from([0])
       ])
     });
     terminal();
