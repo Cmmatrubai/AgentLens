@@ -783,8 +783,18 @@ export class RunRepository {
       if (!(["starting", "running"] as RunStatus[]).includes(run.status)) {
         throw new Error(`Run ${runId} is terminal and already reconciled.`);
       }
-      if (run.status !== "running") throw new Error("Run reconciliation requires a running run.");
       if (!Number.isInteger(input.endedAt)) throw new Error("Run end time must be epoch milliseconds.");
+
+      const preSpawn = run.status === "starting";
+      if (
+        preSpawn &&
+        (input.providerTerminalEventId !== undefined ||
+          run.process_event_id !== null ||
+          run.exit_code !== null ||
+          run.terminating_signal !== null)
+      ) {
+        throw new Error("Pre-spawn reconciliation cannot include provider or process evidence.");
+      }
 
       const providerTerminalKind = input.providerTerminalEventId
         ? classifyProviderTerminal(this.requireEventInRun(runId, input.providerTerminalEventId), run)
@@ -804,6 +814,13 @@ export class RunRepository {
       }
       if (input.interruptionEventId) {
         validateInterruption(this.requireEventInRun(runId, input.interruptionEventId), run);
+      }
+      if (
+        preSpawn &&
+        input.recorderFailureEventId === undefined &&
+        input.interruptionEventId === undefined
+      ) {
+        throw new Error("Pre-spawn reconciliation requires validated recorder terminal support.");
       }
 
       const supportingEventIds = [
@@ -863,14 +880,15 @@ export class RunRepository {
         UPDATE runs
         SET status = ?, ended_at = ?, provider_terminal_kind = ?, terminal_reason = ?,
             contradiction_codes_json = ?
-        WHERE id = ? AND status = 'running'
+        WHERE id = ? AND status = ?
       `).run(
         decision.status,
         input.endedAt,
         providerTerminalKind,
         decision.terminalReason,
         json(decision.contradictionCodes),
-        runId
+        runId,
+        run.status
       );
       if (updated.changes !== 1) throw new Error("Run reconciliation lost its terminal write race.");
       return this.requireRun(runId);

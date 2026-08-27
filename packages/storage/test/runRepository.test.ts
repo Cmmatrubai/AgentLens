@@ -545,6 +545,169 @@ describe("run-fact reconciliation", () => {
     }
   });
 
+  it.each([
+    {
+      name: "recorder failure",
+      supportId: "pre-spawn-recorder-failure",
+      status: "failed" as const,
+      kind: "error",
+      normalizedPayload: { recorderFailure: true },
+      reconciliation: { recorderFailureEventId: "pre-spawn-recorder-failure" },
+      expectedStatus: "recorder_error",
+      expectedReason: "recorder_failure"
+    },
+    {
+      name: "explicit interruption",
+      supportId: "pre-spawn-interruption",
+      status: "interrupted" as const,
+      kind: "recorder.interruption",
+      normalizedPayload: { explicitInterruption: true },
+      reconciliation: { interruptionEventId: "pre-spawn-interruption" },
+      expectedStatus: "interrupted",
+      expectedReason: "explicit_interruption"
+    }
+  ])("terminalizes a starting run from validated pre-spawn $name evidence", (testCase) => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event(testCase.supportId, 0, testCase.status, {
+        kind: testCase.kind,
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: testCase.normalizedPayload
+      }));
+
+      const result = repository.reconcileRun(runId, {
+        eventId: "pre-spawn-reconciliation",
+        receivedAt,
+        endedAt: 1_777_777_778_000,
+        ...testCase.reconciliation
+      });
+
+      expect(result).toMatchObject({
+        status: testCase.expectedStatus,
+        terminalReason: testCase.expectedReason,
+        childPid: null,
+        exitCode: null,
+        terminatingSignal: null,
+        providerTerminalKind: null,
+        contradictionCodes: []
+      });
+      const reconciliation = repository.getRunDetail(runId).events.at(-1);
+      expect(reconciliation).toMatchObject({
+        id: "pre-spawn-reconciliation",
+        relationships: [{ type: "derived_from", eventId: testCase.supportId }],
+        normalizedPayload: {
+          providerTerminalKind: null,
+          exitCode: null,
+          terminatingSignal: null,
+          supportingEventIds: [testCase.supportId]
+        }
+      });
+    } finally {
+      close();
+    }
+  });
+
+  it("does not reconcile a starting run from provider or process evidence", () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("provider-terminal-before-spawn", 0, "completed", {
+        kind: "turn.completed",
+        source: {
+          provider: "codex-exec",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          eventType: "turn.completed"
+        }
+      }));
+      repository.appendEvent(event("process-before-spawn", 1, "failed", {
+        kind: "recorder.process_exit",
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: { exitCode: 9, terminatingSignal: null }
+      }));
+
+      expect(() => repository.recordProcessFact(runId, { eventId: "process-before-spawn" }))
+        .toThrow(/running/i);
+      expect(() => repository.reconcileRun(runId, {
+        eventId: "unsupported-pre-spawn-reconciliation",
+        receivedAt,
+        endedAt: 1_777_777_778_000,
+        providerTerminalEventId: "provider-terminal-before-spawn"
+      })).toThrow();
+      expect(repository.getRunDetail(runId)).toMatchObject({
+        run: {
+          status: "starting",
+          childPid: null,
+          exitCode: null,
+          terminatingSignal: null,
+          providerTerminalKind: null
+        }
+      });
+      expect(repository.getRunDetail(runId).events.some(({ kind }) => kind === "run.reconciled"))
+        .toBe(false);
+    } finally {
+      close();
+    }
+  });
+
+  it("requires valid recorder terminal support before reconciling a starting run", () => {
+    const { repository, close } = setup();
+    try {
+      expect(() => repository.reconcileRun(runId, {
+        eventId: "unsupported-pre-spawn-reconciliation",
+        receivedAt,
+        endedAt: 1_777_777_778_000
+      })).toThrow();
+
+      repository.appendEvent(event("invalid-pre-spawn-failure", 0, "failed", {
+        kind: "error",
+        provenance: "observed",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: { recorderFailure: true }
+      }));
+      expect(() => repository.reconcileRun(runId, {
+        eventId: "invalid-pre-spawn-reconciliation",
+        receivedAt,
+        endedAt: 1_777_777_778_000,
+        recorderFailureEventId: "invalid-pre-spawn-failure"
+      })).toThrow();
+      expect(repository.getRunDetail(runId).run.status).toBe("starting");
+    } finally {
+      close();
+    }
+  });
+
+  it("keeps a pre-spawn recorder terminal reconciliation immutable", () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("pre-spawn-recorder-failure", 0, "failed", {
+        kind: "error",
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: { recorderFailure: true }
+      }));
+      repository.reconcileRun(runId, {
+        eventId: "pre-spawn-reconciliation",
+        receivedAt,
+        endedAt: 1_777_777_778_000,
+        recorderFailureEventId: "pre-spawn-recorder-failure"
+      });
+      const terminal = repository.getRunDetail(runId);
+
+      expect(() => repository.reconcileRun(runId, {
+        eventId: "conflicting-pre-spawn-reconciliation",
+        receivedAt: "2026-08-26T20:03:00.000Z",
+        endedAt: 1_777_777_779_000,
+        interruptionEventId: "pre-spawn-recorder-failure"
+      })).toThrow(/terminal|already reconciled/i);
+      expect(() => repository.markRunning(runId, { childPid: 42 })).toThrow(/starting/i);
+      expect(repository.getRunDetail(runId)).toEqual(terminal);
+    } finally {
+      close();
+    }
+  });
+
   it("rejects a process fact whose stored event semantics do not match recorder evidence", () => {
     const { repository, close } = setup();
     try {
