@@ -33,7 +33,7 @@ async function runRecordWithProcessSignals(
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   try {
     const command = parseAgentLensArgs(argv[0] === "--" ? argv.slice(1) : argv);
-    if (command.name === "record") return runRecordWithProcessSignals(command);
+    if (command.name === "record") return await runRecordWithProcessSignals(command);
     if (command.name === "runs") {
       await runRunsCommand(command);
       return 0;

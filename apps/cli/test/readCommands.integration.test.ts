@@ -82,6 +82,49 @@ afterEach(async () => {
 });
 
 describe("runs and inspect", () => {
+  it("rejects a symlinked data root without reading, writing, or chmodding its target", async () => {
+    const context = await fixture();
+    const outside = join(context.repo, "outside-data-target");
+    const sentinel = join(outside, "sentinel.txt");
+    await mkdir(outside, { mode: 0o755 });
+    await writeFile(sentinel, "OUTSIDE_DATA_ROOT_SENTINEL", { mode: 0o644 });
+    await symlink(outside, context.dataRoot);
+
+    await expect(runRunsCommand(
+      { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+      { stdout: silentOutput }
+    )).rejects.toThrow(/symbolic|symlink/i);
+
+    expect(await readFile(sentinel, "utf8")).toBe("OUTSIDE_DATA_ROOT_SENTINEL");
+    expect((await stat(outside)).mode & 0o777).toBe(0o755);
+    expect((await stat(sentinel)).mode & 0o777).toBe(0o644);
+  });
+
+  it.each(["", "-wal", "-shm"] as const)(
+    "rejects a symlinked agentlens.sqlite%s without mutating its external target",
+    async (suffix) => {
+      const context = await fixture();
+      await runRunsCommand(
+        { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+        { stdout: silentOutput }
+      );
+      const databasePath = join(context.dataRoot, "agentlens.sqlite");
+      const protectedPath = `${databasePath}${suffix}`;
+      await rm(protectedPath, { force: true });
+      const outsideTarget = join(context.repo, `outside-sqlite${suffix || "-db"}.txt`);
+      await writeFile(outsideTarget, "OUTSIDE_SQLITE_SENTINEL", { mode: 0o644 });
+      await symlink(outsideTarget, protectedPath);
+
+      await expect(runRunsCommand(
+        { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+        { stdout: silentOutput }
+      )).rejects.toThrow(/symbolic|symlink/i);
+
+      expect(await readFile(outsideTarget, "utf8")).toBe("OUTSIDE_SQLITE_SENTINEL");
+      expect((await stat(outsideTarget)).mode & 0o777).toBe(0o644);
+    }
+  );
+
   it("creates a migrated data root and database with owner-only modes", async () => {
     const context = await fixture();
 

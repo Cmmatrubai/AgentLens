@@ -127,6 +127,35 @@ describe("packaged AgentLens binary", () => {
     });
   });
 
+  it("reports asynchronous record preflight failures through the stable CLI error boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-cli-preflight-"));
+    roots.push(root);
+    const repo = join(root, "repo");
+    const dataRoot = join(root, "data");
+    await mkdir(repo);
+    await execFile("git", ["init", "-q"], { cwd: repo });
+    await execFile("git", ["config", "user.email", "fixture@example.test"], { cwd: repo });
+    await execFile("git", ["config", "user.name", "AgentLens Fixture"], { cwd: repo });
+    await writeFile(join(repo, "tracked.txt"), "before\n", "utf8");
+    await execFile("git", ["add", "tracked.txt"], { cwd: repo });
+    await execFile("git", ["commit", "-qm", "initial"], { cwd: repo });
+    await writeFile(join(repo, "dirty.txt"), "dirty\n", "utf8");
+
+    const failed = await plainNode([
+      compiledMain,
+      "record",
+      "--data-root", dataRoot,
+      "--",
+      "codex", "exec", "--json", "never spawned"
+    ], repo, process.env);
+
+    expect(failed).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "AgentLens error: AgentLens record requires a clean Git repository before child spawn.\n"
+    });
+  });
+
   it.each([
     ["SIGINT", 130],
     ["SIGTERM", 143]

@@ -350,6 +350,46 @@ describe("recordRun lifecycle", () => {
     expect(run.events.find(({ kind }) => kind === "command")?.status).toBe("in_progress");
   });
 
+  it("reconciles a signal received after child terminal and final Git persistence as interrupted", async () => {
+    const context = await fixture();
+    const controller = new AbortController();
+    const lateSignalHook = { onFinalGitPersisted: () => controller.abort() };
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      {
+        ...lateSignalHook,
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: silentOutput,
+        signal: controller.signal
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const interruption = run.events.filter(({ kind }) => kind === "recorder.interruption");
+    const reconciled = run.events.at(-1);
+
+    expect(result).toMatchObject({
+      status: "interrupted",
+      exitCode: 0,
+      terminatingSignal: null
+    });
+    expect(interruption).toHaveLength(1);
+    expect(reconciled).toMatchObject({
+      kind: "run.reconciled",
+      normalizedPayload: { status: "interrupted", explicitInterruption: true }
+    });
+    expect(reconciled?.relationships).toContainEqual({
+      type: "derived_from",
+      eventId: interruption[0]?.id
+    });
+  });
+
   it("persists final Git evidence after a child commit even when status is clean", async () => {
     const context = await fixture();
     const result = await recordRun(

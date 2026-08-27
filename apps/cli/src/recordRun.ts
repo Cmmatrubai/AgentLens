@@ -48,6 +48,7 @@ export interface RecordRunDependencies {
   readonly now?: () => number;
   readonly nextId?: () => string;
   readonly onRunIdPrinted?: (runId: string) => void | Promise<void>;
+  readonly onFinalGitPersisted?: () => void | Promise<void>;
 }
 
 export interface RecordResult {
@@ -123,6 +124,26 @@ function appendInternalEvent(
   }, audits);
 }
 
+function appendInterruption(
+  repository: RunRepository,
+  state: RecordingState,
+  runId: string,
+  receivedAt: string,
+  nextId: () => string
+): TraceEventV1 {
+  return appendInternalEvent(repository, state, {
+    runId,
+    receivedAt,
+    kind: "recorder.interruption",
+    status: "interrupted",
+    provenance: "recorder",
+    source: { provider: "codex-exec", correlationId: runId },
+    relationships: [],
+    summary: "Explicit interruption",
+    normalizedPayload: { explicitInterruption: true }
+  }, nextId);
+}
+
 function evidencePathFromStatusLine(line: string): string[] {
   if (line.startsWith("? ") || line.startsWith("! ")) return [decodeGitPath(line.slice(2))];
   if (line.startsWith("1 ")) return [decodeGitPath(line.split(" ").slice(8).join(" "))];
@@ -150,22 +171,26 @@ function filterSensitiveStatus(status: string): string {
 
 function filterSensitiveDiffCheck(output: string): string {
   const filtered: string[] = [];
-  let excludeDetail = false;
+  let expectedDetail: "include" | "exclude" | undefined;
   for (const line of output.split("\n")) {
-    if (line.startsWith("+")) {
-      if (!excludeDetail) filtered.push(line);
-      continue;
+    if (expectedDetail !== undefined) {
+      if (line.startsWith("+")) {
+        if (expectedDetail === "include") filtered.push(line);
+        expectedDetail = undefined;
+        continue;
+      }
+      expectedDetail = undefined;
     }
     const header = /^(.*):\d+:\s.*$/.exec(line);
     if (header?.[1]) {
       const decision = shouldExcludePath(decodeGitPath(header[1]), "standard");
-      excludeDetail = decision.exclude;
+      expectedDetail = decision.exclude ? "exclude" : "include";
       filtered.push(decision.exclude
         ? `[[EXCLUDED:${decision.reason ?? "sensitive-path"}]]`
         : line);
       continue;
     }
-    if (!excludeDetail) filtered.push(line);
+    filtered.push(line);
   }
   return filtered.join("\n");
 }
@@ -497,17 +522,7 @@ export async function recordRun(
     });
 
     if (dependencies.signal?.aborted) {
-      const interruption = appendInternalEvent(repository, state, {
-        runId,
-        receivedAt: iso(now),
-        kind: "recorder.interruption",
-        status: "interrupted",
-        provenance: "recorder",
-        source: { provider: "codex-exec", correlationId: runId },
-        relationships: [],
-        summary: "Explicit interruption",
-        normalizedPayload: { explicitInterruption: true }
-      }, nextId);
+      const interruption = appendInterruption(repository, state, runId, iso(now), nextId);
       interruptionEventId = interruption.id;
       const after = await captureGitAfter(before);
       await persistFinalGit(before, after, initialStatus, gitContext, repository, state, nextId, iso(now), now());
@@ -563,17 +578,7 @@ export async function recordRun(
     await lineQueue;
 
     if (childResult.explicitlyInterrupted) {
-      const interruption = appendInternalEvent(repository, state, {
-        runId,
-        receivedAt: iso(now),
-        kind: "recorder.interruption",
-        status: "interrupted",
-        provenance: "recorder",
-        source: { provider: "codex-exec", correlationId: runId },
-        relationships: [],
-        summary: "Explicit interruption",
-        normalizedPayload: { explicitInterruption: true }
-      }, nextId);
+      const interruption = appendInterruption(repository, state, runId, iso(now), nextId);
       interruptionEventId = interruption.id;
     }
 
@@ -595,10 +600,17 @@ export async function recordRun(
 
     const after = await captureGitAfter(before);
     await persistFinalGit(before, after, initialStatus, gitContext, repository, state, nextId, iso(now), now());
+    await dependencies.onFinalGitPersisted?.();
+    if (dependencies.signal?.aborted && interruptionEventId === undefined) {
+      interruptionEventId = appendInterruption(repository, state, runId, iso(now), nextId).id;
+    }
     repository.appendRecoveryForOpenEvents(runId, {
       receivedAt: iso(now),
       eventIdFor: () => nextId()
     });
+    if (dependencies.signal?.aborted && interruptionEventId === undefined) {
+      interruptionEventId = appendInterruption(repository, state, runId, iso(now), nextId).id;
+    }
     const run = repository.reconcileRun(runId, {
       eventId: nextId(),
       receivedAt: iso(now),
@@ -646,6 +658,9 @@ export async function recordRun(
           receivedAt: iso(now),
           eventIdFor: () => nextId()
         });
+      }
+      if (dependencies.signal?.aborted && interruptionEventId === undefined) {
+        interruptionEventId = appendInterruption(repository, state, runId, iso(now), nextId).id;
       }
       const run = repository.reconcileRun(runId, {
         eventId: nextId(),

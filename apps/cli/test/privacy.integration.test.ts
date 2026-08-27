@@ -32,7 +32,9 @@ async function fixture() {
   await git(repo, "config", "user.name", "AgentLens Fixture");
   await writeFile(join(repo, "tracked.txt"), "before\n");
   await writeFile(join(repo, ".env.production"), "DATABASE_PASSWORD=before\n");
-  await git(repo, "add", "tracked.txt", ".env.production");
+  await mkdir(join(repo, "+"));
+  await writeFile(join(repo, "+", ".env"), "PLUS_ENV_BEFORE=redacted\n");
+  await git(repo, "add", "tracked.txt", ".env.production", "+/.env");
   await git(repo, "commit", "-qm", "initial");
   await copyFile(fakeCodex, join(bin, "codex"));
   await chmod(join(bin, "codex"), 0o700);
@@ -69,6 +71,37 @@ afterEach(async () => {
 });
 
 describe("recorder privacy and artifact durability", () => {
+  it("persists a content-free placeholder for an invalid UTF-8 Git index path", async () => {
+    const context = await fixture();
+    const rawName = Buffer.concat([
+      Buffer.from("NONUTF8_PATH_SENTINEL_"),
+      Buffer.from([0xff]),
+      Buffer.from(".txt")
+    ]);
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=invalid-utf8-index"]
+      },
+      { cwd: context.repo, stdin: piped(""), env: context.env, stdout: silentOutput }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const finalStatus = run.gitEvidence?.finalStatus;
+    const finalStatusArtifact = finalStatus?.state === "artifact"
+      ? run.artifacts.find(({ id }) => id === finalStatus.artifactId)
+      : undefined;
+    const durable = await durableBytes(context.dataRoot);
+
+    expect(result.status).toBe("completed");
+    expect(finalStatusArtifact).toBeDefined();
+    expect(await readFile(finalStatusArtifact!.path, "utf8"))
+      .toContain("[[UNREPRESENTABLE_GIT_PATH]]");
+    expect(durable.includes(Buffer.from("NONUTF8_PATH_SENTINEL"))).toBe(false);
+    expect(durable.includes(rawName)).toBe(false);
+  });
+
   it("keeps every metadata-only source sentinel out of the entire closed data root", async () => {
     const context = await fixture();
     const result = await recordRun(
@@ -285,6 +318,7 @@ describe("recorder privacy and artifact durability", () => {
       { cwd: context.repo, stdin: piped(""), env: context.env, stdout: silentOutput }
     );
     const run = detail(context.dataRoot, result.runId);
+    expect(result.status).toBe("completed");
     const diffRef = run.gitEvidence?.trackedFinalDiff;
     expect(diffRef?.state).toBe("artifact");
     if (diffRef?.state !== "artifact") throw new Error("expected tracked final diff artifact");
@@ -302,6 +336,9 @@ describe("recorder privacy and artifact durability", () => {
     )).toBe(false);
     expect((await durableBytes(context.dataRoot)).includes(
       Buffer.from("ARBITRARY_DETAIL_SECRET")
+    )).toBe(false);
+    expect((await durableBytes(context.dataRoot)).includes(
+      Buffer.from("PLUS_ENV_HEADER_SECRET")
     )).toBe(false);
     expect((await durableBytes(context.dataRoot)).includes(
       Buffer.from("SENSITIVE_PATH_SENTINEL")

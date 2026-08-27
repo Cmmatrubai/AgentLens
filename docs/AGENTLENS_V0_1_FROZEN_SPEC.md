@@ -232,7 +232,7 @@ One row per run containing initial/final HEAD, initial/final branch, initial/fin
 
 ## 9. Git evidence
 
-Preflight uses read-only Git commands to capture repository root, initial HEAD, initial branch (nullable for detached HEAD), and initial porcelain-v2 status. Any tracked, staged, or untracked entry refuses recording before child spawn. AgentLens never stashes, resets, checks out, commits, adds, cleans, or otherwise mutates Git state.
+Preflight uses read-only Git commands to capture repository root, initial HEAD, initial branch (nullable for detached HEAD), and initial porcelain-v2 status. Status uses Git's NUL-delimited form and remains byte-oriented in memory so filesystem containment and metadata checks use the exact path bytes. Any tracked, staged, or untracked entry refuses recording before child spawn. AgentLens never stashes, resets, checks out, commits, adds, cleans, or otherwise mutates Git state.
 
 Postflight captures:
 
@@ -243,6 +243,8 @@ Postflight captures:
 - untracked-file metadata (relative path under policy, type, size, and no contents).
 
 If HEAD or branch changes, CLI inspection exposes the initial and final values and an explicit warning. A clean final worktree does not mean no changes: committed changes remain visible relative to initial HEAD.
+
+Durable Git path display is valid UTF-8 only. A path that cannot be represented in the string schema is stored as the content-free `[[UNREPRESENTABLE_GIT_PATH]]` placeholder; its undecodable bytes and any path-bearing tracked-diff block are not persisted. Exact raw path bytes remain memory-only for containment plus `lstat` type/size capture.
 
 Terminology is exact: v0.1 captures **tracked final diff + untracked-file metadata**. It does not capture untracked contents and does not claim an “exact final diff” or forensic attribution. All Git evidence is final repository evidence only.
 

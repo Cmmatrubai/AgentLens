@@ -118,12 +118,40 @@ switch (mode) {
     writeFileSync("fake-untracked.txt", "UNTRACKED_FAKE_CONTENT");
     terminal();
     break;
+  case "invalid-utf8-index": {
+    const rawName = Buffer.concat([
+      Buffer.from("NONUTF8_PATH_SENTINEL_"),
+      Buffer.from([0xff]),
+      Buffer.from(".txt")
+    ]);
+    const initialBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      input: Buffer.from("before\n"),
+      encoding: "utf8"
+    }).trim();
+    execFileSync("git", ["update-index", "-z", "--index-info"], {
+      input: Buffer.concat([Buffer.from(`100644 ${initialBlob}\t`), rawName, Buffer.from([0])])
+    });
+    execFileSync("git", ["commit", "-qm", "raw path fixture"]);
+    const finalBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      input: Buffer.from("after with trailing whitespace   \n"),
+      encoding: "utf8"
+    }).trim();
+    execFileSync("git", ["update-index", "-z", "--index-info"], {
+      input: Buffer.concat([Buffer.from(`100644 ${finalBlob}\t`), rawName, Buffer.from([0])])
+    });
+    execFileSync("git", ["update-index", "--skip-worktree", "-z", "--stdin"], {
+      input: Buffer.concat([rawName, Buffer.from([0])])
+    });
+    terminal();
+    break;
+  }
   case "privacy":
     writeFileSync("tracked.txt", "Bearer STANDARD_TOKEN_SENTINEL\nMETADATA_DIFF_SENTINEL\n");
     writeFileSync(
       ".env.production",
       "ENV_DIFF_ARBITRARY_SENTINEL   \nTOKEN:123: ARBITRARY_DETAIL_SECRET   \n"
     );
+    writeFileSync("+/.env", "PLUS_ENV_HEADER_SECRET   \n");
     writeFileSync(".env.SENSITIVE_PATH_SENTINEL with space", "UNTRACKED_CONTENT_SENTINEL\n");
     emit({
       type: "item.completed",

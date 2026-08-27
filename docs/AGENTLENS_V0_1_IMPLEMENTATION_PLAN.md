@@ -430,7 +430,7 @@ Assert exact child argv equality for ordinary prompts; reject missing delimiter/
 
 - [ ] **Step 2: Write failing Git evidence tests**
 
-Use real disposable repos and a recording fake. Assert dirty status refuses before fake spawn; executed Git subcommands are restricted to read-only allowlist; initial/final HEAD/branch/status persist; a child-created commit with a clean final worktree still produces tracked final diff relative to initial HEAD; branch changes flag; untracked contents are absent while metadata remains; `git diff --check <initial-head> --` result persists.
+Use real disposable repos and a recording fake. Assert dirty status refuses before fake spawn; executed Git subcommands are restricted to the read-only allowlist; NUL-delimited porcelain status preserves exact path bytes in memory; valid UTF-8 rename/untracked paths persist unchanged; undecodable paths persist only a content-free placeholder while exact bytes still drive contained `lstat` type/size capture; initial/final HEAD/branch/status persist; a child-created commit with a clean final worktree still produces tracked final diff relative to initial HEAD; branch changes flag; untracked contents are absent while metadata remains; `git diff --check <initial-head> --` result persists.
 
 - [ ] **Step 3: Write failing recorder lifecycle tests**
 
@@ -451,7 +451,7 @@ Expected: FAIL because the CLI vertical slice does not exist.
 
 - [ ] **Step 7: Implement argument/prompt and Git preflight**
 
-Keep child argv bytes/ordering exact. Buffer every non-TTY stdin stream fully in memory, capture it under policy, and forward the original bytes unchanged. Use Node `spawn` with argument arrays for the child and `execFile` with argument arrays for exact read-only Git commands. Refuse dirty/non-Git before child spawn.
+Keep child argv bytes/ordering exact. Buffer every non-TTY stdin stream fully in memory, capture it under policy, and forward the original bytes unchanged. Use Node `spawn` with argument arrays for the child and `execFile` with argument arrays for exact read-only Git commands. Capture porcelain status as a NUL-delimited byte stream; use exact bytes for path containment and metadata, but persist only valid UTF-8 display or a content-free placeholder. Refuse dirty/non-Git before child spawn.
 
 - [ ] **Step 8: Implement streaming persistence and reconciliation**
 
