@@ -315,6 +315,9 @@ git commit -m "feat: persist append-only AgentLens runs"
 - Modify: `pnpm-lock.yaml`
 - Modify: `tsconfig.json`
 - Modify: `vitest.workspace.ts`
+- Modify: `packages/core/package.json`
+- Modify: `packages/codex/package.json`
+- Modify: `packages/storage/package.json`
 - Create: `packages/codex/package.json`
 - Create: `packages/codex/tsconfig.json`
 - Create: `packages/codex/src/lineDecoder.ts`
@@ -452,7 +455,7 @@ Create run `starting`, print id, spawn child with separate pipes/no PTY, mark `r
 
 - [ ] **Step 9: Implement `runs` and `inspect`**
 
-Set `apps/cli/package.json` to expose `{ "bin": { "agentlens": "dist/main.js" } }`, add the CLI package to the root TypeScript references and lockfile workspace importer, extend the root Vitest workspace pattern from packages to packages plus apps, and add a Node shebang to the compiled entry point. Support text and JSON output with the exact fields/labels in the spec. `--native` refuses non-standard capture and otherwise loads only redacted inline/artifact native content.
+Set `apps/cli/package.json` to expose `{ "bin": { "agentlens": "dist/main.js" } }`, add the CLI package to the root TypeScript references and lockfile workspace importer, extend the root Vitest workspace pattern from packages to packages plus apps, add a Node shebang to the compiled entry point, and give the core/Codex/storage packages conditional root exports whose TypeScript types resolve to source while plain Node resolves compiled `dist/index.js`. Add a plain-Node packaged-binary smoke test; do not depend on runtime `tsx` registration. Support text and JSON output with the exact fields/labels in the spec. `--native` refuses non-standard capture and otherwise loads only redacted inline/artifact native content.
 
 - [ ] **Step 10: Verify GREEN, typecheck, and diff scope**
 
@@ -466,7 +469,7 @@ Use clean disposable repositories and isolated `--data-root` directories for suc
 - [ ] **Step 12: Commit**
 
 ```bash
-git add apps/cli pnpm-lock.yaml tsconfig.json vitest.workspace.ts
+git add apps/cli pnpm-lock.yaml tsconfig.json vitest.workspace.ts packages/core/package.json packages/codex/package.json packages/storage/package.json
 git commit -m "feat: record and inspect Codex trajectories"
 ```
 
