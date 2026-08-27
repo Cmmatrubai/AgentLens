@@ -312,6 +312,8 @@ git commit -m "feat: persist append-only AgentLens runs"
 ### Task 4: Codex JSONL decoder and evidence-preserving adapter
 
 **Files:**
+- Modify: `pnpm-lock.yaml`
+- Modify: `tsconfig.json`
 - Create: `packages/codex/package.json`
 - Create: `packages/codex/tsconfig.json`
 - Create: `packages/codex/src/lineDecoder.ts`
@@ -365,7 +367,7 @@ Expected: FAIL because decoder/adapter modules do not exist.
 
 - [ ] **Step 5: Implement minimal mapping**
 
-Map thread/turn/error and agent message, reasoning, command execution, file change, MCP tool call, web search, and plan item types. Populate native session/thread/turn/item/tool/event/item-type/correlation identifiers when present. Emit one immutable draft per source record; do not synthesize recovery inside the adapter.
+Map thread/turn/error and agent message, reasoning, command execution, file change, MCP tool call, web search, and plan item types. Populate native session/thread/turn/item/tool/event/item-type/correlation identifiers when present. Emit one immutable draft per source record; do not synthesize recovery inside the adapter. Add the Codex package to the root TypeScript project references and update the lockfile workspace importer.
 
 - [ ] **Step 6: Verify GREEN, typecheck, and diff scope**
 
@@ -375,7 +377,7 @@ Expected: PASS for every sanitized fixture plus malformed/future records.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add packages/codex
+git add pnpm-lock.yaml tsconfig.json packages/codex
 git commit -m "feat: normalize Codex JSONL evidence"
 ```
 
