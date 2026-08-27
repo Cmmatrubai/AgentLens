@@ -30,6 +30,35 @@ async function cleanRepository(): Promise<string> {
   return root;
 }
 
+function writeIndexBlob(root: string, path: Buffer, body: string): void {
+  const blob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+    cwd: root,
+    input: Buffer.from(body),
+    encoding: "utf8"
+  }).trim();
+  execFileSync("git", ["update-index", "-z", "--index-info"], {
+    cwd: root,
+    input: Buffer.concat([Buffer.from(`100644 ${blob}\t`), path, Buffer.from([0])])
+  });
+}
+
+function markSkipWorktree(root: string, path: Buffer): void {
+  execFileSync("git", ["update-index", "--skip-worktree", "-z", "--stdin"], {
+    cwd: root,
+    input: Buffer.concat([path, Buffer.from([0])])
+  });
+}
+
+async function captureIndexPathChange(root: string, path: Buffer, finalBody: string) {
+  writeIndexBlob(root, path, "before\n");
+  execFileSync("git", ["commit", "-qm", "path fixture"], { cwd: root });
+  markSkipWorktree(root, path);
+  const before = await captureGitBefore(root);
+  writeIndexBlob(root, path, finalBody);
+  markSkipWorktree(root, path);
+  return captureGitAfter(before);
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -131,49 +160,55 @@ describe("read-only Git evidence", () => {
     const rawName = Buffer.concat([
       Buffer.from("NONUTF8_PATH_SENTINEL_"),
       Buffer.from([0xff]),
-      Buffer.from(".txt")
+      Buffer.from("/.env")
     ]);
-    const initialBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
-      cwd: root,
-      input: Buffer.from("before\n"),
-      encoding: "utf8"
-    }).trim();
-    execFileSync("git", ["update-index", "-z", "--index-info"], {
-      cwd: root,
-      input: Buffer.concat([Buffer.from(`100644 ${initialBlob}\t`), rawName, Buffer.from([0])])
-    });
-    execFileSync("git", ["commit", "-qm", "raw path fixture"], { cwd: root });
-    execFileSync("git", ["update-index", "--skip-worktree", "-z", "--stdin"], {
-      cwd: root,
-      input: Buffer.concat([rawName, Buffer.from([0])])
-    });
-    const before = await captureGitBefore(root);
-    const finalBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
-      cwd: root,
-      input: Buffer.from("after with trailing whitespace   \n"),
-      encoding: "utf8"
-    }).trim();
-    execFileSync("git", ["update-index", "-z", "--index-info"], {
-      cwd: root,
-      input: Buffer.concat([Buffer.from(`100644 ${finalBlob}\t`), rawName, Buffer.from([0])])
-    });
-    execFileSync("git", ["update-index", "--skip-worktree", "-z", "--stdin"], {
-      cwd: root,
-      input: Buffer.concat([rawName, Buffer.from([0])])
-    });
-
-    const after = await captureGitAfter(before);
+    const after = await captureIndexPathChange(root, rawName, "INVALID_DETAIL_SECRET   \n");
 
     expect(after.finalStatus).toContain("[[UNREPRESENTABLE_GIT_PATH]]");
     expect(after.finalStatus).not.toContain("NONUTF8_PATH_SENTINEL");
     expect(after.trackedFinalDiff).toBe("[[EXCLUDED:unrepresentable-git-path]]\n");
     expect(after.diffCheck).toEqual({
       passed: false,
-      output: "[[UNREPRESENTABLE_GIT_PATH]]:1: trailing whitespace.\n+after with trailing whitespace   \n"
+      output: "[[EXCLUDED:unrepresentable-git-path]]\n"
     });
     expect(after.trackedFinalDiff).not.toContain("NONUTF8_PATH_SENTINEL");
     expect(after.diffCheck.output).not.toContain("NONUTF8_PATH_SENTINEL");
+    expect(after.diffCheck.output).not.toContain("INVALID_DETAIL_SECRET");
     expect(after.untrackedMetadata).toEqual([]);
+  });
+
+  it("keeps a valid newline path framing-safe for downstream policy", async () => {
+    const root = await cleanRepository();
+    const after = await captureIndexPathChange(
+      root,
+      Buffer.from(".env/\nfile"),
+      "CONTROL_DETAIL_SECRET   \n"
+    );
+
+    expect(after.diffCheck).toEqual({
+      passed: false,
+      output: '".env/\\nfile":1: trailing whitespace.\n+CONTROL_DETAIL_SECRET   \n'
+    });
+  });
+
+  it("keeps included ordinary and quoted diff-check paths stable", async () => {
+    const ordinaryRoot = await cleanRepository();
+    const ordinaryBefore = await captureGitBefore(ordinaryRoot);
+    await writeFile(join(ordinaryRoot, "tracked.txt"), "ordinary detail   \n", "utf8");
+    const ordinary = await captureGitAfter(ordinaryBefore);
+    const quotedRoot = await cleanRepository();
+    const quoted = await captureIndexPathChange(
+      quotedRoot,
+      Buffer.from("ordinary\nfile.txt"),
+      "quoted detail   \n"
+    );
+
+    expect(ordinary.diffCheck.output).toBe(
+      "tracked.txt:1: trailing whitespace.\n+ordinary detail   \n"
+    );
+    expect(quoted.diffCheck.output).toBe(
+      '"ordinary\\nfile.txt":1: trailing whitespace.\n+quoted detail   \n'
+    );
   });
 
   it("uses exact invalid path bytes for contained lstat while returning safe metadata", async () => {

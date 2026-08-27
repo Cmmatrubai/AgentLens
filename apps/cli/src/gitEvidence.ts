@@ -53,6 +53,11 @@ interface GitStatusCapture {
   readonly untrackedPaths: readonly Buffer[];
 }
 
+interface TrackedDiffCapture {
+  readonly display: string;
+  readonly paths: readonly Buffer[];
+}
+
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
 export const UNREPRESENTABLE_GIT_PATH = "[[UNREPRESENTABLE_GIT_PATH]]";
 
@@ -323,8 +328,8 @@ function diffBlockHasUnrepresentablePath(block: Buffer): boolean {
   );
 }
 
-function safeTrackedDiff(raw: Buffer): string {
-  if (raw.length === 0) return "";
+function safeTrackedDiff(raw: Buffer): TrackedDiffCapture {
+  if (raw.length === 0) return Object.freeze({ display: "", paths: Object.freeze([]) });
   const header = Buffer.from("diff --git ");
   const subsequentHeader = Buffer.from("\ndiff --git ");
   const starts: number[] = [];
@@ -336,40 +341,88 @@ function safeTrackedDiff(raw: Buffer): string {
     starts.push(found + 1);
     searchFrom = found + subsequentHeader.length;
   }
-  if (starts.length === 0) return raw.toString("utf8");
+  if (starts.length === 0) {
+    return Object.freeze({ display: raw.toString("utf8"), paths: Object.freeze([]) });
+  }
 
   const output: string[] = [];
+  const paths: Buffer[] = [];
   if (starts[0]! > 0) output.push(raw.subarray(0, starts[0]).toString("utf8"));
   for (let index = 0; index < starts.length; index += 1) {
     const start = starts[index]!;
     const end = starts[index + 1] ?? raw.length;
     const block = raw.subarray(start, end);
+    const newline = block.indexOf(0x0a);
+    const header = newline < 0 ? block : block.subarray(0, newline);
+    paths.push(...diffHeaderTokens(header).map(pathBytesFromDiffToken));
     output.push(diffBlockHasUnrepresentablePath(block)
       ? "[[EXCLUDED:unrepresentable-git-path]]\n"
       : block.toString("utf8"));
   }
-  return output.join("");
+  return Object.freeze({ display: output.join(""), paths: Object.freeze(paths) });
 }
 
-function safeDiffCheckOutput(raw: Buffer): string {
+function quotedTokenEnd(raw: Buffer, start: number): number | undefined {
+  if (raw[start] !== 0x22) return undefined;
+  for (let index = start + 1; index < raw.length; index += 1) {
+    if (raw[index] === 0x5c) {
+      index += 1;
+      continue;
+    }
+    if (raw[index] === 0x22) return index + 1;
+  }
+  return undefined;
+}
+
+function matchingDiffCheckPath(
+  raw: Buffer,
+  start: number,
+  paths: readonly Buffer[]
+): Readonly<{ path: Buffer; encodedEnd: number }> | undefined {
+  for (const path of [...paths].sort((left, right) => right.length - left.length)) {
+    const end = start + path.length;
+    if (raw.subarray(start, end).equals(path) && raw[end] === 0x3a) {
+      return Object.freeze({ path, encodedEnd: end });
+    }
+  }
+  const quotedEnd = quotedTokenEnd(raw, start);
+  if (quotedEnd === undefined || raw[quotedEnd] !== 0x3a) return undefined;
+  const decoded = decodeQuotedGitPathToken(raw.subarray(start, quotedEnd));
+  const path = paths.find((candidate) => candidate.equals(decoded));
+  return path === undefined ? undefined : Object.freeze({ path, encodedEnd: quotedEnd });
+}
+
+function safeDiffCheckOutput(raw: Buffer, paths: readonly Buffer[]): string {
   const output: string[] = [];
   let start = 0;
   while (start < raw.length) {
+    const matched = matchingDiffCheckPath(raw, start, paths);
+    if (matched !== undefined) {
+      const headerEnd = raw.indexOf(0x0a, matched.encodedEnd);
+      const suffixEnd = headerEnd < 0 ? raw.length : headerEnd;
+      const suffix = raw.subarray(matched.encodedEnd, suffixEnd).toString("utf8");
+      if (/^:\d+:\s.*$/u.test(suffix)) {
+        const detailStart = headerEnd < 0 ? raw.length : headerEnd + 1;
+        const detailEnd = raw.indexOf(0x0a, detailStart);
+        const detailLimit = detailEnd < 0 ? raw.length : detailEnd;
+        const hasDetail = raw[detailStart] === 0x2b;
+        if (displayGitPath(matched.path) === UNREPRESENTABLE_GIT_PATH) {
+          output.push("[[EXCLUDED:unrepresentable-git-path]]\n");
+        } else {
+          output.push(`${statusDisplayPath(matched.path)}${suffix}`);
+          if (headerEnd >= 0) output.push("\n");
+          if (hasDetail) {
+            output.push(raw.subarray(detailStart, detailLimit).toString("utf8"));
+            if (detailEnd >= 0) output.push("\n");
+          }
+        }
+        start = hasDetail ? (detailEnd < 0 ? raw.length : detailEnd + 1) : detailStart;
+        continue;
+      }
+    }
     const newline = raw.indexOf(0x0a, start);
     const end = newline < 0 ? raw.length : newline;
-    const line = raw.subarray(start, end);
-    const binary = line.toString("latin1");
-    const header = /^(.*):(\d+:\s.*)$/.exec(binary);
-    if (header?.[1] && header[2]) {
-      const encodedPath = Buffer.from(header[1], "latin1");
-      const path = encodedPath[0] === 0x22
-        ? decodeQuotedGitPathToken(encodedPath)
-        : encodedPath;
-      const display = displayGitPath(path);
-      output.push(`${display}:${header[2]}`);
-    } else {
-      output.push(line.toString("utf8"));
-    }
+    output.push(raw.subarray(start, end).toString("utf8"));
     if (newline < 0) break;
     output.push("\n");
     start = newline + 1;
@@ -494,13 +547,14 @@ export async function captureGitAfter(
     [0, 2]
   );
   const diffCheckOutput = safeDiffCheckOutput(
-    Buffer.concat([diffCheckResult.stdout, diffCheckResult.stderr])
+    Buffer.concat([diffCheckResult.stdout, diffCheckResult.stderr]),
+    trackedFinalDiff.paths
   );
   return Object.freeze({
     finalHead,
     finalBranch,
     finalStatus: finalStatus.display,
-    trackedFinalDiff,
+    trackedFinalDiff: trackedFinalDiff.display,
     diffCheck: Object.freeze({ passed: diffCheckResult.exitCode === 0, output: diffCheckOutput }),
     untrackedMetadata: Object.freeze(
       await untrackedMetadataForPathBytes(before.repositoryRoot, finalStatus.untrackedPaths)

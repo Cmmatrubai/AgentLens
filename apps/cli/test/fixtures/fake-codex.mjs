@@ -119,28 +119,41 @@ switch (mode) {
     terminal();
     break;
   case "invalid-utf8-index": {
-    const rawName = Buffer.concat([
+    const invalidRawName = Buffer.concat([
       Buffer.from("NONUTF8_PATH_SENTINEL_"),
       Buffer.from([0xff]),
-      Buffer.from(".txt")
+      Buffer.from("/.env")
     ]);
+    const controlRawName = Buffer.from(".env/\nfile");
     const initialBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
       input: Buffer.from("before\n"),
       encoding: "utf8"
     }).trim();
     execFileSync("git", ["update-index", "-z", "--index-info"], {
-      input: Buffer.concat([Buffer.from(`100644 ${initialBlob}\t`), rawName, Buffer.from([0])])
+      input: Buffer.concat([
+        Buffer.from(`100644 ${initialBlob}\t`), invalidRawName, Buffer.from([0]),
+        Buffer.from(`100644 ${initialBlob}\t`), controlRawName, Buffer.from([0])
+      ])
     });
     execFileSync("git", ["commit", "-qm", "raw path fixture"]);
-    const finalBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
-      input: Buffer.from("after with trailing whitespace   \n"),
+    const invalidFinalBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      input: Buffer.from("INVALID_DETAIL_SECRET   \n"),
+      encoding: "utf8"
+    }).trim();
+    const controlFinalBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+      input: Buffer.from("CONTROL_DETAIL_SECRET   \n"),
       encoding: "utf8"
     }).trim();
     execFileSync("git", ["update-index", "-z", "--index-info"], {
-      input: Buffer.concat([Buffer.from(`100644 ${finalBlob}\t`), rawName, Buffer.from([0])])
+      input: Buffer.concat([
+        Buffer.from(`100644 ${invalidFinalBlob}\t`), invalidRawName, Buffer.from([0]),
+        Buffer.from(`100644 ${controlFinalBlob}\t`), controlRawName, Buffer.from([0])
+      ])
     });
     execFileSync("git", ["update-index", "--skip-worktree", "-z", "--stdin"], {
-      input: Buffer.concat([rawName, Buffer.from([0])])
+      input: Buffer.concat([
+        invalidRawName, Buffer.from([0]), controlRawName, Buffer.from([0])
+      ])
     });
     terminal();
     break;

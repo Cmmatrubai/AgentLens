@@ -76,8 +76,9 @@ describe("recorder privacy and artifact durability", () => {
     const rawName = Buffer.concat([
       Buffer.from("NONUTF8_PATH_SENTINEL_"),
       Buffer.from([0xff]),
-      Buffer.from(".txt")
+      Buffer.from("/.env")
     ]);
+    const controlName = Buffer.from(".env/\nfile");
     const result = await recordRun(
       {
         name: "record",
@@ -92,14 +93,26 @@ describe("recorder privacy and artifact durability", () => {
     const finalStatusArtifact = finalStatus?.state === "artifact"
       ? run.artifacts.find(({ id }) => id === finalStatus.artifactId)
       : undefined;
+    const diffCheck = run.gitEvidence?.diffCheck;
+    const diffCheckArtifact = diffCheck?.state === "artifact"
+      ? run.artifacts.find(({ id }) => id === diffCheck.artifactId)
+      : undefined;
     const durable = await durableBytes(context.dataRoot);
 
     expect(result.status).toBe("completed");
     expect(finalStatusArtifact).toBeDefined();
+    expect(diffCheckArtifact).toBeDefined();
     expect(await readFile(finalStatusArtifact!.path, "utf8"))
       .toContain("[[UNREPRESENTABLE_GIT_PATH]]");
+    const diffCheckBody = await readFile(diffCheckArtifact!.path, "utf8");
+    expect(diffCheckBody).toContain("[[EXCLUDED:unrepresentable-git-path]]");
+    expect(diffCheckBody).toContain("[[EXCLUDED:sensitive-path.env]]");
+    expect(diffCheckBody).not.toContain(".env/\\nfile");
     expect(durable.includes(Buffer.from("NONUTF8_PATH_SENTINEL"))).toBe(false);
     expect(durable.includes(rawName)).toBe(false);
+    expect(durable.includes(controlName)).toBe(false);
+    expect(durable.includes(Buffer.from("INVALID_DETAIL_SECRET"))).toBe(false);
+    expect(durable.includes(Buffer.from("CONTROL_DETAIL_SECRET"))).toBe(false);
   });
 
   it("keeps every metadata-only source sentinel out of the entire closed data root", async () => {
