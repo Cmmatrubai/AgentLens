@@ -1,0 +1,9 @@
+{
+  "name": "@agentlens/codex",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@agentlens/core": "workspace:*"
+  }
+}
