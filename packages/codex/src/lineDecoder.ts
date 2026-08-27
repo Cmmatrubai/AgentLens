@@ -7,21 +7,33 @@ export type CodexDecodedLine =
   | Readonly<{ type: "provider_record"; record: CodexRecord }>
   | Readonly<{ type: "diagnostic"; draft: EventDraftV1 }>;
 
-export function freezeDeep<T>(value: T, seen = new WeakSet<object>()): T {
+export function freezeDeep<T>(value: T): T {
   if (value === null || typeof value !== "object") return value;
-  if (seen.has(value)) return value;
 
-  seen.add(value);
-  for (const key of Reflect.ownKeys(value)) {
-    freezeDeep(Reflect.get(value, key), seen);
+  const seen = new WeakSet<object>();
+  const pending: object[] = [value];
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || seen.has(current)) continue;
+
+    seen.add(current);
+    for (const key of Reflect.ownKeys(current)) {
+      const child = Reflect.get(current, key);
+      if (child !== null && typeof child === "object" && !seen.has(child)) {
+        pending.push(child);
+      }
+    }
+    Object.freeze(current);
   }
-  return Object.freeze(value);
+
+  return value;
 }
 
 function diagnostic(
   line: string,
   stream: CodexStream,
-  reason: "stderr" | "malformed_json" | "non_object_json"
+  reason: "stderr" | "malformed_json" | "non_object_json" | "freeze_failed"
 ): CodexDecodedLine {
   const draft: EventDraftV1 = {
     kind: "recorder.stream_diagnostic",
@@ -55,8 +67,12 @@ export function decodeCodexLine(line: string, stream: CodexStream): CodexDecoded
     return diagnostic(line, stream, "non_object_json");
   }
 
-  return freezeDeep({
-    type: "provider_record" as const,
-    record: parsed as CodexRecord
-  });
+  try {
+    return freezeDeep({
+      type: "provider_record" as const,
+      record: parsed as CodexRecord
+    });
+  } catch {
+    return diagnostic(line, stream, "freeze_failed");
+  }
 }

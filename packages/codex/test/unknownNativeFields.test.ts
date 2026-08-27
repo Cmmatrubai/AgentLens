@@ -22,6 +22,7 @@ describe("Codex evidence-preserving normalization", () => {
       provenance: "observed",
       source: { provider: "codex-exec", eventType: "future.event" },
       relationships: [],
+      normalizedPayload: { eventType: "future.event" },
       nativePayload: { type: "future.event", future: { nested: 7 } }
     });
     expect(Object.isFrozen(drafts)).toBe(true);
@@ -32,38 +33,181 @@ describe("Codex evidence-preserving normalization", () => {
   });
 
   it.each([
-    ["agent_message", "message.agent"],
-    ["reasoning", "reasoning.summary"],
-    ["command_execution", "command"],
-    ["file_change", "file.change"],
-    ["mcp_tool_call", "tool"],
-    ["web_search", "tool"],
-    ["todo_list", "plan.updated"],
-    ["plan", "plan.updated"],
-    ["plan_item", "plan.updated"]
-  ])("maps planned item type %s to %s", (itemType, kind) => {
+    {
+      name: "agent message text",
+      item: {
+        id: "fixture-agent-message",
+        type: "agent_message",
+        text: "fixture agent text"
+      },
+      kind: "message.agent",
+      payload: {
+        eventType: "item.completed",
+        itemType: "agent_message",
+        text: "fixture agent text"
+      }
+    },
+    {
+      name: "exposed reasoning summary",
+      item: {
+        id: "fixture-reasoning",
+        type: "reasoning",
+        text: "fixture exposed reasoning summary"
+      },
+      kind: "reasoning.summary",
+      payload: {
+        eventType: "item.completed",
+        itemType: "reasoning",
+        text: "fixture exposed reasoning summary"
+      }
+    },
+    {
+      name: "failed command fields",
+      item: {
+        id: "fixture-command",
+        type: "command_execution",
+        command: "fixture_command",
+        aggregated_output: "fixture command output",
+        exit_code: 7,
+        status: "failed"
+      },
+      kind: "command",
+      payload: {
+        eventType: "item.completed",
+        itemType: "command_execution",
+        command: "fixture_command",
+        aggregatedOutput: "fixture command output",
+        exitCode: 7,
+        status: "failed"
+      }
+    },
+    {
+      name: "file changes",
+      item: {
+        id: "fixture-file-change",
+        type: "file_change",
+        changes: [{ path: "fixture/source.ts", kind: "modify" }],
+        status: "completed"
+      },
+      kind: "file.change",
+      payload: {
+        eventType: "item.completed",
+        itemType: "file_change",
+        changes: [{ path: "fixture/source.ts", kind: "modify" }],
+        status: "completed"
+      }
+    },
+    {
+      name: "successful MCP fields",
+      item: {
+        id: "fixture-mcp-success",
+        type: "mcp_tool_call",
+        server: "fixture-server",
+        tool: "fixture-tool",
+        arguments: { input: "fixture-input" },
+        result: { output: "fixture-output" },
+        status: "completed"
+      },
+      kind: "tool",
+      payload: {
+        eventType: "item.completed",
+        itemType: "mcp_tool_call",
+        server: "fixture-server",
+        tool: "fixture-tool",
+        arguments: { input: "fixture-input" },
+        result: { output: "fixture-output" },
+        status: "completed"
+      }
+    },
+    {
+      name: "failed MCP error",
+      item: {
+        id: "fixture-mcp-error",
+        type: "mcp_tool_call",
+        server: "fixture-server",
+        tool: "fixture-tool",
+        arguments: { input: "fixture-input" },
+        error: { message: "fixture error" },
+        status: "failed"
+      },
+      kind: "tool",
+      payload: {
+        eventType: "item.completed",
+        itemType: "mcp_tool_call",
+        server: "fixture-server",
+        tool: "fixture-tool",
+        arguments: { input: "fixture-input" },
+        error: { message: "fixture error" },
+        status: "failed"
+      }
+    },
+    {
+      name: "web query",
+      item: {
+        id: "fixture-web-search",
+        type: "web_search",
+        query: "fixture query",
+        status: "completed"
+      },
+      kind: "tool",
+      payload: {
+        eventType: "item.completed",
+        itemType: "web_search",
+        query: "fixture query",
+        status: "completed"
+      }
+    },
+    {
+      name: "plan items and text",
+      item: {
+        id: "fixture-todo-list",
+        type: "todo_list",
+        items: [{ text: "fixture plan item", completed: false }],
+        text: "fixture plan text",
+        status: "completed"
+      },
+      kind: "plan.updated",
+      payload: {
+        eventType: "item.completed",
+        itemType: "todo_list",
+        items: [{ text: "fixture plan item", completed: false }],
+        text: "fixture plan text",
+        status: "completed"
+      }
+    }
+  ])("maps $name without dropping fields", ({ item, kind, payload }) => {
     const [draft] = normalizeCodexRecord({
       type: "item.completed",
-      item: {
-        id: `fixture-${itemType}`,
-        type: itemType,
-        status: "completed",
-        text: "fixture content",
-        items: [{ text: "fixture plan item", completed: false }]
-      }
+      item
     });
 
     expect(draft).toMatchObject({
       kind,
-      status: "completed",
       provenance: "observed",
       source: {
         provider: "codex-exec",
         eventType: "item.completed",
-        itemId: `fixture-${itemType}`,
-        itemType
-      }
+        itemId: item.id,
+        itemType: item.type
+      },
+      normalizedPayload: payload
     });
+  });
+
+  it.each([
+    [{}, { classification: "unknown" }],
+    [{ type: "future.event" }, { eventType: "future.event" }],
+    [{ type: "thread.started" }, { eventType: "thread.started" }],
+    [{ type: "turn.started" }, { eventType: "turn.started" }],
+    [{ type: "error" }, { eventType: "error" }],
+    [
+      { type: "item.completed", item: { type: "agent_message" } },
+      { eventType: "item.completed", itemType: "agent_message" }
+    ]
+  ])("always includes structural normalized payload for %#", (record, payload) => {
+    const [draft] = normalizeCodexRecord(record);
+
+    expect(draft?.normalizedPayload).toEqual(payload);
   });
 
   it.each([
@@ -151,6 +295,8 @@ describe("Codex evidence-preserving normalization", () => {
     });
 
     expect(draft?.normalizedPayload).toEqual({
+      eventType: "item.started",
+      itemType: "command_execution",
       command: "fixture_command",
       status: "in_progress"
     });

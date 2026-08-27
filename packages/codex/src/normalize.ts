@@ -116,8 +116,20 @@ function copyPresent(
   }
 }
 
-function itemPayload(itemType: string, item: JsonObject): JsonObject {
+function structuralPayload(record: JsonObject, item: JsonObject | undefined): JsonObject {
   const payload: JsonObject = {};
+  const eventType = presentString([record], ["type"]);
+  const itemType = presentString([item], ["type"]);
+
+  if (eventType) payload.eventType = eventType;
+  if (itemType) payload.itemType = itemType;
+  if (!eventType && !itemType) payload.classification = "unknown";
+
+  return payload;
+}
+
+function itemPayload(record: JsonObject, itemType: string, item: JsonObject): JsonObject {
+  const payload = structuralPayload(record, item);
 
   switch (itemType) {
     case "agent_message":
@@ -189,16 +201,19 @@ function unknownDraft(record: JsonObject, item: JsonObject | undefined): EventDr
     source: buildSource(record, item),
     relationships: [],
     summary: "Unknown Codex source record",
+    normalizedPayload: structuralPayload(record, item),
     nativePayload: record
   };
 }
 
 function eventDraft(record: JsonObject, eventType: string): EventDraftV1 | undefined {
   const source = buildSource(record, undefined);
+  const payload = structuralPayload(record, undefined);
   const base = {
     provenance: "observed" as const,
     source,
     relationships: [],
+    normalizedPayload: payload,
     nativePayload: record
   };
 
@@ -218,42 +233,35 @@ function eventDraft(record: JsonObject, eventType: string): EventDraftV1 | undef
         summary: "Codex turn started"
       };
     case "turn.completed": {
-      const draft: EventDraftV1 = {
+      if (Object.prototype.hasOwnProperty.call(record, "usage")) {
+        payload.usage = record.usage;
+      }
+      return {
         ...base,
         kind: "turn.completed",
         status: "completed",
         summary: "Codex turn completed"
       };
-      if (Object.prototype.hasOwnProperty.call(record, "usage")) {
-        draft.normalizedPayload = { usage: record.usage };
-      }
-      return draft;
     }
     case "turn.failed": {
-      const draft: EventDraftV1 = {
+      copyPresent(payload, record, "message", "message");
+      copyPresent(payload, record, "error", "error");
+      return {
         ...base,
         kind: "turn.failed",
         status: "failed",
         summary: "Codex turn failed"
       };
-      const payload: JsonObject = {};
-      copyPresent(payload, record, "message", "message");
-      copyPresent(payload, record, "error", "error");
-      if (Object.keys(payload).length > 0) draft.normalizedPayload = payload;
-      return draft;
     }
     case "error": {
-      const draft: EventDraftV1 = {
+      copyPresent(payload, record, "message", "message");
+      copyPresent(payload, record, "error", "error");
+      return {
         ...base,
         kind: "error",
         status: "failed",
         summary: "Codex provider error"
       };
-      const payload: JsonObject = {};
-      copyPresent(payload, record, "message", "message");
-      copyPresent(payload, record, "error", "error");
-      if (Object.keys(payload).length > 0) draft.normalizedPayload = payload;
-      return draft;
     }
     default:
       return undefined;
@@ -276,7 +284,7 @@ export function normalizeCodexRecord(record: CodexRecord): EventDraftV1[] {
     if (!itemType || !kind) {
       draft = unknownDraft(nativeRecord, item);
     } else {
-      const payload = itemPayload(itemType, item);
+      const payload = itemPayload(nativeRecord, itemType, item);
       draft = {
         kind,
         status: statusFromItem(eventType, item),
@@ -284,9 +292,9 @@ export function normalizeCodexRecord(record: CodexRecord): EventDraftV1[] {
         source: buildSource(nativeRecord, item),
         relationships: [],
         summary: itemSummary(itemType),
+        normalizedPayload: payload,
         nativePayload: nativeRecord
       };
-      if (Object.keys(payload).length > 0) draft.normalizedPayload = payload;
     }
   } else if (eventType) {
     draft = eventDraft(nativeRecord, eventType) ?? unknownDraft(nativeRecord, item);

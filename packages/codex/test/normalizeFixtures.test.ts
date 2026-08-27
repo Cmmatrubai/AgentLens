@@ -46,6 +46,7 @@ describe("Codex sanitized lifecycle fixtures", () => {
       status: "completed",
       source: { eventType: "turn.completed" },
       normalizedPayload: {
+        eventType: "turn.completed",
         usage: {
           input_tokens: 101,
           cached_input_tokens: 11,
@@ -60,8 +61,17 @@ describe("Codex sanitized lifecycle fixtures", () => {
   it("keeps file-change starts and completions separate", async () => {
     const drafts = await normalizeFixture("edit-success.jsonl");
 
-    expect(drafts.filter((draft) => draft.kind === "file.change").map((draft) => draft.status))
-      .toEqual(["in_progress", "completed"]);
+    const changes = drafts.filter((draft) => draft.kind === "file.change");
+    expect(changes.map((draft) => draft.status)).toEqual(["in_progress", "completed"]);
+    expect(changes[1]?.normalizedPayload).toEqual({
+      eventType: "item.completed",
+      itemType: "file_change",
+      changes: [
+        { path: "fixture/source-a.ts", kind: "modify" },
+        { path: "fixture/source-b.ts", kind: "add" }
+      ],
+      status: "completed"
+    });
   });
 
   it("preserves failed command then later recovery activity as separate events", async () => {
@@ -89,6 +99,15 @@ describe("Codex sanitized lifecycle fixtures", () => {
         "fixture-item-recovery-command-004",
         "fixture-item-recovery-command-004"
       ]);
+    expect(drafts.filter((event) => event.kind === "command")[1]?.normalizedPayload)
+      .toEqual({
+        eventType: "item.completed",
+        itemType: "command_execution",
+        command: "fixture_command_fails",
+        aggregatedOutput: "fixture failed output",
+        exitCode: 1,
+        status: "failed"
+      });
   });
 
   it("leaves the interrupted command as observed in_progress", async () => {

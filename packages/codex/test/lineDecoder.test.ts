@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { decodeCodexLine } from "../src/lineDecoder.js";
+import { normalizeCodexRecord } from "../src/normalize.js";
 
 function expectDiagnostic(
   line: string,
@@ -65,6 +66,60 @@ describe("Codex JSONL line decoder", () => {
     expect(decoded.type).toBe("diagnostic");
     if (decoded.type === "diagnostic") {
       expect(decoded.draft.source.eventType).toBeUndefined();
+    }
+  });
+
+  it("decodes and normalizes deeply nested valid JSON without truncation or stack overflow", () => {
+    const depth = 20_000;
+    const line =
+      '{"type":"future.event","future":' +
+      '{"next":'.repeat(depth) +
+      '{"leaf":7}' +
+      "}".repeat(depth) +
+      "}";
+
+    const decoded = decodeCodexLine(line, "stdout");
+
+    expect(decoded.type).toBe("provider_record");
+    if (decoded.type !== "provider_record") return;
+
+    const [draft] = normalizeCodexRecord(decoded.record);
+    expect(draft).toMatchObject({
+      kind: "source.unknown",
+      normalizedPayload: { eventType: "future.event" }
+    });
+
+    let cursor = (draft?.nativePayload as { future: unknown }).future;
+    for (let index = 0; index < depth; index += 1) {
+      cursor = (cursor as { next: unknown }).next;
+    }
+    expect(cursor).toEqual({ leaf: 7 });
+    expect(Object.isFrozen(cursor)).toBe(true);
+  });
+
+  it("converts an unexpected provider freeze failure into a recorder diagnostic", () => {
+    const originalFreeze = Object.freeze;
+    let shouldFail = true;
+    const freezeSpy = vi.spyOn(Object, "freeze").mockImplementation(
+      ((value: object) => {
+        if (shouldFail) {
+          shouldFail = false;
+          throw new Error("fixture freeze failure");
+        }
+        return originalFreeze(value);
+      }) as typeof Object.freeze
+    );
+
+    try {
+      expect(decodeCodexLine('{"type":"future.event"}', "stdout")).toMatchObject({
+        type: "diagnostic",
+        draft: {
+          kind: "recorder.stream_diagnostic",
+          normalizedPayload: { stream: "stdout", reason: "freeze_failed" }
+        }
+      });
+    } finally {
+      freezeSpy.mockRestore();
     }
   });
 });
