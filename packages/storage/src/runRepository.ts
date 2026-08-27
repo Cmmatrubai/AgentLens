@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { basename, isAbsolute } from "node:path";
+import { constants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import {
   traceEventV1Schema,
   type CapturePolicy,
@@ -10,9 +11,29 @@ import {
   type RunStatus,
   type TraceEventV1
 } from "@agentlens/core";
+import type Database from "better-sqlite3";
 import type { AgentLensDatabase } from "./database.js";
+import { connectionFor } from "./databaseInternal.js";
 
 type ProviderTerminalKind = "completed" | "failed";
+export type EvidenceOmissionReason = "metadata-only" | "strict";
+type StoredEvidenceOmissionReason = EvidenceOmissionReason | "legacy-unspecified";
+
+export type RequiredGitEvidenceRef =
+  | Readonly<{ state: "artifact"; artifactId: string }>
+  | Readonly<{ state: "omitted"; reason: EvidenceOmissionReason }>;
+
+export type OptionalGitEvidenceRef =
+  | RequiredGitEvidenceRef
+  | Readonly<{ state: "absent" }>;
+
+export type StoredRequiredGitEvidenceRef =
+  | Readonly<{ state: "artifact"; artifactId: string }>
+  | Readonly<{ state: "omitted"; reason: StoredEvidenceOmissionReason }>;
+
+export type StoredOptionalGitEvidenceRef =
+  | StoredRequiredGitEvidenceRef
+  | Readonly<{ state: "absent" }>;
 
 export interface CreateRunInput {
   id: string;
@@ -35,8 +56,6 @@ export interface MarkRunningInput {
 }
 
 export interface ProcessFactInput {
-  exitCode: number | null;
-  terminatingSignal: string | null;
   eventId: string;
 }
 
@@ -44,10 +63,9 @@ export interface ReconciliationInput {
   eventId: string;
   receivedAt: string;
   endedAt: number;
-  providerTerminalKind: ProviderTerminalKind | null;
   providerTerminalEventId?: string;
   recorderFailureEventId?: string;
-  explicitInterruption: boolean;
+  interruptionEventId?: string;
 }
 
 export interface RecoveryContext {
@@ -60,12 +78,12 @@ export interface GitEvidenceInput {
   finalHead: string;
   initialBranch: string | null;
   finalBranch: string | null;
-  initialStatusArtifactId: string | null;
-  finalStatusArtifactId: string | null;
-  trackedFinalDiffArtifactId: string | null;
-  diffCheckArtifactId: string | null;
+  initialStatus: RequiredGitEvidenceRef;
+  finalStatus: RequiredGitEvidenceRef;
+  trackedFinalDiff: OptionalGitEvidenceRef;
+  diffCheck: RequiredGitEvidenceRef;
   diffCheckPassed: boolean;
-  untrackedMetadataArtifactId: string | null;
+  untrackedMetadata: OptionalGitEvidenceRef;
   headChanged: boolean;
   branchChanged: boolean;
   capturedAt: number;
@@ -96,8 +114,25 @@ export interface StoredRedactionAudit extends RedactionAudit {
   artifactId: string | null;
 }
 
-export interface StoredGitEvidence extends GitEvidenceInput {
+export interface StoredGitEvidence {
   runId: string;
+  initialHead: string;
+  finalHead: string;
+  initialBranch: string | null;
+  finalBranch: string | null;
+  initialStatus: StoredRequiredGitEvidenceRef;
+  finalStatus: StoredRequiredGitEvidenceRef;
+  trackedFinalDiff: StoredOptionalGitEvidenceRef;
+  diffCheck: StoredRequiredGitEvidenceRef;
+  diffCheckPassed: boolean;
+  untrackedMetadata: StoredOptionalGitEvidenceRef;
+  headChanged: boolean;
+  branchChanged: boolean;
+  capturedAt: number;
+}
+
+export interface RunRepositoryOptions {
+  artifactRoot: string;
 }
 
 export interface RunDetail {
@@ -168,6 +203,7 @@ interface RunListRow extends RunRow {
 }
 
 interface RelationshipRow {
+  event_id: string;
   relationship_type: TraceEventV1["relationships"][number]["type"];
   related_event_id: string;
 }
@@ -199,12 +235,22 @@ interface GitEvidenceRow {
   final_head: string;
   initial_branch: string | null;
   final_branch: string | null;
+  initial_status_state: "artifact" | "omitted";
   initial_status_artifact_id: string | null;
+  initial_status_omission_reason: StoredEvidenceOmissionReason | null;
+  final_status_state: "artifact" | "omitted";
   final_status_artifact_id: string | null;
+  final_status_omission_reason: StoredEvidenceOmissionReason | null;
+  tracked_final_diff_state: "artifact" | "omitted" | "absent";
   tracked_final_diff_artifact_id: string | null;
+  tracked_final_diff_omission_reason: StoredEvidenceOmissionReason | null;
+  diff_check_state: "artifact" | "omitted";
   diff_check_artifact_id: string | null;
+  diff_check_omission_reason: StoredEvidenceOmissionReason | null;
   diff_check_passed: number;
+  untracked_metadata_state: "artifact" | "omitted" | "absent";
   untracked_metadata_artifact_id: string | null;
+  untracked_metadata_omission_reason: StoredEvidenceOmissionReason | null;
   head_changed: number;
   branch_changed: number;
   captured_at: number;
@@ -299,16 +345,88 @@ function gitEvidenceFromRow(row: GitEvidenceRow): StoredGitEvidence {
     finalHead: row.final_head,
     initialBranch: row.initial_branch,
     finalBranch: row.final_branch,
-    initialStatusArtifactId: row.initial_status_artifact_id,
-    finalStatusArtifactId: row.final_status_artifact_id,
-    trackedFinalDiffArtifactId: row.tracked_final_diff_artifact_id,
-    diffCheckArtifactId: row.diff_check_artifact_id,
+    initialStatus: storedRequiredEvidence(
+      row.initial_status_state,
+      row.initial_status_artifact_id,
+      row.initial_status_omission_reason
+    ),
+    finalStatus: storedRequiredEvidence(
+      row.final_status_state,
+      row.final_status_artifact_id,
+      row.final_status_omission_reason
+    ),
+    trackedFinalDiff: storedOptionalEvidence(
+      row.tracked_final_diff_state,
+      row.tracked_final_diff_artifact_id,
+      row.tracked_final_diff_omission_reason
+    ),
+    diffCheck: storedRequiredEvidence(
+      row.diff_check_state,
+      row.diff_check_artifact_id,
+      row.diff_check_omission_reason
+    ),
     diffCheckPassed: row.diff_check_passed === 1,
-    untrackedMetadataArtifactId: row.untracked_metadata_artifact_id,
+    untrackedMetadata: storedOptionalEvidence(
+      row.untracked_metadata_state,
+      row.untracked_metadata_artifact_id,
+      row.untracked_metadata_omission_reason
+    ),
     headChanged: row.head_changed === 1,
     branchChanged: row.branch_changed === 1,
     capturedAt: row.captured_at
   };
+}
+
+function storedRequiredEvidence(
+  state: "artifact" | "omitted",
+  artifactId: string | null,
+  reason: StoredEvidenceOmissionReason | null
+): StoredRequiredGitEvidenceRef {
+  if (state === "artifact" && artifactId) return Object.freeze({ state, artifactId });
+  if (state === "omitted" && reason) return Object.freeze({ state, reason });
+  throw new Error("Stored required Git evidence is inconsistent.");
+}
+
+function storedOptionalEvidence(
+  state: "artifact" | "omitted" | "absent",
+  artifactId: string | null,
+  reason: StoredEvidenceOmissionReason | null
+): StoredOptionalGitEvidenceRef {
+  if (state === "absent") return Object.freeze({ state });
+  return storedRequiredEvidence(state, artifactId, reason);
+}
+
+function validateRequiredEvidence(
+  value: unknown,
+  field: string
+): asserts value is RequiredGitEvidenceRef {
+  if (typeof value !== "object" || value === null || !("state" in value)) {
+    throw new Error(`${field} requires an explicit artifact or omitted evidence state.`);
+  }
+  const candidate = value as { state?: unknown; artifactId?: unknown; reason?: unknown };
+  if (candidate.state === "artifact" && typeof candidate.artifactId === "string" && candidate.artifactId.length > 0) {
+    return;
+  }
+  if (
+    candidate.state === "omitted" &&
+    (candidate.reason === "metadata-only" || candidate.reason === "strict")
+  ) return;
+  throw new Error(`${field} has an invalid artifact or omitted evidence state.`);
+}
+
+function validateOptionalEvidence(
+  value: unknown,
+  field: string
+): asserts value is OptionalGitEvidenceRef {
+  if (typeof value === "object" && value !== null && "state" in value &&
+      (value as { state?: unknown }).state === "absent") return;
+  validateRequiredEvidence(value, field);
+}
+
+function evidenceColumns(value: RequiredGitEvidenceRef | OptionalGitEvidenceRef): [string, string | null, string | null] {
+  if (value.state === "artifact") return [value.state, value.artifactId, null];
+  if (value.state === "omitted") return [value.state, null, value.reason];
+  return [value.state, null, null];
 }
 
 function reconcileFacts(
@@ -372,28 +490,133 @@ function reconcileFacts(
 
 function sameNativeIdentity(started: TraceEventV1, candidate: TraceEventV1): boolean {
   if (started.source.provider !== candidate.source.provider) return false;
-  const identityKeys: readonly (keyof NativeSourceV1)[] = [
-    "itemId",
-    "toolId",
-    "correlationId",
-    "turnId",
-    "threadId",
-    "sessionId"
+  const eventFamily = (event: TraceEventV1): string =>
+    event.source.eventType?.split(".", 1)[0] ?? event.kind.split(".", 1)[0] ?? event.kind;
+  const kindFamily = (event: TraceEventV1): string => event.kind.split(".", 1)[0] ?? event.kind;
+  if (eventFamily(started) !== eventFamily(candidate) || kindFamily(started) !== kindFamily(candidate)) {
+    return false;
+  }
+
+  const mustMatchWhenPresent = (key: keyof NativeSourceV1): boolean =>
+    started.source[key] === undefined || started.source[key] === candidate.source[key];
+  for (const key of ["sessionId", "threadId", "turnId"] as const) {
+    if (!mustMatchWhenPresent(key)) return false;
+  }
+  if (started.source.correlationId !== undefined && !mustMatchWhenPresent("correlationId")) return false;
+
+  const hasItemIdentity = started.source.itemId !== undefined || started.source.toolId !== undefined;
+  if (hasItemIdentity) {
+    if (!mustMatchWhenPresent("itemId") || !mustMatchWhenPresent("toolId")) return false;
+    if (!mustMatchWhenPresent("itemType")) return false;
+    return true;
+  }
+  if (started.source.turnId !== undefined) return candidate.source.turnId === started.source.turnId;
+  if (started.source.threadId !== undefined) return candidate.source.threadId === started.source.threadId;
+  return started.source.sessionId !== undefined && candidate.source.sessionId === started.source.sessionId;
+}
+
+function recoverySourceMatches(target: TraceEventV1, recovery: TraceEventV1): boolean {
+  if (target.source.provider !== recovery.source.provider) return false;
+  const keys: readonly (keyof NativeSourceV1)[] = [
+    "sessionId", "threadId", "turnId", "itemId", "toolId", "itemType", "correlationId"
   ];
-  const mostSpecific = identityKeys.find((key) => started.source[key] !== undefined);
-  if (!mostSpecific) return false;
-  return started.source[mostSpecific] === candidate.source[mostSpecific];
+  return keys.every((key) => target.source[key] === recovery.source[key]);
+}
+
+function payloadRecord(event: TraceEventV1, label: string): Record<string, unknown> {
+  if (
+    typeof event.normalizedPayload !== "object" ||
+    event.normalizedPayload === null ||
+    Array.isArray(event.normalizedPayload)
+  ) throw new Error(`${label} requires a structured normalized payload.`);
+  return event.normalizedPayload as Record<string, unknown>;
+}
+
+function classifyProviderTerminal(event: TraceEventV1, run: RunRow): ProviderTerminalKind {
+  const commonValid =
+    event.runId === run.id &&
+    event.provenance === "observed" &&
+    event.source.provider === run.provider &&
+    event.source.eventType === event.kind;
+  if (commonValid && event.kind === "turn.completed" && event.status === "completed") return "completed";
+  if (commonValid && event.kind === "turn.failed" && event.status === "failed") return "failed";
+  throw new Error("Provider terminal semantics require an observed turn.completed or turn.failed event.");
+}
+
+function classifyProcessEvent(
+  event: TraceEventV1,
+  run: RunRow
+): { exitCode: number | null; terminatingSignal: string | null } {
+  if (
+    event.runId !== run.id ||
+    event.kind !== "recorder.process_exit" ||
+    event.provenance !== "recorder" ||
+    event.source.provider !== run.provider ||
+    event.source.correlationId !== run.id
+  ) throw new Error("Process fact recorder semantics are invalid.");
+  const payload = payloadRecord(event, "Process fact");
+  const exitCode = payload.exitCode;
+  const terminatingSignal = payload.terminatingSignal;
+  if (!(exitCode === null || (typeof exitCode === "number" && Number.isInteger(exitCode)))) {
+    throw new Error("Process fact exitCode must be an integer or null.");
+  }
+  if (!(terminatingSignal === null || (typeof terminatingSignal === "string" && terminatingSignal.length > 0))) {
+    throw new Error("Process fact terminatingSignal must be a non-empty string or null.");
+  }
+  if (exitCode !== null && terminatingSignal !== null) {
+    throw new Error("Process fact cannot contain both a numeric exit and a signal.");
+  }
+  const expectedStatus = terminatingSignal !== null
+    ? "interrupted"
+    : exitCode === null
+      ? "unknown"
+      : exitCode === 0 ? "completed" : "failed";
+  if (event.status !== expectedStatus) {
+    throw new Error(`Process fact status must be ${expectedStatus} for its stored payload.`);
+  }
+  return { exitCode, terminatingSignal };
+}
+
+function validateRecorderFailure(event: TraceEventV1, run: RunRow): void {
+  const payload = payloadRecord(event, "Recorder failure");
+  if (
+    event.runId !== run.id ||
+    event.kind !== "error" ||
+    event.provenance !== "recorder" ||
+    event.status !== "failed" ||
+    event.source.provider !== run.provider ||
+    event.source.correlationId !== run.id ||
+    payload.recorderFailure !== true
+  ) throw new Error("Recorder failure semantics are invalid.");
+}
+
+function validateInterruption(event: TraceEventV1, run: RunRow): void {
+  const payload = payloadRecord(event, "Explicit interruption");
+  if (
+    event.runId !== run.id ||
+    event.kind !== "recorder.interruption" ||
+    event.provenance !== "recorder" ||
+    event.status !== "interrupted" ||
+    event.source.provider !== run.provider ||
+    event.source.correlationId !== run.id ||
+    payload.explicitInterruption !== true
+  ) throw new Error("Explicit interruption supporting event semantics are invalid.");
 }
 
 export class RunRepository {
-  readonly database: AgentLensDatabase;
+  readonly #connection: Database.Database;
+  readonly #artifactRoot: string;
 
-  constructor(database: AgentLensDatabase) {
-    this.database = database;
+  constructor(database: AgentLensDatabase, options: RunRepositoryOptions) {
+    this.#connection = connectionFor(database);
+    if (!options || !isAbsolute(options.artifactRoot)) {
+      throw new Error("RunRepository requires an absolute configured artifact root.");
+    }
+    this.#artifactRoot = resolve(options.artifactRoot);
   }
 
   createRun(input: CreateRunInput): RunRecord {
-    this.database.connection.prepare(`
+    this.#connection.prepare(`
       INSERT INTO runs (
         id, schema_version, provider, integration_version, agent_version, status,
         capture_policy, capture_policy_version, redaction_version, label, prompt_source,
@@ -411,7 +634,7 @@ export class RunRepository {
     if (!Number.isInteger(input.childPid) || input.childPid <= 0) {
       throw new Error("childPid must be a positive integer.");
     }
-    const result = this.database.connection
+    const result = this.#connection
       .prepare("UPDATE runs SET status = 'running', child_pid = ? WHERE id = ? AND status = 'starting'")
       .run(input.childPid, runId);
     if (result.changes !== 1) throw new Error(`Run ${runId} is not in starting status.`);
@@ -420,7 +643,10 @@ export class RunRepository {
 
   appendEvent(input: TraceEventV1, audits: readonly RedactionAudit[] = []): TraceEventV1 {
     const event = traceEventV1Schema.parse(input);
-    this.database.connection.transaction(() => this.insertEvent(event, audits))();
+    this.#connection.transaction(() => {
+      this.validateEventRelationships(event);
+      this.insertEvent(event, audits);
+    }).immediate();
     return event;
   }
 
@@ -436,201 +662,270 @@ export class RunRepository {
       throw new Error("Completed artifact digest is not a SHA-256 hex identity.");
     }
 
-    let artifactStat;
-    let bytes;
+    const expectedPath = join(this.#artifactRoot, input.id.slice(0, 2), input.id);
+    if (input.path !== expectedPath || resolve(input.path) !== expectedPath) {
+      throw new Error("Completed artifact is outside the canonical content-addressed artifact layout.");
+    }
+
+    let handle;
+    let pathDevice: number | undefined;
+    let pathInode: number | undefined;
     try {
-      artifactStat = await stat(input.path);
-      bytes = await readFile(input.path);
+      const pathStat = await lstat(input.path);
+      if (pathStat.isSymbolicLink()) throw new Error("Completed artifact cannot be a symbolic link.");
+      pathDevice = pathStat.dev;
+      pathInode = pathStat.ino;
+      const [canonicalRoot, canonicalPath] = await Promise.all([
+        realpath(this.#artifactRoot),
+        realpath(input.path)
+      ]);
+      const canonicalExpectedPath = join(canonicalRoot, input.id.slice(0, 2), input.id);
+      if (canonicalPath !== canonicalExpectedPath) {
+        throw new Error("Completed artifact canonical path escapes the configured artifact root.");
+      }
+      handle = await open(input.path, constants.O_RDONLY | constants.O_NOFOLLOW);
     } catch (error) {
+      if (error instanceof Error && /symbolic|canonical|artifact root/i.test(error.message)) throw error;
       throw new Error(`Completed artifact is not available at ${input.path}.`, { cause: error });
     }
-    if (!artifactStat.isFile() || artifactStat.size !== input.byteLength || bytes.byteLength !== input.byteLength) {
-      throw new Error("Completed artifact byte length does not match metadata.");
-    }
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    if (digest !== input.sha256) throw new Error("Completed artifact digest does not match metadata.");
 
-    this.database.connection.transaction(() => {
-      this.database.connection.prepare(`
-        INSERT INTO artifacts (
-          id, run_id, kind, media_type, path, sha256, byte_length, redaction_state,
-          truncated, original_byte_length, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        input.id, input.runId, input.kind, input.mediaType, input.path, input.sha256,
-        input.byteLength, input.redactionState, input.truncated ? 1 : 0,
-        input.originalByteLength, createdAt
-      );
-      this.insertAudits(input.runId, null, input.id, audits, createdAt);
-    })();
-    return { ...input, createdAt };
+    try {
+      const artifactStat = await handle.stat();
+      const bytes = await handle.readFile();
+      if (artifactStat.dev !== pathDevice || artifactStat.ino !== pathInode) {
+        throw new Error("Completed artifact identity changed while it was being opened.");
+      }
+      if (!artifactStat.isFile() || artifactStat.size !== input.byteLength || bytes.byteLength !== input.byteLength) {
+        throw new Error("Completed artifact byte length does not match metadata.");
+      }
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      if (digest !== input.sha256) throw new Error("Completed artifact digest does not match metadata.");
+
+      this.#connection.transaction(() => {
+        this.#connection.prepare(`
+          INSERT INTO artifacts (
+            id, run_id, kind, media_type, path, sha256, byte_length, redaction_state,
+            truncated, original_byte_length, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          input.id, input.runId, input.kind, input.mediaType, input.path, input.sha256,
+          input.byteLength, input.redactionState, input.truncated ? 1 : 0,
+          input.originalByteLength, createdAt
+        );
+        this.insertAudits(input.runId, null, input.id, audits, createdAt);
+      })();
+      return { ...input, createdAt };
+    } finally {
+      await handle.close();
+    }
   }
 
   saveGitEvidence(runId: string, input: GitEvidenceInput): StoredGitEvidence {
-    this.database.connection.prepare(`
+    validateRequiredEvidence(input.initialStatus, "Initial status evidence");
+    validateRequiredEvidence(input.finalStatus, "Final status evidence");
+    validateOptionalEvidence(input.trackedFinalDiff, "Tracked final diff evidence");
+    validateRequiredEvidence(input.diffCheck, "Diff-check evidence");
+    validateOptionalEvidence(input.untrackedMetadata, "Untracked metadata evidence");
+    const initialStatus = evidenceColumns(input.initialStatus);
+    const finalStatus = evidenceColumns(input.finalStatus);
+    const trackedFinalDiff = evidenceColumns(input.trackedFinalDiff);
+    const diffCheck = evidenceColumns(input.diffCheck);
+    const untrackedMetadata = evidenceColumns(input.untrackedMetadata);
+    this.#connection.prepare(`
       INSERT INTO git_evidence (
         run_id, initial_head, final_head, initial_branch, final_branch,
-        initial_status_artifact_id, final_status_artifact_id,
-        tracked_final_diff_artifact_id, diff_check_artifact_id, diff_check_passed,
-        untracked_metadata_artifact_id, head_changed, branch_changed, captured_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        initial_status_state, initial_status_artifact_id, initial_status_omission_reason,
+        final_status_state, final_status_artifact_id, final_status_omission_reason,
+        tracked_final_diff_state, tracked_final_diff_artifact_id, tracked_final_diff_omission_reason,
+        diff_check_state, diff_check_artifact_id, diff_check_omission_reason, diff_check_passed,
+        untracked_metadata_state, untracked_metadata_artifact_id, untracked_metadata_omission_reason,
+        head_changed, branch_changed, captured_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       runId, input.initialHead, input.finalHead, input.initialBranch, input.finalBranch,
-      input.initialStatusArtifactId, input.finalStatusArtifactId,
-      input.trackedFinalDiffArtifactId, input.diffCheckArtifactId,
-      input.diffCheckPassed ? 1 : 0, input.untrackedMetadataArtifactId,
+      ...initialStatus, ...finalStatus, ...trackedFinalDiff, ...diffCheck,
+      input.diffCheckPassed ? 1 : 0, ...untrackedMetadata,
       input.headChanged ? 1 : 0, input.branchChanged ? 1 : 0, input.capturedAt
     );
     return { runId, ...input };
   }
 
   recordProcessFact(runId: string, input: ProcessFactInput): RunRecord {
-    const supportingEvent = this.database.connection
-      .prepare("SELECT run_id, kind FROM events WHERE id = ?")
-      .get(input.eventId) as { run_id: string; kind: string } | undefined;
-    if (!supportingEvent || supportingEvent.run_id !== runId || supportingEvent.kind !== "recorder.process_exit") {
-      throw new Error("Process facts require a recorder.process_exit event from the same run.");
-    }
-    if (input.exitCode !== null && !Number.isInteger(input.exitCode)) {
-      throw new Error("Process exit code must be a numeric integer or null.");
-    }
-    this.database.connection.prepare(`
-      UPDATE runs
-      SET exit_code = ?, terminating_signal = ?, process_event_id = ?
-      WHERE id = ?
-    `).run(input.exitCode, input.terminatingSignal, input.eventId, runId);
-    return this.requireRun(runId);
+    return this.#connection.transaction(() => {
+      const run = this.requireRunRow(runId);
+      if (!(["starting", "running"] as RunStatus[]).includes(run.status)) {
+        throw new Error(`Cannot record process facts after run ${runId} is terminal.`);
+      }
+      if (run.status !== "running") throw new Error("Process facts require a running run.");
+      const event = this.requireEventInRun(runId, input.eventId);
+      const process = classifyProcessEvent(event, run);
+      if (run.process_event_id !== null) {
+        if (
+          run.process_event_id === input.eventId &&
+          run.exit_code === process.exitCode &&
+          run.terminating_signal === process.terminatingSignal
+        ) return runFromRow(run);
+        throw new Error("Process facts are immutable once recorded.");
+      }
+      const result = this.#connection.prepare(`
+        UPDATE runs
+        SET exit_code = ?, terminating_signal = ?, process_event_id = ?
+        WHERE id = ? AND status = 'running' AND process_event_id IS NULL
+      `).run(process.exitCode, process.terminatingSignal, input.eventId, runId);
+      if (result.changes !== 1) throw new Error("Process facts could not be recorded atomically.");
+      return this.requireRun(runId);
+    }).immediate();
   }
 
   reconcileRun(runId: string, input: ReconciliationInput): RunRecord {
-    const run = this.requireRunRow(runId);
-    if (input.providerTerminalKind !== null && !input.providerTerminalEventId) {
-      throw new Error("Provider terminal facts require a supporting event ID.");
-    }
-    if (input.providerTerminalKind === null && input.providerTerminalEventId) {
-      throw new Error("A provider terminal event ID requires a provider terminal fact.");
-    }
-
-    const supportingEventIds = [
-      input.providerTerminalEventId,
-      run.process_event_id,
-      input.recorderFailureEventId
-    ].filter((value): value is string => value !== undefined && value !== null);
-    const uniqueSupportingEventIds = [...new Set(supportingEventIds)];
-    if (uniqueSupportingEventIds.length === 0) {
-      throw new Error("Run reconciliation requires at least one supporting event.");
-    }
-    for (const eventId of uniqueSupportingEventIds) this.requireEventInRun(runId, eventId);
-
-    if (input.providerTerminalEventId) {
-      const providerEvent = this.requireEventInRun(runId, input.providerTerminalEventId);
-      if (providerEvent.status !== input.providerTerminalKind) {
-        throw new Error("Provider terminal fact does not match its supporting event status.");
+    return this.#connection.transaction(() => {
+      const run = this.requireRunRow(runId);
+      if (!(["starting", "running"] as RunStatus[]).includes(run.status)) {
+        throw new Error(`Run ${runId} is terminal and already reconciled.`);
       }
-    }
+      if (run.status !== "running") throw new Error("Run reconciliation requires a running run.");
+      if (!Number.isInteger(input.endedAt)) throw new Error("Run end time must be epoch milliseconds.");
 
-    const decision = reconcileFacts(
-      input.providerTerminalKind,
-      run.exit_code,
-      run.terminating_signal,
-      input.recorderFailureEventId !== undefined,
-      input.explicitInterruption
-    );
-    const nextSequence = this.nextSequence(runId);
-    const reconciliationEvent = traceEventV1Schema.parse({
-      id: input.eventId,
-      runId,
-      sequence: nextSequence,
-      receivedAt: input.receivedAt,
-      kind: "run.reconciled",
-      status: decision.status === "completed" ? "completed" : "failed",
-      provenance: "derived",
-      source: { provider: run.provider, correlationId: runId },
-      relationships: uniqueSupportingEventIds.map((eventId) => ({ type: "derived_from" as const, eventId })),
-      summary: `Run reconciled as ${decision.status}`,
-      normalizedPayload: {
-        status: decision.status,
-        providerTerminalKind: input.providerTerminalKind,
-        exitCode: run.exit_code,
-        terminatingSignal: run.terminating_signal,
-        explicitInterruption: input.explicitInterruption,
-        recorderFailure: input.recorderFailureEventId !== undefined,
-        terminalReason: decision.terminalReason,
-        contradictionCodes: decision.contradictionCodes,
-        supportingEventIds: uniqueSupportingEventIds
-      },
-      derivation: {
-        name: "run-reconciliation",
-        version: "1",
-        sourceEventIds: uniqueSupportingEventIds
+      const providerTerminalKind = input.providerTerminalEventId
+        ? classifyProviderTerminal(this.requireEventInRun(runId, input.providerTerminalEventId), run)
+        : null;
+      if (run.process_event_id !== null) {
+        const storedProcess = classifyProcessEvent(
+          this.requireEventInRun(runId, run.process_event_id),
+          run
+        );
+        if (
+          storedProcess.exitCode !== run.exit_code ||
+          storedProcess.terminatingSignal !== run.terminating_signal
+        ) throw new Error("Stored process columns do not match their supporting event.");
       }
-    });
+      if (input.recorderFailureEventId) {
+        validateRecorderFailure(this.requireEventInRun(runId, input.recorderFailureEventId), run);
+      }
+      if (input.interruptionEventId) {
+        validateInterruption(this.requireEventInRun(runId, input.interruptionEventId), run);
+      }
 
-    this.database.connection.transaction(() => {
+      const supportingEventIds = [
+        input.providerTerminalEventId,
+        run.process_event_id,
+        input.recorderFailureEventId,
+        input.interruptionEventId
+      ].filter((value): value is string => value !== undefined && value !== null);
+      const uniqueSupportingEventIds = [...new Set(supportingEventIds)];
+      if (uniqueSupportingEventIds.length !== supportingEventIds.length) {
+        throw new Error("Each reconciliation fact requires its own exact supporting event.");
+      }
+      if (uniqueSupportingEventIds.length === 0) {
+        throw new Error("Run reconciliation requires at least one supporting event.");
+      }
+
+      const explicitInterruption = input.interruptionEventId !== undefined;
+      const decision = reconcileFacts(
+        providerTerminalKind,
+        run.exit_code,
+        run.terminating_signal,
+        input.recorderFailureEventId !== undefined,
+        explicitInterruption
+      );
+      const reconciliationEvent = traceEventV1Schema.parse({
+        id: input.eventId,
+        runId,
+        sequence: this.nextSequence(runId),
+        receivedAt: input.receivedAt,
+        kind: "run.reconciled",
+        status: decision.status === "completed" ? "completed" : "failed",
+        provenance: "derived",
+        source: { provider: run.provider, correlationId: runId },
+        relationships: uniqueSupportingEventIds.map((eventId) => ({ type: "derived_from" as const, eventId })),
+        summary: `Run reconciled as ${decision.status}`,
+        normalizedPayload: {
+          status: decision.status,
+          providerTerminalKind,
+          exitCode: run.exit_code,
+          terminatingSignal: run.terminating_signal,
+          explicitInterruption,
+          recorderFailure: input.recorderFailureEventId !== undefined,
+          terminalReason: decision.terminalReason,
+          contradictionCodes: decision.contradictionCodes,
+          supportingEventIds: uniqueSupportingEventIds
+        },
+        derivation: {
+          name: "run-reconciliation",
+          version: "1",
+          sourceEventIds: uniqueSupportingEventIds
+        }
+      });
+
+      this.validateEventRelationships(reconciliationEvent);
       this.insertEvent(reconciliationEvent, []);
-      this.database.connection.prepare(`
+      const updated = this.#connection.prepare(`
         UPDATE runs
         SET status = ?, ended_at = ?, provider_terminal_kind = ?, terminal_reason = ?,
             contradiction_codes_json = ?
-        WHERE id = ?
+        WHERE id = ? AND status = 'running'
       `).run(
         decision.status,
         input.endedAt,
-        input.providerTerminalKind,
+        providerTerminalKind,
         decision.terminalReason,
         json(decision.contradictionCodes),
         runId
       );
-    })();
-    return this.requireRun(runId);
+      if (updated.changes !== 1) throw new Error("Run reconciliation lost its terminal write race.");
+      return this.requireRun(runId);
+    }).immediate();
   }
 
   appendRecoveryForOpenEvents(runId: string, context: RecoveryContext): TraceEventV1[] {
-    const events = this.readEvents(runId);
-    const recoveredIds = new Set(
-      events.flatMap((candidate) =>
-        candidate.relationships
-          .filter((relationship) => relationship.type === "recovers")
-          .map((relationship) => relationship.eventId)
-      )
-    );
-    const openEvents = events.filter((candidate) =>
-      candidate.provenance === "observed" &&
-      candidate.status === "in_progress" &&
-      !recoveredIds.has(candidate.id) &&
-      !events.some((terminal) =>
-        terminal.id !== candidate.id &&
-        terminal.provenance === "observed" &&
-        terminal.status !== "in_progress" &&
-        sameNativeIdentity(candidate, terminal)
-      )
-    );
+    return this.#connection.transaction(() => {
+      const events = this.readEvents(runId);
+      const recoveredIds = new Set(
+        events.flatMap((candidate) =>
+          candidate.relationships
+            .filter((relationship) => relationship.type === "recovers")
+            .map((relationship) => relationship.eventId)
+        )
+      );
+      const openEvents = events.filter((candidate) =>
+        candidate.provenance === "observed" &&
+        candidate.status === "in_progress" &&
+        !recoveredIds.has(candidate.id) &&
+        !events.some((terminal) =>
+          terminal.id !== candidate.id &&
+          terminal.provenance === "observed" &&
+          terminal.status !== "in_progress" &&
+          sameNativeIdentity(candidate, terminal)
+        )
+      );
 
-    const appended: TraceEventV1[] = [];
-    let sequence = this.nextSequence(runId);
-    for (const openEvent of openEvents) {
-      const recovery = traceEventV1Schema.parse({
-        id: context.eventIdFor(openEvent),
-        runId,
-        sequence: sequence++,
-        receivedAt: context.receivedAt,
-        kind: "recorder.recovery",
-        status: "interrupted",
-        provenance: "recorder",
-        source: { ...openEvent.source, eventType: "recorder.recovery" },
-        relationships: [{ type: "recovers", eventId: openEvent.id }],
-        summary: `Recorder recovered interrupted ${openEvent.kind}`,
-        normalizedPayload: { recoveredEventId: openEvent.id, recoveredKind: openEvent.kind }
-      });
-      this.appendEvent(recovery);
-      appended.push(recovery);
-    }
-    return appended;
+      const appended: TraceEventV1[] = [];
+      let sequence = this.nextSequence(runId);
+      for (const openEvent of openEvents) {
+        const recovery = traceEventV1Schema.parse({
+          id: context.eventIdFor(openEvent),
+          runId,
+          sequence: sequence++,
+          receivedAt: context.receivedAt,
+          kind: "recorder.recovery",
+          status: "interrupted",
+          provenance: "recorder",
+          source: { ...openEvent.source, eventType: "recorder.recovery" },
+          relationships: [{ type: "recovers", eventId: openEvent.id }],
+          summary: `Recorder recovered interrupted ${openEvent.kind}`,
+          normalizedPayload: { recoveredEventId: openEvent.id, recoveredKind: openEvent.kind }
+        });
+        this.validateEventRelationships(recovery);
+        this.insertEvent(recovery, []);
+        appended.push(recovery);
+      }
+      return appended;
+    }).immediate();
   }
 
   listRuns(options: { limit?: number } = {}): RunListRecord[] {
     const limit = Math.max(1, Math.min(options.limit ?? 50, 500));
-    const rows = this.database.connection
+    const rows = this.#connection
       .prepare(`
         SELECT runs.*, git_evidence.head_changed AS git_head_changed,
           git_evidence.branch_changed AS git_branch_changed
@@ -648,16 +943,16 @@ export class RunRepository {
   }
 
   getRunDetail(runId: string): RunDetail {
-    const artifacts = this.database.connection
+    const artifacts = this.#connection
       .prepare("SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at, id")
       .all(runId) as ArtifactRow[];
-    const audits = this.database.connection.prepare(`
+    const audits = this.#connection.prepare(`
       SELECT event_id, artifact_id, reason, count
       FROM redaction_audits
       WHERE run_id = ?
       ORDER BY id
     `).all(runId) as AuditRow[];
-    const gitEvidenceRow = this.database.connection
+    const gitEvidenceRow = this.#connection
       .prepare("SELECT * FROM git_evidence WHERE run_id = ?")
       .get(runId) as GitEvidenceRow | undefined;
     return {
@@ -674,9 +969,51 @@ export class RunRepository {
     };
   }
 
+  private validateEventRelationships(event: TraceEventV1): void {
+    const targets = new Map<string, TraceEventV1>();
+    for (const relationship of event.relationships) {
+      const row = this.#connection
+        .prepare("SELECT run_id FROM events WHERE id = ?")
+        .get(relationship.eventId) as { run_id: string } | undefined;
+      if (!row) throw new Error(`Relationship target ${relationship.eventId} does not exist.`);
+      if (row.run_id !== event.runId) {
+        throw new Error(`Relationship target ${relationship.eventId} violates same-run ownership.`);
+      }
+      targets.set(relationship.eventId, this.requireEventInRun(event.runId, relationship.eventId));
+    }
+
+    if (event.kind !== "recorder.recovery") return;
+    if (event.provenance !== "recorder" || event.status !== "interrupted") {
+      throw new Error("recorder.recovery requires recorder provenance and interrupted status.");
+    }
+    if (event.relationships.length !== 1 || event.relationships[0]?.type !== "recovers") {
+      throw new Error("recorder.recovery requires exactly one recovers relationship.");
+    }
+    const targetId = event.relationships[0].eventId;
+    const target = targets.get(targetId);
+    if (!target || target.provenance !== "observed" || target.status !== "in_progress") {
+      throw new Error("recorder.recovery must target an observed in_progress event in the same run.");
+    }
+    if (!recoverySourceMatches(target, event)) {
+      throw new Error("recorder.recovery source identity must match the recovered event.");
+    }
+    const alreadyRecovered = this.#connection.prepare(`
+      SELECT 1 FROM event_relationships
+      WHERE run_id = ? AND related_event_id = ? AND relationship_type = 'recovers'
+    `).get(event.runId, targetId);
+    if (alreadyRecovered) throw new Error(`Event ${targetId} already has a recorder recovery.`);
+    const hasTerminal = this.readEvents(event.runId).some((candidate) =>
+      candidate.id !== target.id &&
+      candidate.provenance === "observed" &&
+      candidate.status !== "in_progress" &&
+      sameNativeIdentity(target, candidate)
+    );
+    if (hasTerminal) throw new Error(`Event ${targetId} already has an observed terminal event.`);
+  }
+
   private insertEvent(event: TraceEventV1, audits: readonly RedactionAudit[]): void {
     const nativeStorage = event.nativePayload?.storage ?? null;
-    this.database.connection.prepare(`
+    this.#connection.prepare(`
       INSERT INTO events (
         id, run_id, sequence, received_at, source_occurred_at, kind, status, provenance,
         summary, normalized_payload_json, native_payload_storage, native_payload_inline_json,
@@ -702,7 +1039,7 @@ export class RunRepository {
       event.derivation?.version ?? null,
       event.derivation?.confidence ?? null
     );
-    this.database.connection.prepare(`
+    this.#connection.prepare(`
       INSERT INTO event_sources (
         event_id, run_id, provider, session_id, thread_id, turn_id, item_id,
         tool_id, event_type, item_type, correlation_id
@@ -720,12 +1057,12 @@ export class RunRepository {
       event.source.itemType ?? null,
       event.source.correlationId ?? null
     );
-    const relationshipStatement = this.database.connection.prepare(`
-      INSERT INTO event_relationships (event_id, related_event_id, relationship_type)
-      VALUES (?, ?, ?)
+    const relationshipStatement = this.#connection.prepare(`
+      INSERT INTO event_relationships (event_id, run_id, related_event_id, relationship_type)
+      VALUES (?, ?, ?, ?)
     `);
     for (const relationship of event.relationships) {
-      relationshipStatement.run(event.id, relationship.eventId, relationship.type);
+      relationshipStatement.run(event.id, event.runId, relationship.eventId, relationship.type);
     }
     this.insertAudits(event.runId, event.id, null, audits, epochMilliseconds(event.receivedAt));
   }
@@ -737,7 +1074,7 @@ export class RunRepository {
     audits: readonly RedactionAudit[],
     createdAt: number
   ): void {
-    const statement = this.database.connection.prepare(`
+    const statement = this.#connection.prepare(`
       INSERT INTO redaction_audits (run_id, event_id, artifact_id, reason, count, created_at)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
@@ -750,7 +1087,7 @@ export class RunRepository {
   }
 
   private readEvents(runId: string): TraceEventV1[] {
-    const rows = this.database.connection.prepare(`
+    const rows = this.#connection.prepare(`
       SELECT events.*, event_sources.provider AS source_provider,
         event_sources.session_id, event_sources.thread_id, event_sources.turn_id,
         event_sources.item_id, event_sources.tool_id, event_sources.event_type,
@@ -760,15 +1097,24 @@ export class RunRepository {
       WHERE events.run_id = ?
       ORDER BY events.sequence, events.id
     `).all(runId) as EventRow[];
-    const relationshipStatement = this.database.connection.prepare(`
-      SELECT relationship_type, related_event_id
-      FROM event_relationships
-      WHERE event_id = ?
-      ORDER BY relationship_type, related_event_id
-    `);
+    const relationshipRows = this.#connection.prepare(`
+      SELECT relationships.event_id, relationships.relationship_type,
+        relationships.related_event_id
+      FROM event_relationships AS relationships
+      JOIN events AS source_event ON source_event.id = relationships.event_id
+      WHERE source_event.run_id = ?
+      ORDER BY relationships.event_id, relationships.relationship_type,
+        relationships.related_event_id
+    `).all(runId) as RelationshipRow[];
+    const relationshipsByEvent = new Map<string, RelationshipRow[]>();
+    for (const relationship of relationshipRows) {
+      const existing = relationshipsByEvent.get(relationship.event_id) ?? [];
+      existing.push(relationship);
+      relationshipsByEvent.set(relationship.event_id, existing);
+    }
 
     return rows.map((row) => {
-      const relationships = relationshipStatement.all(row.id) as RelationshipRow[];
+      const relationships = relationshipsByEvent.get(row.id) ?? [];
       const value: Record<string, unknown> = {
         id: row.id,
         runId: row.run_id,
@@ -816,7 +1162,7 @@ export class RunRepository {
   }
 
   private nextSequence(runId: string): number {
-    const maximum = this.database.connection
+    const maximum = this.#connection
       .prepare("SELECT MAX(sequence) FROM events WHERE run_id = ?")
       .pluck()
       .get(runId) as number | null;
@@ -830,7 +1176,7 @@ export class RunRepository {
   }
 
   private requireRunRow(runId: string): RunRow {
-    const row = this.database.connection
+    const row = this.#connection
       .prepare("SELECT * FROM runs WHERE id = ?")
       .get(runId) as RunRow | undefined;
     if (!row) throw new Error(`Run ${runId} does not exist.`);

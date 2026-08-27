@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EventStatus, TraceEventV1 } from "@agentlens/core";
@@ -7,6 +7,7 @@ import { openDatabase } from "../src/database.js";
 import {
   RunRepository,
   type CreateRunInput,
+  type GitEvidenceInput,
   type ReconciliationInput
 } from "../src/runRepository.js";
 
@@ -17,8 +18,10 @@ const receivedAt = "2026-08-26T20:00:00.000Z";
 function setup(): { repository: RunRepository; close: () => void } {
   const root = mkdtempSync(join(tmpdir(), "agentlens-storage-repository-"));
   temporaryRoots.push(root);
+  const artifactRoot = join(root, "artifacts", "sha256");
+  mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
   const database = openDatabase(join(root, "agentlens.sqlite"));
-  const repository = new RunRepository(database);
+  const repository = new RunRepository(database, { artifactRoot });
   repository.createRun(validRun());
   return { repository, close: () => database.close() };
 }
@@ -79,20 +82,12 @@ describe("append-only events and recovery", () => {
     const { repository, close } = setup();
     try {
       const started = repository.appendEvent(event("event-start", 0, "in_progress"));
-      const rawBefore = repository.database.connection
-        .prepare("SELECT * FROM events WHERE id = ?")
-        .get(started.id);
-
       repository.appendRecoveryForOpenEvents(runId, {
         receivedAt: "2026-08-26T20:01:00.000Z",
         eventIdFor: (openEvent) => `recovery-${openEvent.id}`
       });
 
-      const rawAfter = repository.database.connection
-        .prepare("SELECT * FROM events WHERE id = ?")
-        .get(started.id);
       const events = repository.getRunDetail(runId).events;
-      expect(rawAfter).toEqual(rawBefore);
       expect(events[0]).toEqual(started);
       expect(events[0]?.status).toBe("in_progress");
       expect(events[1]).toMatchObject({
@@ -101,6 +96,192 @@ describe("append-only events and recovery", () => {
         status: "interrupted"
       });
       expect(events[1]?.relationships).toContainEqual({ type: "recovers", eventId: started.id });
+    } finally {
+      close();
+    }
+  });
+
+  it.each([
+    {
+      name: "a child item terminal does not close its parent turn",
+      started: {
+        kind: "turn.started",
+        source: {
+          provider: "codex-exec" as const,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          eventType: "turn.started"
+        }
+      },
+      terminal: {
+        kind: "command",
+        source: {
+          provider: "codex-exec" as const,
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "child-item",
+          eventType: "item.completed",
+          itemType: "command_execution"
+        }
+      }
+    },
+    {
+      name: "an item type mismatch does not close the observed item",
+      started: {
+        kind: "command",
+        source: {
+          provider: "codex-exec" as const,
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "item.started",
+          itemType: "command_execution"
+        }
+      },
+      terminal: {
+        kind: "tool",
+        source: {
+          provider: "codex-exec" as const,
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "item.completed",
+          itemType: "mcp_tool_call"
+        }
+      }
+    },
+    {
+      name: "a correlation mismatch does not close the observed item",
+      started: {
+        kind: "command",
+        source: {
+          provider: "codex-exec" as const,
+          turnId: "turn-1",
+          itemId: "item-1",
+          correlationId: "correlation-start",
+          eventType: "item.started",
+          itemType: "command_execution"
+        }
+      },
+      terminal: {
+        kind: "command",
+        source: {
+          provider: "codex-exec" as const,
+          turnId: "turn-1",
+          itemId: "item-1",
+          correlationId: "correlation-other",
+          eventType: "item.completed",
+          itemType: "command_execution"
+        }
+      }
+    },
+    {
+      name: "an unrelated event family does not close the observed item",
+      started: {
+        kind: "command",
+        source: {
+          provider: "codex-exec" as const,
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "item.started",
+          itemType: "command_execution"
+        }
+      },
+      terminal: {
+        kind: "command",
+        source: {
+          provider: "codex-exec" as const,
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "future.completed",
+          itemType: "command_execution"
+        }
+      }
+    }
+  ])("uses the strongest lifecycle identity: $name", ({ started, terminal }) => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("event-start", 0, "in_progress", started));
+      repository.appendEvent(event("other-terminal", 1, "completed", terminal));
+      const recovered = repository.appendRecoveryForOpenEvents(runId, {
+        receivedAt: "2026-08-26T20:01:00.000Z",
+        eventIdFor: (openEvent) => `recovery-${openEvent.id}`
+      });
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]?.relationships).toEqual([
+        { type: "recovers", eventId: "event-start" }
+      ]);
+    } finally {
+      close();
+    }
+  });
+
+  it("rolls back every recovery when one recovery insertion fails", () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("start-one", 0, "in_progress"));
+      repository.appendEvent(event("start-two", 1, "in_progress", {
+        source: {
+          provider: "codex-exec",
+          turnId: "turn-1",
+          itemId: "item-2",
+          eventType: "item.started",
+          itemType: "command_execution"
+        }
+      }));
+      expect(() => repository.appendRecoveryForOpenEvents(runId, {
+        receivedAt: "2026-08-26T20:01:00.000Z",
+        eventIdFor: () => "duplicate-recovery-id"
+      })).toThrow();
+      expect(repository.getRunDetail(runId).events.filter(({ kind }) => kind === "recorder.recovery")).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects malformed and duplicate recorder recovery relationships", () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("event-start", 0, "in_progress"));
+      const malformed = event("malformed-recovery", 1, "interrupted", {
+        kind: "recorder.recovery",
+        provenance: "recorder",
+        relationships: [],
+        source: { provider: "codex-exec", correlationId: runId }
+      });
+      expect(() => repository.appendEvent(malformed)).toThrow(/recovers/);
+
+      const first = event("first-recovery", 1, "interrupted", {
+        kind: "recorder.recovery",
+        provenance: "recorder",
+        relationships: [{ type: "recovers", eventId: "event-start" }],
+        source: {
+          provider: "codex-exec",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "recorder.recovery",
+          itemType: "command_execution"
+        }
+      });
+      const duplicate = { ...first, id: "duplicate-recovery", sequence: 2 };
+      repository.appendEvent(first);
+      expect(() => repository.appendEvent(duplicate)).toThrow(/recover/i);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects relationships whose target belongs to another run", () => {
+    const { repository, close } = setup();
+    try {
+      repository.createRun(validRun({ id: "run-other" }));
+      repository.appendEvent(event("other-source", 0, "completed", { runId: "run-other" }));
+      const crossRunDerived = event("cross-run-derived", 0, "completed", {
+        provenance: "derived",
+        relationships: [{ type: "derived_from", eventId: "other-source" }],
+        derivation: { name: "cross-run", version: "1", sourceEventIds: ["other-source"] }
+      });
+      expect(() => repository.appendEvent(crossRunDerived)).toThrow(/same run|run ownership/i);
+      expect(repository.getRunDetail(runId).events).toEqual([]);
     } finally {
       close();
     }
@@ -183,7 +364,6 @@ describe("append-only events and recovery", () => {
         relationships: [{ type: "correlates_with", eventId: "missing-event" }]
       }))).toThrow();
       expect(repository.getRunDetail(runId).events.map(({ id }) => id)).not.toContain("bad-link");
-      expect(repository.database.connection.prepare("SELECT event_id FROM event_sources WHERE event_id = ?").get("bad-link")).toBeUndefined();
     } finally {
       close();
     }
@@ -261,6 +441,7 @@ describe("run-fact reconciliation", () => {
   it.each(cases)("$name", (testCase) => {
     const { repository, close } = setup();
     try {
+      repository.markRunning(runId, { childPid: 42 });
       let sequence = 0;
       let providerTerminalEventId: string | undefined;
       if (testCase.provider) {
@@ -277,17 +458,22 @@ describe("run-fact reconciliation", () => {
       }
 
       const processEventId = "process-fact";
-      repository.appendEvent(event(processEventId, sequence++, testCase.signal ? "interrupted" : "completed", {
+      const processStatus = testCase.signal
+        ? "interrupted"
+        : testCase.exitCode === null
+          ? "unknown"
+          : testCase.exitCode === 0 ? "completed" : "failed";
+      repository.appendEvent(event(processEventId, sequence++, processStatus, {
         kind: "recorder.process_exit",
         provenance: "recorder",
         source: { provider: "codex-exec", correlationId: runId },
-        summary: "Child process terminal fact"
+        summary: "Child process terminal fact",
+        normalizedPayload: {
+          exitCode: testCase.exitCode,
+          terminatingSignal: testCase.signal
+        }
       }));
-      repository.recordProcessFact(runId, {
-        exitCode: testCase.exitCode,
-        terminatingSignal: testCase.signal,
-        eventId: processEventId
-      });
+      repository.recordProcessFact(runId, { eventId: processEventId });
 
       let recorderFailureEventId: string | undefined;
       if (testCase.recorderFailure) {
@@ -296,7 +482,20 @@ describe("run-fact reconciliation", () => {
           kind: "error",
           provenance: "recorder",
           source: { provider: "codex-exec", correlationId: runId },
-          summary: "Recorder persistence failure"
+          summary: "Recorder persistence failure",
+          normalizedPayload: { recorderFailure: true }
+        }));
+      }
+
+      let interruptionEventId: string | undefined;
+      if (testCase.explicitInterruption) {
+        interruptionEventId = "explicit-interruption";
+        repository.appendEvent(event(interruptionEventId, sequence++, "interrupted", {
+          kind: "recorder.interruption",
+          provenance: "recorder",
+          source: { provider: "codex-exec", correlationId: runId },
+          summary: "Explicit interruption",
+          normalizedPayload: { explicitInterruption: true }
         }));
       }
 
@@ -304,10 +503,9 @@ describe("run-fact reconciliation", () => {
         eventId: "run-reconciled",
         receivedAt: "2026-08-26T20:02:00.000Z",
         endedAt: 1_777_777_778_000,
-        providerTerminalKind: testCase.provider,
         providerTerminalEventId,
         recorderFailureEventId,
-        explicitInterruption: testCase.explicitInterruption ?? false
+        interruptionEventId
       };
       const result = repository.reconcileRun(runId, reconciliation);
       expect(result).toMatchObject({
@@ -334,6 +532,143 @@ describe("run-fact reconciliation", () => {
         terminatingSignal: testCase.signal,
         contradictionCodes: testCase.expectedContradictions
       });
+      const expectedSupport = [
+        providerTerminalEventId,
+        processEventId,
+        recorderFailureEventId,
+        interruptionEventId
+      ].filter((value): value is string => value !== undefined);
+      expect(new Set(detail.events.at(-1)?.relationships.map(({ eventId }) => eventId)))
+        .toEqual(new Set(expectedSupport));
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects a process fact whose stored event semantics do not match recorder evidence", () => {
+    const { repository, close } = setup();
+    try {
+      repository.markRunning(runId, { childPid: 42 });
+      repository.appendEvent(event("invalid-process", 0, "completed", {
+        kind: "recorder.process_exit",
+        provenance: "observed",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: { exitCode: 0, terminatingSignal: null }
+      }));
+      expect(() => repository.recordProcessFact(runId, { eventId: "invalid-process" }))
+        .toThrow(/recorder|provenance|semantics/i);
+    } finally {
+      close();
+    }
+  });
+
+  it("derives provider terminal classification from an observed terminal event", () => {
+    const { repository, close } = setup();
+    try {
+      repository.markRunning(runId, { childPid: 42 });
+      repository.appendEvent(event("provider-terminal", 0, "completed", {
+        kind: "turn.completed",
+        provenance: "recorder",
+        source: { provider: "codex-exec", turnId: "turn-1", eventType: "turn.completed" }
+      }));
+      repository.appendEvent(event("process-fact", 1, "completed", {
+        kind: "recorder.process_exit",
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: { exitCode: 0, terminatingSignal: null }
+      }));
+      repository.recordProcessFact(runId, { eventId: "process-fact" });
+      expect(() => repository.reconcileRun(runId, {
+        eventId: "run-reconciled",
+        receivedAt,
+        endedAt: 1_777_777_778_000,
+        providerTerminalEventId: "provider-terminal"
+      })).toThrow(/observed provider|provider terminal semantics/i);
+    } finally {
+      close();
+    }
+  });
+
+  it("requires validated recorder failure and explicit interruption support", () => {
+    const { repository, close } = setup();
+    try {
+      repository.markRunning(runId, { childPid: 42 });
+      repository.appendEvent(event("process-fact", 0, "completed", {
+        kind: "recorder.process_exit",
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: { exitCode: 0, terminatingSignal: null }
+      }));
+      repository.recordProcessFact(runId, { eventId: "process-fact" });
+      repository.appendEvent(event("not-recorder-failure", 1, "failed"));
+
+      expect(() => repository.reconcileRun(runId, {
+        eventId: "bad-failure-reconciliation",
+        receivedAt,
+        endedAt: 1_777_777_778_000,
+        recorderFailureEventId: "not-recorder-failure"
+      })).toThrow(/recorder failure semantics/i);
+
+      repository.appendEvent(event("invalid-interruption", 2, "interrupted", {
+        kind: "command",
+        provenance: "observed",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: { explicitInterruption: true }
+      }));
+      expect(() => repository.reconcileRun(runId, {
+        eventId: "unsupported-interruption",
+        receivedAt,
+        endedAt: 1_777_777_778_000,
+        interruptionEventId: "invalid-interruption"
+      })).toThrow(/interruption.*support/i);
+    } finally {
+      close();
+    }
+  });
+
+  it("does not overwrite process or reconciliation facts after the run is terminal", () => {
+    const { repository, close } = setup();
+    try {
+      repository.markRunning(runId, { childPid: 42 });
+      repository.appendEvent(event("provider-terminal", 0, "completed", {
+        kind: "turn.completed",
+        source: { provider: "codex-exec", turnId: "turn-1", eventType: "turn.completed" }
+      }));
+      repository.appendEvent(event("process-fact", 1, "completed", {
+        kind: "recorder.process_exit",
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: { exitCode: 0, terminatingSignal: null }
+      }));
+      repository.recordProcessFact(runId, { eventId: "process-fact" });
+      repository.reconcileRun(runId, {
+        eventId: "run-reconciled",
+        receivedAt,
+        endedAt: 1_777_777_778_000,
+        providerTerminalEventId: "provider-terminal"
+      });
+      const terminalDetail = repository.getRunDetail(runId);
+
+      repository.appendEvent(event("late-process", 3, "failed", {
+        kind: "recorder.process_exit",
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: { exitCode: 9, terminatingSignal: null }
+      }));
+      expect(() => repository.recordProcessFact(runId, { eventId: "late-process" }))
+        .toThrow(/terminal/i);
+      expect(() => repository.reconcileRun(runId, {
+        eventId: "second-reconciliation",
+        receivedAt: "2026-08-26T20:03:00.000Z",
+        endedAt: 1_777_777_779_000
+      })).toThrow(/terminal|already reconciled/i);
+      expect(() => repository.markRunning(runId, { childPid: 99 })).toThrow(/starting/i);
+
+      const after = repository.getRunDetail(runId);
+      expect(after.run).toEqual(terminalDetail.run);
+      expect(after.events.filter(({ kind }) => kind === "run.reconciled")).toEqual(
+        terminalDetail.events.filter(({ kind }) => kind === "run.reconciled")
+      );
     } finally {
       close();
     }
@@ -350,12 +685,12 @@ describe("run and Git evidence reads", () => {
         finalHead: "b".repeat(40),
         initialBranch: "main",
         finalBranch: "feature",
-        initialStatusArtifactId: null,
-        finalStatusArtifactId: null,
-        trackedFinalDiffArtifactId: null,
-        diffCheckArtifactId: null,
+        initialStatus: { state: "omitted", reason: "metadata-only" },
+        finalStatus: { state: "omitted", reason: "metadata-only" },
+        trackedFinalDiff: { state: "absent" },
+        diffCheck: { state: "omitted", reason: "metadata-only" },
         diffCheckPassed: false,
-        untrackedMetadataArtifactId: null,
+        untrackedMetadata: { state: "absent" },
         headChanged: true,
         branchChanged: true,
         capturedAt: 1_777_777_778_000
@@ -373,9 +708,38 @@ describe("run and Git evidence reads", () => {
         finalHead: "b".repeat(40),
         headChanged: true,
         branchChanged: true,
-        trackedFinalDiffArtifactId: null,
-        untrackedMetadataArtifactId: null
+        initialStatus: { state: "omitted", reason: "metadata-only" },
+        finalStatus: { state: "omitted", reason: "metadata-only" },
+        trackedFinalDiff: { state: "absent" },
+        diffCheck: { state: "omitted", reason: "metadata-only" },
+        untrackedMetadata: { state: "absent" }
       });
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects bare nulls for required Git capture evidence", () => {
+    const { repository, close } = setup();
+    try {
+      const legacyNullableInput = {
+        initialHead: "a".repeat(40),
+        finalHead: "a".repeat(40),
+        initialBranch: "main",
+        finalBranch: "main",
+        initialStatusArtifactId: null,
+        finalStatusArtifactId: null,
+        trackedFinalDiffArtifactId: null,
+        diffCheckArtifactId: null,
+        diffCheckPassed: true,
+        untrackedMetadataArtifactId: null,
+        headChanged: false,
+        branchChanged: false,
+        capturedAt: 1_777_777_778_000
+      } as unknown as GitEvidenceInput;
+      expect(() => repository.saveGitEvidence(runId, legacyNullableInput))
+        .toThrow(/initial status|omitted|evidence state/i);
+      expect(repository.getRunDetail(runId).gitEvidence).toBeNull();
     } finally {
       close();
     }

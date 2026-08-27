@@ -1,7 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
 import { openDatabase } from "../src/database.js";
 
 const temporaryRoots: string[] = [];
@@ -20,11 +21,8 @@ describe("SQLite migration 001", () => {
   it("creates the v1 tables, indexes, and database safety pragmas", () => {
     const database = openDatabase(temporaryDatabasePath());
     try {
-      const tables = database.connection
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
-        .pluck()
-        .all();
-      expect(tables).toEqual(expect.arrayContaining([
+      const inspection = database.inspect();
+      expect(inspection.tables).toEqual(expect.arrayContaining([
         "artifacts",
         "event_relationships",
         "event_sources",
@@ -35,23 +33,20 @@ describe("SQLite migration 001", () => {
         "schema_migrations"
       ]));
 
-      const indexes = database.connection
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name")
-        .pluck()
-        .all();
-      expect(indexes).toEqual(expect.arrayContaining([
+      expect(inspection.indexes).toEqual(expect.arrayContaining([
         "idx_artifacts_run_id",
+        "idx_event_relationships_one_recovery",
         "idx_event_relationships_related_event_id",
         "idx_event_sources_run_item_id",
         "idx_event_sources_run_turn_id",
         "idx_events_run_sequence",
         "idx_runs_started_at"
       ]));
-      expect(database.connection.pragma("foreign_keys", { simple: true })).toBe(1);
-      expect(database.connection.pragma("journal_mode", { simple: true })).toBe("wal");
-      expect(database.connection.pragma("synchronous", { simple: true })).toBe(1);
-      expect(database.connection.pragma("busy_timeout", { simple: true })).toBe(5_000);
-      expect(database.connection.prepare("SELECT version FROM schema_migrations").pluck().all()).toEqual([1]);
+      expect(inspection.foreignKeys).toBe(true);
+      expect(inspection.journalMode).toBe("wal");
+      expect(inspection.synchronous).toBe(1);
+      expect(inspection.busyTimeout).toBe(5_000);
+      expect(inspection.migrations).toEqual([1, 2]);
     } finally {
       database.close();
     }
@@ -64,10 +59,33 @@ describe("SQLite migration 001", () => {
 
     const reopened = openDatabase(path);
     try {
-      expect(reopened.connection.prepare("SELECT version FROM schema_migrations").pluck().all()).toEqual([1]);
-      expect(reopened.connection.prepare("PRAGMA integrity_check").pluck().get()).toBe("ok");
+      expect(reopened.inspect().migrations).toEqual([1, 2]);
+      expect(reopened.inspect().integrity).toBe("ok");
     } finally {
       reopened.close();
+    }
+  });
+
+  it("applies storage invariants forward to a database already recorded at v1", () => {
+    const path = temporaryDatabasePath();
+    const legacy = new Database(path);
+    try {
+      legacy.pragma("foreign_keys = ON");
+      legacy.exec(readFileSync(new URL("../migrations/001_initial.sql", import.meta.url), "utf8"));
+      legacy.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)")
+        .run(1_777_777_777_000);
+    } finally {
+      legacy.close();
+    }
+
+    const migrated = openDatabase(path);
+    try {
+      const inspection = migrated.inspect();
+      expect(inspection.migrations).toEqual([1, 2]);
+      expect(inspection.indexes).toContain("idx_event_relationships_one_recovery");
+      expect(inspection.integrity).toBe("ok");
+    } finally {
+      migrated.close();
     }
   });
 });
