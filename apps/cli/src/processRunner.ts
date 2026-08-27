@@ -14,8 +14,13 @@ export interface ProcessRunnerInput {
   readonly env: NodeJS.ProcessEnv;
   readonly promptInput: PromptInput;
   readonly signal?: AbortSignal;
+  readonly now?: () => number;
   readonly onSpawn: (pid: number) => void | Promise<void>;
-  readonly onLine: (stream: "stdout" | "stderr", line: string) => void | Promise<void>;
+  readonly onLine: (
+    stream: "stdout" | "stderr",
+    line: string,
+    receivedAt: number
+  ) => void | Promise<void>;
 }
 
 export class ChildSpawnError extends Error {
@@ -29,7 +34,8 @@ function lineConsumer(
   stream: NodeJS.ReadableStream,
   name: "stdout" | "stderr",
   beforeLine: Promise<void>,
-  onLine: ProcessRunnerInput["onLine"]
+  onLine: ProcessRunnerInput["onLine"],
+  now: () => number
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let pending = "";
@@ -41,17 +47,43 @@ function lineConsumer(
       pending = lines.pop() ?? "";
       for (const rawLine of lines) {
         const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-        queue = queue.then(async () => onLine(name, line));
+        const receivedAt = now();
+        queue = queue.then(async () => onLine(name, line, receivedAt));
       }
     });
     stream.once("error", reject);
     stream.once("end", () => {
       if (pending.length > 0) {
         const line = pending.endsWith("\r") ? pending.slice(0, -1) : pending;
-        queue = queue.then(async () => onLine(name, line));
+        const receivedAt = now();
+        queue = queue.then(async () => onLine(name, line, receivedAt));
       }
       queue.then(resolve, reject);
     });
+  });
+}
+
+function writeBufferedInput(stream: NodeJS.WritableStream, bytes: Buffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      stream.removeListener("error", onError);
+      stream.removeListener("close", onClose);
+    };
+    const onError = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const onClose = (): void => {
+      cleanup();
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    stream.on("error", onError);
+    stream.once("close", onClose);
+    stream.end(bytes);
   });
 }
 
@@ -96,18 +128,19 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
     (resolve) => child.once("close", (code, signal) => resolve({ code, signal }))
   );
 
+  let streams: Promise<void[]> | undefined;
   try {
     await spawned;
+    if (!child.stdout || !child.stderr) throw new Error("Codex stdout/stderr pipes were not created.");
+    streams = Promise.all([
+      lineConsumer(child.stdout, "stdout", spawned, input.onLine, input.now ?? Date.now),
+      lineConsumer(child.stderr, "stderr", spawned, input.onLine, input.now ?? Date.now)
+    ]);
     if (input.promptInput.mode === "buffered") {
       if (!child.stdin) throw new Error("Buffered Codex stdin pipe was not created.");
-      child.stdin.end(input.promptInput.bytes);
+      await writeBufferedInput(child.stdin, input.promptInput.bytes);
     }
 
-    if (!child.stdout || !child.stderr) throw new Error("Codex stdout/stderr pipes were not created.");
-    const streams = Promise.all([
-      lineConsumer(child.stdout, "stdout", spawned, input.onLine),
-      lineConsumer(child.stderr, "stderr", spawned, input.onLine)
-    ]);
     const result = await close;
     await streams;
     const pid = child.pid;
@@ -123,6 +156,7 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
       child.kill("SIGTERM");
       await close.catch(() => undefined);
     }
+    await streams?.catch(() => undefined);
     throw error;
   } finally {
     input.signal?.removeEventListener("abort", abort);

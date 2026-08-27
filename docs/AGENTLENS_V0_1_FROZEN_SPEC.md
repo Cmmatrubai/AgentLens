@@ -251,10 +251,10 @@ Terminology is exact: v0.1 captures **tracked final diff + untracked-file metada
 The CLI package exposes binary `agentlens`. The repository root script is:
 
 ```json
-{ "scripts": { "agentlens": "tsx apps/cli/src/main.ts" } }
+{ "scripts": { "agentlens": "tsx --conditions=development apps/cli/src/main.ts" } }
 ```
 
-Development invocation is `pnpm agentlens -- <agentlens arguments>`. Packaged invocation is `agentlens <arguments>`.
+Development invocation is `pnpm agentlens -- <agentlens arguments>`; the source entry consumes pnpm's one leading `--` wrapper delimiter before parsing AgentLens arguments. Packaged invocation is `agentlens <arguments>`.
 
 ```text
 agentlens record [--label TEXT] [--capture standard|metadata-only|strict] [--data-root PATH] -- codex exec --json [codex args...]

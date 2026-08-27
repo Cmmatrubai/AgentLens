@@ -1,6 +1,9 @@
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { codexExecCapabilities, type TraceEventV1 } from "@agentlens/core";
-import type { RunDetail, RunListRecord } from "@agentlens/storage";
+import type { RunDetail, RunListRecord, StoredArtifact } from "@agentlens/storage";
 
 export interface RunsJsonOutput {
   readonly runs: readonly ReturnType<typeof runListJson>[];
@@ -54,7 +57,57 @@ export function runsText(runs: readonly RunListRecord[]): string {
   }).join("\n")}\n`;
 }
 
-export async function inspectJson(detail: RunDetail, native: boolean) {
+async function readValidatedNativeArtifact(
+  artifact: StoredArtifact,
+  artifactRoot: string
+): Promise<unknown> {
+  if (
+    !/^[0-9a-f]{64}$/.test(artifact.id) ||
+    artifact.sha256 !== artifact.id ||
+    artifact.kind !== "native-payload" ||
+    artifact.mediaType !== "application/json" ||
+    artifact.redactionState !== "redacted"
+  ) {
+    throw new Error(`Native artifact ${artifact.id} has invalid metadata.`);
+  }
+
+  const configuredRoot = resolve(artifactRoot);
+  const expectedPath = join(configuredRoot, artifact.id.slice(0, 2), artifact.id);
+  if (artifact.path !== expectedPath || resolve(artifact.path) !== expectedPath) {
+    throw new Error(`Native artifact ${artifact.id} metadata path is not canonical.`);
+  }
+
+  const pathStat = await lstat(expectedPath);
+  if (pathStat.isSymbolicLink()) throw new Error(`Native artifact ${artifact.id} cannot be symbolic.`);
+  const [canonicalRoot, canonicalPath] = await Promise.all([
+    realpath(configuredRoot),
+    realpath(expectedPath)
+  ]);
+  if (canonicalPath !== join(canonicalRoot, artifact.id.slice(0, 2), artifact.id)) {
+    throw new Error(`Native artifact ${artifact.id} canonical path escapes the artifact root.`);
+  }
+
+  const handle = await open(expectedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    if (
+      !stat.isFile() ||
+      stat.dev !== pathStat.dev ||
+      stat.ino !== pathStat.ino ||
+      stat.size !== artifact.byteLength
+    ) {
+      throw new Error(`Native artifact ${artifact.id} file identity or byte length is invalid.`);
+    }
+    const bytes = await handle.readFile();
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    if (digest !== artifact.id) throw new Error(`Native artifact ${artifact.id} digest is invalid.`);
+    return JSON.parse(bytes.toString("utf8")) as unknown;
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function inspectJson(detail: RunDetail, native: boolean, artifactRoot?: string) {
   if (native && detail.run.capturePolicy !== "standard") {
     throw new Error("--native is available only for runs recorded with standard capture.");
   }
@@ -67,8 +120,8 @@ export async function inspectJson(detail: RunDetail, native: boolean) {
     if (event.nativePayload.storage === "artifact") {
       const artifact = artifacts.get(event.nativePayload.artifactId);
       if (!artifact) throw new Error(`Native artifact ${event.nativePayload.artifactId} is unavailable.`);
-      const body = await readFile(artifact.path, "utf8");
-      return { ...event, nativeContent: JSON.parse(body) as unknown };
+      if (!artifactRoot) throw new Error("Native artifact root is required for expansion.");
+      return { ...event, nativeContent: await readValidatedNativeArtifact(artifact, artifactRoot) };
     }
     return { ...event };
   }));

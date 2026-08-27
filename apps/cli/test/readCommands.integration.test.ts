@@ -1,11 +1,12 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { chmod, copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
+import { openDatabase } from "@agentlens/storage";
 
 import { recordRun } from "../src/recordRun.js";
 import { runInspectCommand } from "../src/commands/inspect.js";
@@ -51,11 +52,88 @@ function writer() {
   };
 }
 
+async function largeNativeFixture() {
+  const context = await fixture();
+  const recorded = await recordRun(
+    {
+      name: "record",
+      capture: "standard",
+      dataRoot: context.dataRoot,
+      childArgs: ["codex", "exec", "--json", "--fake-mode=unknown-large"]
+    },
+    { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+  );
+  const inspected = await runInspectCommand({
+    name: "inspect",
+    runId: recorded.runId,
+    dataRoot: context.dataRoot,
+    json: true,
+    native: false
+  }, { stdout: silentOutput });
+  const native = inspected.events.find(({ kind }) => kind === "source.unknown")?.nativePayload;
+  if (native?.storage !== "artifact") throw new Error("expected native artifact fixture");
+  const artifact = inspected.artifacts.find(({ id }) => id === native.artifactId);
+  if (!artifact) throw new Error("missing native artifact fixture metadata");
+  return { context, recorded, artifact };
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe("runs and inspect", () => {
+  it("creates a migrated data root and database with owner-only modes", async () => {
+    const context = await fixture();
+
+    await runRunsCommand(
+      { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+      { stdout: silentOutput }
+    );
+
+    expect((await stat(context.dataRoot)).mode & 0o777).toBe(0o700);
+    expect((await stat(join(context.dataRoot, "agentlens.sqlite"))).mode & 0o777).toBe(0o600);
+  });
+
+  it.each(["runs", "inspect"] as const)(
+    "%s repairs owner-only modes on an existing data root and live SQLite sidecars",
+    async (command) => {
+      const context = await fixture();
+      const recorded = await recordRun(
+        {
+          name: "record",
+          capture: "standard",
+          dataRoot: context.dataRoot,
+          childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+        },
+        { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+      );
+      const databasePath = join(context.dataRoot, "agentlens.sqlite");
+      const keeper = openDatabase(databasePath);
+      try {
+        const protectedPaths = [databasePath, `${databasePath}-wal`, `${databasePath}-shm`];
+        for (const path of protectedPaths) await chmod(path, 0o666);
+        await chmod(context.dataRoot, 0o777);
+
+        if (command === "runs") {
+          await runRunsCommand(
+            { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+            { stdout: silentOutput }
+          );
+        } else {
+          await runInspectCommand(
+            { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+            { stdout: silentOutput }
+          );
+        }
+
+        expect((await stat(context.dataRoot)).mode & 0o777).toBe(0o700);
+        for (const path of protectedPaths) expect((await stat(path)).mode & 0o777).toBe(0o600);
+      } finally {
+        keeper.close();
+      }
+    }
+  );
+
   it("returns JSON run/process/Git/capability facts without collapsing them", async () => {
     const context = await fixture();
     const recorded = await recordRun(
@@ -192,4 +270,38 @@ describe("runs and inspect", () => {
     }, { stdout: nativeText.output });
     expect(nativeText.text()).toContain('native: {"type":"future.event","future":{"large":');
   });
+
+  it.each(["path", "symlink", "digest"] as const)(
+    "refuses %s tampering before expanding a native artifact",
+    async (tamper) => {
+      const { context, recorded, artifact } = await largeNativeFixture();
+      if (tamper === "path") {
+        await execFile("sqlite3", [
+          join(context.dataRoot, "agentlens.sqlite"),
+          `UPDATE artifacts SET path = '/etc/passwd' WHERE run_id = '${recorded.runId}' AND id = '${artifact.id}'`
+        ]);
+      } else if (tamper === "symlink") {
+        const target = join(context.dataRoot, "outside-native.json");
+        await writeFile(target, '{"type":"tampered"}', "utf8");
+        await rm(artifact.path);
+        await symlink(target, artifact.path);
+      } else {
+        const bytes = await readFile(artifact.path);
+        const index = bytes.indexOf(0x78);
+        if (index < 0) throw new Error("native fixture lacks a mutable byte");
+        bytes[index] = 0x79;
+        await writeFile(artifact.path, bytes);
+      }
+
+      await expect(runInspectCommand({
+        name: "inspect",
+        runId: recorded.runId,
+        dataRoot: context.dataRoot,
+        json: true,
+        native: true
+      }, { stdout: silentOutput })).rejects.toThrow(
+        tamper === "path" ? /canonical|metadata path/i : tamper === "symlink" ? /symbolic/i : /digest/i
+      );
+    }
+  );
 });

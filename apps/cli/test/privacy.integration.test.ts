@@ -104,12 +104,112 @@ describe("recorder privacy and artifact durability", () => {
       "METADATA_STDERR_SENTINEL"
     ]) expect(bytes.includes(Buffer.from(sentinel))).toBe(false);
 
+    expect(detail(context.dataRoot, result.runId).events).toContainEqual(expect.objectContaining({
+      kind: "recorder.invocation",
+      provenance: "recorder",
+      normalizedPayload: {
+        promptSource: "stdin-buffered",
+        argv: { state: "omitted", argumentCount: 6 },
+        stdin: { state: "omitted", byteLength: 23 }
+      }
+    }));
+
     expect(detail(context.dataRoot, result.runId).gitEvidence).toMatchObject({
       initialStatus: { state: "omitted", reason: "metadata-only" },
       finalStatus: { state: "omitted", reason: "metadata-only" },
       trackedFinalDiff: { state: "omitted", reason: "metadata-only" },
       diffCheck: { state: "omitted", reason: "metadata-only" }
     });
+  });
+
+  it("persists only redacted prompt, argv, and stdin representation in standard capture", async () => {
+    const context = await fixture();
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: [
+          "codex", "exec", "--json", "Bearer STANDARD_PROMPT_SECRET",
+          "--fake-mode=success", "OPENAI_API_KEY=STANDARD_ARGV_SECRET"
+        ]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped("Bearer STANDARD_STDIN_SECRET"),
+        env: context.env,
+        stdout: silentOutput
+      }
+    );
+    const invocation = detail(context.dataRoot, result.runId).events
+      .find(({ kind }) => kind === "recorder.invocation");
+    const durable = await durableBytes(context.dataRoot);
+
+    expect(invocation).toMatchObject({
+      provenance: "recorder",
+      normalizedPayload: {
+        promptSource: "stdin-buffered",
+        argv: {
+          state: "captured",
+          values: [
+            "codex",
+            "exec",
+            "--json",
+            expect.stringMatching(/Bearer \[\[REDACTED:auth-bearer:hmac-sha256:[0-9a-f]{32}\]\]/),
+            "--fake-mode=success",
+            expect.stringMatching(/OPENAI_API_KEY=\[\[REDACTED:assignment-api-key:hmac-sha256:[0-9a-f]{32}\]\]/)
+          ]
+        },
+        stdin: {
+          state: "captured",
+          byteLength: 28,
+          encoding: "utf8-lossy",
+          text: expect.stringMatching(/Bearer \[\[REDACTED:auth-bearer:hmac-sha256:[0-9a-f]{32}\]\]/)
+        }
+      }
+    });
+    for (const sentinel of [
+      "STANDARD_PROMPT_SECRET",
+      "STANDARD_ARGV_SECRET",
+      "STANDARD_STDIN_SECRET"
+    ]) expect(durable.includes(Buffer.from(sentinel))).toBe(false);
+  });
+
+  it("persists content-free omitted invocation structure in strict capture", async () => {
+    const context = await fixture();
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "strict",
+        dataRoot: context.dataRoot,
+        childArgs: [
+          "codex", "exec", "--json", "STRICT_PROMPT_SENTINEL",
+          "--fake-mode=success", "STRICT_ARGV_SENTINEL"
+        ]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped("STRICT_STDIN_SENTINEL"),
+        env: context.env,
+        stdout: silentOutput
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const durable = await durableBytes(context.dataRoot);
+
+    expect(run.events).toContainEqual(expect.objectContaining({
+      kind: "recorder.invocation",
+      normalizedPayload: {
+        promptSource: "stdin-buffered",
+        argv: { state: "omitted", argumentCount: 6 },
+        stdin: { state: "omitted", byteLength: 21 }
+      }
+    }));
+    for (const sentinel of [
+      "STRICT_PROMPT_SENTINEL",
+      "STRICT_ARGV_SENTINEL",
+      "STRICT_STDIN_SENTINEL"
+    ]) expect(durable.includes(Buffer.from(sentinel))).toBe(false);
   });
 
   it("stores small redacted native payload inline and large native payload as a committed artifact", async () => {
@@ -199,6 +299,9 @@ describe("recorder privacy and artifact durability", () => {
     expect(body).toContain("[[EXCLUDED:sensitive-path.env]]");
     expect((await durableBytes(context.dataRoot)).includes(
       Buffer.from("ENV_DIFF_ARBITRARY_SENTINEL")
+    )).toBe(false);
+    expect((await durableBytes(context.dataRoot)).includes(
+      Buffer.from("ARBITRARY_DETAIL_SECRET")
     )).toBe(false);
     expect((await durableBytes(context.dataRoot)).includes(
       Buffer.from("SENSITIVE_PATH_SENTINEL")

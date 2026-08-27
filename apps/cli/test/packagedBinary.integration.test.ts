@@ -1,10 +1,12 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { runInspectCommand } from "../src/commands/inspect.js";
 
 const execFile = promisify(execFileCallback);
 const workspaceRoot = fileURLToPath(new URL("../../..", import.meta.url));
@@ -36,6 +38,20 @@ async function plainNode(
   });
 }
 
+async function waitForFile(path: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      await readFile(path);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${path}.`);
+}
+
 beforeAll(async () => {
   await execFile("pnpm", ["typecheck"], { cwd: workspaceRoot });
 }, 30_000);
@@ -45,6 +61,30 @@ afterAll(async () => {
 });
 
 describe("packaged AgentLens binary", () => {
+  it("runs pnpm agentlens -- from a fresh install with no compiled dist", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-cli-development-"));
+    roots.push(root);
+    const checkout = join(root, "checkout");
+    await cp(workspaceRoot, checkout, {
+      recursive: true,
+      filter: (source) => {
+        const parts = relative(workspaceRoot, source).split("/");
+        return !parts.some((part) => [".git", ".superpowers", "dist", "node_modules"].includes(part));
+      }
+    });
+    await execFile("pnpm", ["install", "--offline", "--frozen-lockfile"], {
+      cwd: checkout,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    const dataRoot = join(root, "data");
+
+    const result = await execFile("pnpm", [
+      "agentlens", "--", "runs", "--data-root", dataRoot, "--json"
+    ], { cwd: checkout, encoding: "utf8" });
+
+    expect(JSON.parse(result.stdout)).toEqual({ runs: [] });
+  }, 120_000);
+
   it("runs the compiled Node-shebang entry without tsx or source .js resolution", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentlens-cli-package-"));
     roots.push(root);
@@ -86,4 +126,77 @@ describe("packaged AgentLens binary", () => {
       runs: [{ status: "completed", child: { exitCode: 0, terminatingSignal: null } }]
     });
   });
+
+  it.each([
+    ["SIGINT", 130],
+    ["SIGTERM", 143]
+  ] as const)("reconciles a public %s and exits conventionally", async (signal, expectedExit) => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-cli-signal-"));
+    roots.push(root);
+    const repo = join(root, "repo");
+    const bin = join(root, "bin");
+    const dataRoot = join(root, "data");
+    const startedFile = join(root, "child-started.log");
+    await mkdir(repo);
+    await mkdir(bin);
+    await execFile("git", ["init", "-q"], { cwd: repo });
+    await execFile("git", ["config", "user.email", "fixture@example.test"], { cwd: repo });
+    await execFile("git", ["config", "user.name", "AgentLens Fixture"], { cwd: repo });
+    await writeFile(join(repo, "tracked.txt"), "before\n", "utf8");
+    await execFile("git", ["add", "tracked.txt"], { cwd: repo });
+    await execFile("git", ["commit", "-qm", "initial"], { cwd: repo });
+    await copyFile(fakeCodex, join(bin, "codex"));
+    await chmod(join(bin, "codex"), 0o700);
+
+    const child = spawn(process.execPath, [
+      compiledMain,
+      "record",
+      "--data-root", dataRoot,
+      "--",
+      "codex", "exec", "--json", "--fake-mode=hang"
+    ], {
+      cwd: repo,
+      env: {
+        ...process.env,
+        NODE_OPTIONS: "",
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
+        AGENTLENS_FAKE_STARTED_FILE: startedFile
+      },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    child.stdin.end();
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    const closed = new Promise<Readonly<{ code: number | null; signal: NodeJS.Signals | null }>>(
+      (resolve) => child.once("close", (code, childSignal) => resolve({ code, signal: childSignal }))
+    );
+
+    await waitForFile(startedFile);
+    const runId = /Run ID: ([0-9a-f-]+)/.exec(stdout)?.[1];
+    if (!runId) throw new Error("public recorder did not print a run ID");
+    child.kill(signal);
+    const terminal = await closed;
+
+    let inspected: Awaited<ReturnType<typeof runInspectCommand>> | undefined;
+    try {
+      inspected = await runInspectCommand({
+        name: "inspect",
+        runId,
+        dataRoot,
+        json: true,
+        native: false
+      }, { stdout: { write: () => true } });
+    } finally {
+      const childPid = inspected?.run.childPid;
+      if (childPid && inspected?.run.status === "running") {
+        try { process.kill(childPid, "SIGKILL"); } catch { /* child already ended */ }
+      }
+    }
+
+    expect(terminal).toEqual({ code: expectedExit, signal: null });
+    expect(inspected.run.status).toBe("interrupted");
+    expect(inspected.events.filter(({ kind }) => kind === "recorder.interruption")).toHaveLength(1);
+    expect(inspected.events.filter(({ kind }) => kind === "run.reconciled")).toHaveLength(1);
+  }, 15_000);
 });

@@ -28,6 +28,7 @@ export interface PersistEventContext {
 }
 
 function contentClassFor(draft: EventDraftV1): ContentClass {
+  if (draft.kind === "recorder.invocation") return "prompt";
   if (draft.kind === "message.agent") return "message";
   if (draft.kind === "command") return "command";
   if (draft.kind === "tool") return "tool";
@@ -48,6 +49,30 @@ function structuralNormalized(draft: EventDraftV1): Record<string, unknown> {
       const value = payload as Record<string, unknown>;
       if (value.stream === "stdout" || value.stream === "stderr") result.stream = value.stream;
       if (typeof value.reason === "string") result.reason = value.reason;
+    }
+  }
+  if (draft.kind === "recorder.invocation") {
+    const payload = draft.normalizedPayload;
+    if (typeof payload === "object" && payload !== null && !Array.isArray(payload)) {
+      const value = payload as Record<string, unknown>;
+      if (value.promptSource === "stdin-buffered" || value.promptSource === "tty-inherited") {
+        result.promptSource = value.promptSource;
+      }
+      const argv = value.argv;
+      if (typeof argv === "object" && argv !== null && !Array.isArray(argv)) {
+        const argumentCount = (argv as Record<string, unknown>).argumentCount;
+        if (typeof argumentCount === "number") {
+          result.argv = { state: "omitted", argumentCount };
+        }
+      }
+      const stdin = value.stdin;
+      if (typeof stdin === "object" && stdin !== null && !Array.isArray(stdin)) {
+        const stdinValue = stdin as Record<string, unknown>;
+        if (stdinValue.state === "absent") result.stdin = { state: "absent" };
+        else if (typeof stdinValue.byteLength === "number") {
+          result.stdin = { state: "omitted", byteLength: stdinValue.byteLength };
+        }
+      }
     }
   }
   return result;

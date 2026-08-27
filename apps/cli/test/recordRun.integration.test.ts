@@ -250,6 +250,32 @@ describe("recordRun lifecycle", () => {
     expect(await readFile(stdinCapture)).toEqual(original);
   });
 
+  it("durably reconciles a recorder error when the child rejects buffered stdin", async () => {
+    const context = await fixture();
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "-", "--fake-mode=stdin-reject"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(Buffer.alloc(8 * 1024 * 1024, 0x61)),
+        env: context.env,
+        stdout: silentOutput
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+
+    expect(result.status).toBe("recorder_error");
+    expect(run.events).toContainEqual(expect.objectContaining({
+      kind: "error",
+      provenance: "recorder"
+    }));
+    expect(run.events.at(-1)?.kind).toBe("run.reconciled");
+  });
+
   it("keeps the run starting on spawn failure, appends validated recorder support, and reconciles", async () => {
     const context = await fixture();
     const result = await recordRun(
@@ -276,10 +302,10 @@ describe("recordRun lifecycle", () => {
       providerTerminalKind: null
     });
     expect(run.events.map(({ kind }) => kind)).toEqual([
-      "git.snapshot", "error", "git.final_evidence", "run.reconciled"
+      "git.snapshot", "recorder.invocation", "error", "git.final_evidence", "run.reconciled"
     ]);
     expect(run.events[0]).toMatchObject({ provenance: "git_recovered" });
-    expect(run.events[1]).toMatchObject({
+    expect(run.events[2]).toMatchObject({
       provenance: "recorder",
       normalizedPayload: { recorderFailure: true }
     });
@@ -370,7 +396,15 @@ describe("recordRun lifecycle", () => {
       provenance: "recorder",
       normalizedPayload: { recorderFailure: true, phase: "recording" }
     }));
-    expect(run.events.at(-1)?.kind).toBe("run.reconciled");
+    const providerTerminal = run.events.find(({ kind }) => kind === "turn.completed");
+    const recorderFailure = run.events.find(({ kind }) => kind === "error");
+    const reconciled = run.events.at(-1);
+    expect(run.run.providerTerminalKind).toBe("completed");
+    expect(reconciled?.kind).toBe("run.reconciled");
+    expect(reconciled?.relationships).toEqual(expect.arrayContaining([
+      { type: "derived_from", eventId: providerTerminal?.id },
+      { type: "derived_from", eventId: recorderFailure?.id }
+    ]));
   });
 
   it("records successive runs that share identical content-addressed artifacts", async () => {

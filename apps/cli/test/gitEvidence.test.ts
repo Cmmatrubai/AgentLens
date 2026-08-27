@@ -93,4 +93,18 @@ describe("read-only Git evidence", () => {
     expect(JSON.stringify(after.untrackedMetadata)).not.toContain("UNTRACKED_CONTENT_MUST_NOT_APPEAR");
     expect(await readFile(join(root, "future.txt"), "utf8")).toBe("UNTRACKED_CONTENT_MUST_NOT_APPEAR");
   });
+
+  it("decodes Git C-quoted octal UTF-8 paths from a real repository", async () => {
+    const root = await cleanRepository();
+    await git(root, "config", "core.quotePath", "true");
+    const before = await captureGitBefore(root);
+    await writeFile(join(root, "é space.txt"), "quoted\n", "utf8");
+
+    const after = await captureGitAfter(before);
+
+    expect(after.finalStatus).toContain('"\\303\\251 space.txt"');
+    expect(after.untrackedMetadata).toEqual([
+      { path: "é space.txt", type: "file", size: 7 }
+    ]);
+  });
 });

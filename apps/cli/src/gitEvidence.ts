@@ -74,13 +74,57 @@ async function branch(cwd: string, options: GitCaptureOptions): Promise<string |
   return result.exitCode === 0 ? result.stdout.trimEnd() : null;
 }
 
-function decodedStatusPath(value: string): string {
+export function decodeGitPath(value: string): string {
   const candidate = value.trim();
   if (!candidate.startsWith('"')) return candidate;
+  if (!candidate.endsWith('"')) throw new Error(`Unsupported quoted Git status path: ${candidate}`);
+
+  const bytes: number[] = [];
+  const escapes: Readonly<Record<string, number>> = {
+    a: 0x07,
+    b: 0x08,
+    t: 0x09,
+    n: 0x0a,
+    v: 0x0b,
+    f: 0x0c,
+    r: 0x0d,
+    '"': 0x22,
+    "\\": 0x5c
+  };
+  for (let index = 1; index < candidate.length - 1; index += 1) {
+    const character = candidate[index];
+    if (character !== "\\") {
+      const codePoint = candidate.codePointAt(index);
+      if (codePoint === undefined) throw new Error(`Unsupported quoted Git status path: ${candidate}`);
+      bytes.push(...Buffer.from(String.fromCodePoint(codePoint), "utf8"));
+      if (codePoint > 0xffff) index += 1;
+      continue;
+    }
+
+    const escaped = candidate[++index];
+    if (escaped === undefined || index >= candidate.length - 1) {
+      throw new Error(`Unsupported quoted Git status path: ${candidate}`);
+    }
+    const simple = escapes[escaped];
+    if (simple !== undefined) {
+      bytes.push(simple);
+      continue;
+    }
+    if (/[0-7]/.test(escaped)) {
+      let octal = escaped;
+      while (octal.length < 3 && /[0-7]/.test(candidate[index + 1] ?? "")) {
+        octal += candidate[++index];
+      }
+      bytes.push(Number.parseInt(octal, 8));
+      continue;
+    }
+    throw new Error(`Unsupported quoted Git status escape: \\${escaped}`);
+  }
+
   try {
-    return JSON.parse(candidate) as string;
-  } catch {
-    throw new Error(`Unsupported quoted Git status path: ${candidate}`);
+    return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+  } catch (error) {
+    throw new Error(`Git status path is not valid UTF-8: ${candidate}`, { cause: error });
   }
 }
 
@@ -88,7 +132,7 @@ function untrackedPaths(status: string): string[] {
   return status
     .split("\n")
     .filter((line) => line.startsWith("? "))
-    .map((line) => decodedStatusPath(line.slice(2)));
+    .map((line) => decodeGitPath(line.slice(2)));
 }
 
 async function untrackedMetadata(

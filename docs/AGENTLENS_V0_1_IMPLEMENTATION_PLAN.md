@@ -76,7 +76,7 @@ Root `package.json` must contain:
   "type": "module",
   "engines": { "node": ">=22" },
   "scripts": {
-    "agentlens": "tsx apps/cli/src/main.ts",
+    "agentlens": "tsx --conditions=development apps/cli/src/main.ts",
     "test": "vitest --run",
     "typecheck": "tsc -b --pretty false"
   }
@@ -388,11 +388,13 @@ git commit -m "feat: normalize Codex JSONL evidence"
 ### Task 5: Read-only Git evidence, process recorder, `runs`, and `inspect`
 
 **Files:**
+- Modify: `package.json`
 - Modify: `pnpm-lock.yaml`
 - Modify: `tsconfig.json`
 - Create: `apps/cli/package.json`
 - Create: `apps/cli/tsconfig.json`
 - Create: `apps/cli/src/args.ts`
+- Create: `apps/cli/src/dataRoot.ts`
 - Create: `apps/cli/src/promptInput.ts`
 - Create: `apps/cli/src/gitEvidence.ts`
 - Create: `apps/cli/src/processRunner.ts`
@@ -405,10 +407,12 @@ git commit -m "feat: normalize Codex JSONL evidence"
 - Create: `apps/cli/src/main.ts`
 - Create: `apps/cli/test/args.test.ts`
 - Create: `apps/cli/test/promptInput.test.ts`
+- Create: `apps/cli/test/processRunner.test.ts`
 - Create: `apps/cli/test/gitEvidence.test.ts`
 - Create: `apps/cli/test/recordRun.integration.test.ts`
 - Create: `apps/cli/test/readCommands.integration.test.ts`
 - Create: `apps/cli/test/privacy.integration.test.ts`
+- Create: `apps/cli/test/packagedBinary.integration.test.ts`
 - Create: `apps/cli/test/fixtures/fake-codex.mjs`
 
 **Interfaces:**
@@ -455,7 +459,7 @@ Create run `starting`, print id, spawn child with separate pipes/no PTY, mark `r
 
 - [ ] **Step 9: Implement `runs` and `inspect`**
 
-Set `apps/cli/package.json` to expose `{ "bin": { "agentlens": "dist/main.js" } }`, add the CLI package to the root TypeScript references and lockfile workspace importer, extend the root Vitest workspace pattern from packages to packages plus apps, add a Node shebang to the compiled entry point, and give the core/Codex/storage packages conditional root exports whose TypeScript types resolve to source while plain Node resolves compiled `dist/index.js`. Add a plain-Node packaged-binary smoke test; do not depend on runtime `tsx` registration. Support text and JSON output with the exact fields/labels in the spec. `--native` refuses non-standard capture and otherwise loads only redacted inline/artifact native content.
+Set `apps/cli/package.json` to expose `{ "bin": { "agentlens": "dist/main.js" } }`, add the CLI package to the root TypeScript references and lockfile workspace importer, extend the root Vitest workspace pattern from packages to packages plus apps, add a Node shebang to the compiled entry point, and give the core/Codex/storage packages conditional root exports whose TypeScript types resolve to source while plain Node resolves compiled `dist/index.js`. The root development script explicitly activates the `development` export condition, and the source entry consumes pnpm's one leading `--` wrapper delimiter. Add fresh-install development-invocation and plain-Node packaged-binary smoke tests; do not depend on runtime `tsx` registration. Support text and JSON output with the exact fields/labels in the spec. `--native` refuses non-standard capture and otherwise loads only redacted inline/artifact native content.
 
 - [ ] **Step 10: Verify GREEN, typecheck, and diff scope**
 
@@ -469,7 +473,7 @@ Use clean disposable repositories and isolated `--data-root` directories for suc
 - [ ] **Step 12: Commit**
 
 ```bash
-git add apps/cli pnpm-lock.yaml tsconfig.json vitest.workspace.ts packages/core/package.json packages/codex/package.json packages/storage/package.json
+git add apps/cli package.json pnpm-lock.yaml tsconfig.json vitest.workspace.ts packages/core/package.json packages/codex/package.json packages/storage/package.json
 git commit -m "feat: record and inspect Codex trajectories"
 ```
 

@@ -6,10 +6,34 @@ import { runInspectCommand } from "./commands/inspect.js";
 import { runRecordCommand } from "./commands/record.js";
 import { runRunsCommand } from "./commands/runs.js";
 
+async function runRecordWithProcessSignals(
+  command: Extract<ReturnType<typeof parseAgentLensArgs>, { name: "record" }>
+): Promise<number> {
+  const controller = new AbortController();
+  let receivedSignal: "SIGINT" | "SIGTERM" | undefined;
+  const interrupt = (signal: "SIGINT" | "SIGTERM") => (): void => {
+    receivedSignal ??= signal;
+    controller.abort();
+  };
+  const onSigint = interrupt("SIGINT");
+  const onSigterm = interrupt("SIGTERM");
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
+  try {
+    const recorded = await runRecordCommand(command, { signal: controller.signal });
+    if (receivedSignal === "SIGINT") return 130;
+    if (receivedSignal === "SIGTERM") return 143;
+    return recorded.cliExitCode;
+  } finally {
+    process.removeListener("SIGINT", onSigint);
+    process.removeListener("SIGTERM", onSigterm);
+  }
+}
+
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
   try {
-    const command = parseAgentLensArgs(argv);
-    if (command.name === "record") return (await runRecordCommand(command)).cliExitCode;
+    const command = parseAgentLensArgs(argv[0] === "--" ? argv.slice(1) : argv);
+    if (command.name === "record") return runRecordWithProcessSignals(command);
     if (command.name === "runs") {
       await runRunsCommand(command);
       return 0;

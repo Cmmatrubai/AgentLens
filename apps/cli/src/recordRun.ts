@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   ArtifactStore,
@@ -24,7 +23,14 @@ import {
   type RunRecord
 } from "@agentlens/storage";
 import type { RecordCommand } from "./args.js";
-import { captureGitAfter, captureGitBefore, type GitAfterEvidence, type GitBeforeEvidence } from "./gitEvidence.js";
+import { ownerOnlyDatabaseFiles, prepareDataRoot } from "./dataRoot.js";
+import {
+  captureGitAfter,
+  captureGitBefore,
+  decodeGitPath,
+  type GitAfterEvidence,
+  type GitBeforeEvidence
+} from "./gitEvidence.js";
 import { persistEventDraft } from "./persistEvent.js";
 import { ChildSpawnError, runChildProcess, type ChildProcessResult } from "./processRunner.js";
 import { resolvePromptInput } from "./promptInput.js";
@@ -89,19 +95,6 @@ function result(run: RunRecord, databasePath: string): RecordResult {
   });
 }
 
-async function ensureDataRoot(dataRoot: string): Promise<void> {
-  await mkdir(dataRoot, { recursive: true, mode: 0o700 });
-  await chmod(dataRoot, 0o700);
-}
-
-async function ownerOnlyDatabaseFiles(databasePath: string): Promise<void> {
-  for (const path of [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]) {
-    await chmod(path, 0o600).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-    });
-  }
-}
-
 function repositoryFingerprint(repositoryRoot: string, key: Buffer): string {
   return redactText(repositoryRoot, { policy: "strict", key, contentClass: "path" }).text;
 }
@@ -130,24 +123,14 @@ function appendInternalEvent(
   }, audits);
 }
 
-function decodedGitPath(value: string): string {
-  const candidate = value.trim();
-  if (!candidate.startsWith('"')) return candidate;
-  try {
-    return JSON.parse(candidate) as string;
-  } catch {
-    return candidate;
-  }
-}
-
 function evidencePathFromStatusLine(line: string): string[] {
-  if (line.startsWith("? ") || line.startsWith("! ")) return [decodedGitPath(line.slice(2))];
-  if (line.startsWith("1 ")) return [decodedGitPath(line.split(" ").slice(8).join(" "))];
+  if (line.startsWith("? ") || line.startsWith("! ")) return [decodeGitPath(line.slice(2))];
+  if (line.startsWith("1 ")) return [decodeGitPath(line.split(" ").slice(8).join(" "))];
   if (line.startsWith("2 ")) {
-    const paths = line.split(" ").slice(9).join(" ").split("\t").map(decodedGitPath);
+    const paths = line.split(" ").slice(9).join(" ").split("\t").map(decodeGitPath);
     return paths;
   }
-  if (line.startsWith("u ")) return [decodedGitPath(line.split(" ").slice(10).join(" "))];
+  if (line.startsWith("u ")) return [decodeGitPath(line.split(" ").slice(10).join(" "))];
   return [];
 }
 
@@ -169,9 +152,13 @@ function filterSensitiveDiffCheck(output: string): string {
   const filtered: string[] = [];
   let excludeDetail = false;
   for (const line of output.split("\n")) {
+    if (line.startsWith("+")) {
+      if (!excludeDetail) filtered.push(line);
+      continue;
+    }
     const header = /^(.*):\d+:\s.*$/.exec(line);
     if (header?.[1]) {
-      const decision = shouldExcludePath(decodedGitPath(header[1]), "standard");
+      const decision = shouldExcludePath(decodeGitPath(header[1]), "standard");
       excludeDetail = decision.exclude;
       filtered.push(decision.exclude
         ? `[[EXCLUDED:${decision.reason ?? "sensitive-path"}]]`
@@ -387,6 +374,34 @@ function appendRecorderFailure(
   }, nextId);
 }
 
+function invocationPayload(
+  command: RecordCommand,
+  promptInput: Awaited<ReturnType<typeof resolvePromptInput>>
+): Record<string, unknown> {
+  const promptSource = promptInput.mode === "buffered" ? "stdin-buffered" : "tty-inherited";
+  if (command.capture !== "standard") {
+    return {
+      promptSource,
+      argv: { state: "omitted", argumentCount: command.childArgs.length },
+      stdin: promptInput.mode === "buffered"
+        ? { state: "omitted", byteLength: promptInput.bytes.byteLength }
+        : { state: "absent" }
+    };
+  }
+  return {
+    promptSource,
+    argv: { state: "captured", values: [...command.childArgs] },
+    stdin: promptInput.mode === "buffered"
+      ? {
+          state: "captured",
+          byteLength: promptInput.bytes.byteLength,
+          encoding: "utf8-lossy",
+          text: promptInput.bytes.toString("utf8")
+        }
+      : { state: "absent" }
+  };
+}
+
 export async function recordRun(
   command: RecordCommand,
   dependencies: RecordRunDependencies = {}
@@ -401,9 +416,8 @@ export async function recordRun(
   const before = await captureGitBefore(cwd);
   const promptInput = await resolvePromptInput(command.childArgs, stdin);
   const dataRoot = resolve(command.dataRoot);
-  await ensureDataRoot(dataRoot);
+  const databasePath = await prepareDataRoot(dataRoot);
   const key = await loadOrCreateRedactionKey(dataRoot);
-  const databasePath = join(dataRoot, "agentlens.sqlite");
   const database = openDatabase(databasePath);
   await ownerOnlyDatabaseFiles(databasePath);
   const artifactRoot = join(dataRoot, "artifacts", "sha256");
@@ -462,6 +476,26 @@ export async function recordRun(
       iso(now)
     );
 
+    await persistEventDraft({
+      kind: "recorder.invocation",
+      status: "completed",
+      provenance: "recorder",
+      source: { provider: "codex-exec", correlationId: runId },
+      relationships: [],
+      summary: "Recorder invocation",
+      normalizedPayload: invocationPayload(command, promptInput)
+    }, {
+      runId,
+      capturePolicy: command.capture,
+      redactionKey: key,
+      artifactStore,
+      repository,
+      committedArtifactIds,
+      nextEventId: nextId,
+      nextSequence: () => state.sequence++,
+      receivedAt: () => iso(now)
+    });
+
     if (dependencies.signal?.aborted) {
       const interruption = appendInternalEvent(repository, state, {
         runId,
@@ -493,11 +527,13 @@ export async function recordRun(
       env,
       promptInput,
       ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+      now,
       onSpawn: (pid) => {
         repository.markRunning(runId, { childPid: pid });
         markedRunning = true;
       },
-      onLine: (stream, line) => {
+      onLine: (stream, line, receivedAt) => {
+        const receivedAtIso = new Date(receivedAt).toISOString();
         lineQueue = lineQueue.then(async () => {
           const decoded = decodeCodexLine(line, stream);
           const drafts: readonly EventDraftV1[] = decoded.type === "diagnostic"
@@ -513,7 +549,7 @@ export async function recordRun(
               committedArtifactIds,
               nextEventId: nextId,
               nextSequence: () => state.sequence++,
-              receivedAt: () => iso(now)
+              receivedAt: () => receivedAtIso
             });
             if (
               persisted.provenance === "observed" &&
@@ -615,6 +651,10 @@ export async function recordRun(
         eventId: nextId(),
         receivedAt: iso(now),
         endedAt: now(),
+        ...(state.providerTerminalEventId === undefined
+          ? {}
+          : { providerTerminalEventId: state.providerTerminalEventId }),
+        ...(interruptionEventId === undefined ? {} : { interruptionEventId }),
         recorderFailureEventId
       });
       return result(run, databasePath);

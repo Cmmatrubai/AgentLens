@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { appendFileSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
 const args = process.argv.slice(2);
@@ -96,6 +96,10 @@ switch (mode) {
     terminal();
     break;
   }
+  case "stdin-reject":
+    closeSync(0);
+    setTimeout(terminal, 100);
+    break;
   case "commit":
     writeFileSync("tracked.txt", "child committed change\n");
     execFileSync("git", ["add", "tracked.txt"]);
@@ -116,7 +120,10 @@ switch (mode) {
     break;
   case "privacy":
     writeFileSync("tracked.txt", "Bearer STANDARD_TOKEN_SENTINEL\nMETADATA_DIFF_SENTINEL\n");
-    writeFileSync(".env.production", "ENV_DIFF_ARBITRARY_SENTINEL   \n");
+    writeFileSync(
+      ".env.production",
+      "ENV_DIFF_ARBITRARY_SENTINEL   \nTOKEN:123: ARBITRARY_DETAIL_SECRET   \n"
+    );
     writeFileSync(".env.SENSITIVE_PATH_SENTINEL with space", "UNTRACKED_CONTENT_SENTINEL\n");
     emit({
       type: "item.completed",

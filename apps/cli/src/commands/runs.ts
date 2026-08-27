@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { openDatabase, RunRepository } from "@agentlens/storage";
 import type { RunsCommand } from "../args.js";
+import { ownerOnlyDatabaseFiles, prepareDataRoot } from "../dataRoot.js";
 import { runsJson, runsText, type RunsJsonOutput } from "../format.js";
 
 interface OutputWriter {
@@ -12,7 +13,9 @@ export async function runRunsCommand(
   dependencies: { readonly stdout?: OutputWriter } = {}
 ): Promise<RunsJsonOutput> {
   const dataRoot = resolve(command.dataRoot);
-  const database = openDatabase(join(dataRoot, "agentlens.sqlite"));
+  const databasePath = await prepareDataRoot(dataRoot);
+  const database = openDatabase(databasePath);
+  await ownerOnlyDatabaseFiles(databasePath);
   try {
     const repository = new RunRepository(database, {
       artifactRoot: join(dataRoot, "artifacts", "sha256")
@@ -25,5 +28,6 @@ export async function runRunsCommand(
     return value;
   } finally {
     database.close();
+    await ownerOnlyDatabaseFiles(databasePath);
   }
 }
