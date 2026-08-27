@@ -238,6 +238,9 @@ git commit -m "feat: redact content before durable storage"
 ### Task 3: Append-only SQLite storage and recovery relationships
 
 **Files:**
+- Modify: `pnpm-lock.yaml`
+- Modify: `pnpm-workspace.yaml`
+- Modify: `tsconfig.json`
 - Create: `packages/storage/package.json`
 - Create: `packages/storage/tsconfig.json`
 - Create: `packages/storage/migrations/001_initial.sql`
@@ -292,7 +295,7 @@ Expected: FAIL because SQLite storage is absent.
 
 - [ ] **Step 6: Implement the migration and minimal repository**
 
-Use WAL, foreign keys, synchronous `NORMAL`, 5-second busy timeout, epoch milliseconds, insert-only event statements, explicit source/relationship rows, and transactional event+relationship insertion. `commitArtifactMetadata` must `stat` and verify the completed artifact before its transaction.
+Use WAL, foreign keys, synchronous `NORMAL`, 5-second busy timeout, epoch milliseconds, insert-only event statements, explicit source/relationship rows, and transactional event+relationship insertion. `commitArtifactMetadata` must `stat` and verify the completed artifact before its transaction. Add the storage project to the root TypeScript references, add `better-sqlite3` plus its TypeScript declarations to the storage package, update the lockfile, and authorize only the `better-sqlite3` native build in the pnpm workspace policy.
 
 - [ ] **Step 7: Verify GREEN, typecheck, and diff scope**
 
@@ -302,7 +305,7 @@ Expected: PASS with the first observed row byte-for-byte unchanged after recover
 - [ ] **Step 8: Commit**
 
 ```bash
-git add packages/storage
+git add pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json packages/storage
 git commit -m "feat: persist append-only AgentLens runs"
 ```
 
