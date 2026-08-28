@@ -78,6 +78,109 @@ afterEach(() => {
 });
 
 describe("append-only events and recovery", () => {
+  const providerTerminalCases: readonly {
+    name: string;
+    started: Pick<TraceEventV1, "kind" | "source">;
+    terminal: Pick<TraceEventV1, "kind" | "status" | "source">;
+  }[] = [
+    {
+      name: "a declined item.completed status",
+      started: {
+        kind: "command",
+        source: {
+          provider: "codex-exec",
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "item.started",
+          itemType: "command_execution"
+        }
+      },
+      terminal: {
+        kind: "command",
+        status: "declined",
+        source: {
+          provider: "codex-exec",
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "item.completed",
+          itemType: "command_execution"
+        }
+      }
+    },
+    {
+      name: "an item.completed event with unknown canonical status",
+      started: {
+        kind: "command",
+        source: {
+          provider: "codex-exec",
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "item.started",
+          itemType: "command_execution"
+        }
+      },
+      terminal: {
+        kind: "command",
+        status: "unknown",
+        source: {
+          provider: "codex-exec",
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "item.completed",
+          itemType: "command_execution"
+        }
+      }
+    },
+    {
+      name: "an item.failed event with unknown canonical status",
+      started: {
+        kind: "command",
+        source: {
+          provider: "codex-exec",
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "item.started",
+          itemType: "command_execution"
+        }
+      },
+      terminal: {
+        kind: "command",
+        status: "unknown",
+        source: {
+          provider: "codex-exec",
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "item.failed",
+          itemType: "command_execution"
+        }
+      }
+    },
+    {
+      name: "a tool.completed event with unknown canonical status",
+      started: {
+        kind: "tool",
+        source: {
+          provider: "codex-exec",
+          turnId: "turn-1",
+          toolId: "tool-1",
+          eventType: "tool.started",
+          itemType: "mcp_tool_call"
+        }
+      },
+      terminal: {
+        kind: "tool",
+        status: "unknown",
+        source: {
+          provider: "codex-exec",
+          turnId: "turn-1",
+          toolId: "tool-1",
+          eventType: "tool.completed",
+          itemType: "mcp_tool_call"
+        }
+      }
+    }
+  ];
+
   it.each([
     {
       name: "thread.started even when it carries an incidental item ID",
@@ -223,6 +326,51 @@ describe("append-only events and recovery", () => {
         progress,
         recovered[0]
       ]);
+    } finally {
+      close();
+    }
+  });
+
+  it.each(providerTerminalCases)("does not automatically recover after $name", (testCase) => {
+    const { repository, close } = setup();
+    try {
+      const started = repository.appendEvent(event("event-start", 0, "in_progress", testCase.started));
+      const terminal = repository.appendEvent(event(
+        "event-terminal",
+        1,
+        testCase.terminal.status,
+        testCase.terminal
+      ));
+
+      expect(repository.appendRecoveryForOpenEvents(runId, {
+        receivedAt: "2026-08-26T20:01:00.000Z",
+        eventIdFor: (openEvent) => `recovery-${openEvent.id}`
+      })).toEqual([]);
+      expect(repository.getRunDetail(runId).events).toEqual([started, terminal]);
+    } finally {
+      close();
+    }
+  });
+
+  it.each(providerTerminalCases)("rejects manual recovery after $name", (testCase) => {
+    const { repository, close } = setup();
+    try {
+      const started = repository.appendEvent(event("event-start", 0, "in_progress", testCase.started));
+      const terminal = repository.appendEvent(event(
+        "event-terminal",
+        1,
+        testCase.terminal.status,
+        testCase.terminal
+      ));
+      const manualRecovery = event("manual-recovery", 2, "interrupted", {
+        kind: "recorder.recovery",
+        provenance: "recorder",
+        source: { ...testCase.started.source, eventType: "recorder.recovery" },
+        relationships: [{ type: "recovers", eventId: started.id }]
+      });
+
+      expect(() => repository.appendEvent(manualRecovery)).toThrow(/observed terminal event/i);
+      expect(repository.getRunDetail(runId).events).toEqual([started, terminal]);
     } finally {
       close();
     }

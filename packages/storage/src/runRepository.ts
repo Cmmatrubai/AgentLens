@@ -529,8 +529,27 @@ function isRecoverableProviderLifecycle(event: TraceEventV1): boolean {
 }
 
 function isObservedTerminalEvent(event: TraceEventV1): boolean {
-  return event.provenance === "observed" &&
-    (event.status === "completed" || event.status === "failed" || event.status === "interrupted");
+  if (event.provenance !== "observed") return false;
+  if (
+    event.status === "completed" ||
+    event.status === "failed" ||
+    event.status === "declined" ||
+    event.status === "interrupted"
+  ) return true;
+
+  switch (event.source.eventType) {
+    case "item.completed":
+    case "item.failed":
+    case "item.declined":
+    case "item.interrupted":
+    case "tool.completed":
+    case "tool.failed":
+    case "tool.declined":
+    case "tool.interrupted":
+      return true;
+    default:
+      return false;
+  }
 }
 
 function recoverySourceMatches(target: TraceEventV1, recovery: TraceEventV1): boolean {
