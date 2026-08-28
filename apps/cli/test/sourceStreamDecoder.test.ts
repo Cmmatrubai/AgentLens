@@ -107,4 +107,31 @@ describe("bounded source stream decoder", () => {
       maxRetainedBytes: 2
     });
   });
+
+  it("emits one bounded diagnostic for a 64 MiB record that ends at EOF", async () => {
+    const records: SourceStreamRecord[] = [];
+    const oversizedBytes = 64 * 1024 * 1024;
+    const stream = Readable.from([
+      Buffer.from("no-newline-oversized-record"),
+      Buffer.alloc(oversizedBytes - 27, 0x79)
+    ]);
+
+    const metrics = await consumeSourceStream(stream, "stderr", async (record) => {
+      records.push(record);
+    });
+
+    expect(records).toEqual([{
+      type: "diagnostic",
+      stream: "stderr",
+      reason: "line_too_large",
+      limitBytes: MAX_SOURCE_LINE_BYTES,
+      observedBytes: oversizedBytes
+    }]);
+    expect(metrics).toMatchObject({
+      lineCount: 0,
+      diagnosticCount: 1,
+      maxInFlightCallbacks: 1,
+      maxRetainedBytes: MAX_SOURCE_LINE_BYTES
+    });
+  }, 15_000);
 });
