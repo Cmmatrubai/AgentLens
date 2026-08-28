@@ -32,6 +32,9 @@ export interface RedactionAudit {
 
 const redactedResultBrand: unique symbol = Symbol("agentlens.redacted-result");
 const authenticRedactionResults = new WeakSet<object>();
+const MAX_JSON_REDACTION_DEPTH = 100;
+const JSON_MAX_DEPTH_REASON = "json-max-depth";
+const JSON_MAX_DEPTH_MARKER = `[[REDACTED:${JSON_MAX_DEPTH_REASON}]]`;
 
 export interface RedactionResult {
   readonly [redactedResultBrand]: true;
@@ -227,14 +230,50 @@ function stableSecretValue(value: unknown): string {
   return JSON.stringify(value) ?? String(value);
 }
 
+function reachesJsonDepthLimit(value: object, startingDepth: number): boolean {
+  const pending: Array<{ value: object; depth: number }> = [{ value, depth: startingDepth }];
+  const greatestVisitedDepth = new WeakMap<object, number>();
+
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current) break;
+    if (current.depth >= MAX_JSON_REDACTION_DEPTH) return true;
+    const visitedDepth = greatestVisitedDepth.get(current.value);
+    if (visitedDepth !== undefined && visitedDepth >= current.depth) continue;
+    greatestVisitedDepth.set(current.value, current.depth);
+
+    for (const entry of Object.values(current.value)) {
+      if (entry !== null && typeof entry === "object") {
+        pending.push({ value: entry, depth: current.depth + 1 });
+      }
+    }
+  }
+
+  return false;
+}
+
 function redactJsonValue(
   value: unknown,
   key: Buffer,
   audits: Map<string, number>,
-  propertyName?: string
+  propertyName?: string,
+  depth = 0
 ): ImmutableJsonValue {
+  if (depth >= MAX_JSON_REDACTION_DEPTH && value !== null && typeof value === "object") {
+    audits.set(JSON_MAX_DEPTH_REASON, (audits.get(JSON_MAX_DEPTH_REASON) ?? 0) + 1);
+    return JSON_MAX_DEPTH_MARKER;
+  }
+
   const reason = propertyName ? sensitiveJsonReason(propertyName) : undefined;
   if (reason) {
+    if (
+      value !== null &&
+      typeof value === "object" &&
+      reachesJsonDepthLimit(value, depth)
+    ) {
+      audits.set(JSON_MAX_DEPTH_REASON, (audits.get(JSON_MAX_DEPTH_REASON) ?? 0) + 1);
+      return JSON_MAX_DEPTH_MARKER;
+    }
     audits.set(reason, (audits.get(reason) ?? 0) + 1);
     return marker(reason, stableSecretValue(value), key);
   }
@@ -248,13 +287,15 @@ function redactJsonValue(
   }
 
   if (Array.isArray(value)) {
-    return immutableJsonArray(value.map((entry) => redactJsonValue(entry, key, audits)));
+    return immutableJsonArray(
+      value.map((entry) => redactJsonValue(entry, key, audits, undefined, depth + 1))
+    );
   }
 
   if (value !== null && typeof value === "object") {
-    const output: Record<string, ImmutableJsonValue> = {};
+    const output: Record<string, ImmutableJsonValue> = Object.create(null);
     for (const [entryKey, entryValue] of Object.entries(value)) {
-      output[entryKey] = redactJsonValue(entryValue, key, audits, entryKey);
+      output[entryKey] = redactJsonValue(entryValue, key, audits, entryKey, depth + 1);
     }
     return immutableJsonObject(output);
   }

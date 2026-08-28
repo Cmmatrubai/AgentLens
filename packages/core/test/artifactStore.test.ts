@@ -1,4 +1,5 @@
-import { access, mkdtemp, readFile, readdir, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -120,6 +121,30 @@ describe("ArtifactStore", () => {
     expect(Object.isFrozen(nativePayload.redacted)).toBe(true);
   });
 
+  it("preserves hostile provider keys in inline native payload snapshots", async () => {
+    const dataRoot = await createRoot();
+    const store = new ArtifactStore(dataRoot);
+    const input = JSON.parse(
+      '{"__proto__":{"provider":"proto"},"constructor":{"provider":"constructor"},"prototype":{"provider":"prototype"}}'
+    ) as unknown;
+    const redacted = redactJson(input, {
+      policy: "standard",
+      key: Buffer.alloc(32, 0x41),
+      contentClass: "native",
+      runId: "run-inline-hostile-keys"
+    });
+
+    const nativePayload = await prepareNativePayload(redacted, store);
+
+    expect(nativePayload.storage).toBe("inline");
+    if (nativePayload.storage !== "inline") throw new Error("expected inline native payload");
+    expect(Object.getPrototypeOf(nativePayload.redacted)).toBeNull();
+    expect(Object.keys(nativePayload.redacted)).toEqual(["__proto__", "constructor", "prototype"]);
+    expect(Object.hasOwn(nativePayload.redacted, "__proto__")).toBe(true);
+    expect(JSON.stringify(nativePayload.redacted)).toBe(JSON.stringify(input));
+    expect((Object.prototype as Record<string, unknown>).provider).toBeUndefined();
+  });
+
   it("writes only explicitly redacted bytes and resolves after the owner-only final file exists", async () => {
     const dataRoot = await createRoot();
     const sourceSentinel = "ORIGINAL_ARTIFACT_SENTINEL";
@@ -143,6 +168,76 @@ describe("ArtifactStore", () => {
     const allDurableBytes = Buffer.concat(await readEveryFile(dataRoot)).toString("utf8");
     expect(allDurableBytes).not.toContain(sourceSentinel);
   });
+
+  it("rejects invalid bytes instead of labeling them application/json", async () => {
+    const dataRoot = await createRoot();
+    const store = new ArtifactStore(dataRoot);
+    const redacted = redactText("not valid JSON", {
+      policy: "standard",
+      key: Buffer.alloc(32, 0x41),
+      contentClass: "native"
+    });
+
+    await expect(
+      store.writeRedacted({
+        runId: "run-invalid-json",
+        kind: "native-payload",
+        redactedBytes: redactedTextBytes(redacted),
+        mediaType: "application/json"
+      })
+    ).rejects.toThrow("application/json artifacts require valid UTF-8 JSON");
+    expect(await readEveryFile(dataRoot)).toHaveLength(0);
+  });
+
+  it.each(["artifacts", "tmp", "sha256", "prefix", "file"] as const)(
+    "rejects a symlinked %s artifact path without mutating its external target",
+    async (boundary) => {
+      const dataRoot = await createRoot();
+      const outside = join(dataRoot, `outside-${boundary}`);
+      const sentinel = join(outside, "sentinel.txt");
+      const redacted = redactText("safe artifact body", {
+        policy: "standard",
+        key: Buffer.alloc(32, 0x41),
+        contentClass: "output"
+      });
+      const digest = createHash("sha256").update(redacted.text, "utf8").digest("hex");
+      const artifacts = join(dataRoot, "artifacts");
+      const temp = join(artifacts, "tmp");
+      const sha256 = join(artifacts, "sha256");
+      const prefix = join(sha256, digest.slice(0, 2));
+      const finalPath = join(prefix, digest);
+      await mkdir(outside, { mode: 0o755 });
+      await writeFile(sentinel, "OUTSIDE_ARTIFACT_SENTINEL", { mode: 0o644 });
+
+      if (boundary === "artifacts") {
+        await symlink(outside, artifacts);
+      } else if (boundary === "tmp") {
+        await mkdir(artifacts);
+        await symlink(outside, temp);
+      } else if (boundary === "sha256") {
+        await mkdir(artifacts);
+        await symlink(outside, sha256);
+      } else if (boundary === "prefix") {
+        await mkdir(sha256, { recursive: true });
+        await symlink(outside, prefix);
+      } else {
+        await mkdir(prefix, { recursive: true });
+        await symlink(sentinel, finalPath);
+      }
+
+      const store = new ArtifactStore(dataRoot);
+      await expect(store.writeRedacted({
+        runId: `run-symlink-${boundary}`,
+        kind: "command-output",
+        redactedBytes: redactedTextBytes(redacted),
+        mediaType: "text/plain"
+      })).rejects.toThrow(/symbolic|symlink/i);
+
+      expect(await readFile(sentinel, "utf8")).toBe("OUTSIDE_ARTIFACT_SENTINEL");
+      expect((await stat(outside)).mode & 0o777).toBe(0o755);
+      expect((await stat(sentinel)).mode & 0o777).toBe(0o644);
+    }
+  );
 
   it("keeps small redacted native JSON inline", async () => {
     const dataRoot = await createRoot();
@@ -185,6 +280,48 @@ describe("ArtifactStore", () => {
     expect((await stat(artifactPath)).mode & 0o777).toBe(0o600);
     const allDurableBytes = Buffer.concat(await readEveryFile(dataRoot)).toString("utf8");
     expect(allDurableBytes).not.toContain("LARGE_NATIVE_SENTINEL");
+  });
+
+  it("stores truncated native JSON as a bounded inspectable JSON preview envelope", async () => {
+    const dataRoot = await createRoot();
+    const store = new ArtifactStore(dataRoot);
+    const redacted = redactJson(
+      {
+        future: "🙂".repeat(3 * 1024 * 1024),
+        token: "TRUNCATED_NATIVE_SECRET_SENTINEL"
+      },
+      {
+        policy: "standard",
+        key: Buffer.alloc(32, 0x41),
+        contentClass: "native",
+        runId: "run-truncated-native"
+      }
+    );
+    if (redacted.storage !== "content") throw new Error("expected redacted JSON content");
+
+    const nativePayload = await prepareNativePayload(redacted, store);
+
+    expect(nativePayload.storage).toBe("artifact");
+    if (nativePayload.storage !== "artifact") throw new Error("expected external native payload");
+    const storedBytes = await readFile(store.pathForArtifactId(nativePayload.artifactId));
+    const storedText = storedBytes.toString("utf8");
+    const parsed = JSON.parse(storedText) as {
+      $agentlens: Record<string, unknown>;
+      preview: string;
+    };
+    expect(storedBytes.byteLength).toBeLessThanOrEqual(10 * 1024 * 1024);
+    expect(parsed).toMatchObject({
+      $agentlens: {
+        kind: "truncated-json-artifact",
+        reason: "artifact-max-bytes",
+        truncated: true,
+        maxByteLength: 10 * 1024 * 1024,
+        originalByteLength: redacted.redactedBytes.byteLength
+      },
+      preview: expect.stringContaining('{"future":"')
+    });
+    expect(parsed.preview).not.toContain("�");
+    expect(storedText).not.toContain("TRUNCATED_NATIVE_SECRET_SENTINEL");
   });
 
   it.each(["metadata-only", "strict"] as const)(

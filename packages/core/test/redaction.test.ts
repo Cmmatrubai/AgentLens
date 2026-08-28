@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -38,6 +38,44 @@ describe("redaction key", () => {
     expect(second).toEqual(first);
     expect((await stat(join(dataRoot, "secrets"))).mode & 0o777).toBe(0o700);
     expect((await stat(join(dataRoot, "secrets", "redaction-hmac.key"))).mode & 0o777).toBe(0o600);
+  });
+
+  it("rejects a symlinked secrets directory without mutating its external target", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-redaction-key-symlink-"));
+    temporaryRoots.push(root);
+    const dataRoot = join(root, "data");
+    const outside = join(root, "outside-secrets");
+    const sentinel = join(outside, "sentinel.txt");
+    await mkdir(dataRoot);
+    await mkdir(outside, { mode: 0o755 });
+    await writeFile(sentinel, "OUTSIDE_SECRETS_SENTINEL", { mode: 0o644 });
+    await symlink(outside, join(dataRoot, "secrets"));
+
+    await expect(loadOrCreateRedactionKey(dataRoot)).rejects.toThrow(/symbolic|symlink/i);
+
+    expect(await readFile(sentinel, "utf8")).toBe("OUTSIDE_SECRETS_SENTINEL");
+    expect((await stat(outside)).mode & 0o777).toBe(0o755);
+    expect((await stat(sentinel)).mode & 0o777).toBe(0o644);
+    await expect(readFile(join(outside, "redaction-hmac.key"))).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+  });
+
+  it("rejects a symlinked key without reading or chmodding its external target", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-redaction-key-file-symlink-"));
+    temporaryRoots.push(root);
+    const dataRoot = join(root, "data");
+    const secrets = join(dataRoot, "secrets");
+    const outsideKey = join(root, "outside.key");
+    const outsideBytes = Buffer.alloc(32, 0x5a);
+    await mkdir(secrets, { recursive: true });
+    await writeFile(outsideKey, outsideBytes, { mode: 0o644 });
+    await symlink(outsideKey, join(secrets, "redaction-hmac.key"));
+
+    await expect(loadOrCreateRedactionKey(dataRoot)).rejects.toThrow(/symbolic|symlink/i);
+
+    expect(await readFile(outsideKey)).toEqual(outsideBytes);
+    expect((await stat(outsideKey)).mode & 0o777).toBe(0o644);
   });
 });
 
@@ -189,6 +227,67 @@ describe("JSON redaction", () => {
     expect(JSON.stringify(result.redacted)).not.toContain("JSON_BEARER_SENTINEL");
     expect(JSON.stringify(result.redacted)).not.toContain("JSON_PASSWORD_SENTINEL");
     expect(JSON.stringify(result.redacted)).toMatch(/hmac-sha256:[0-9a-f]{32}/);
+  });
+
+  it("preserves hostile provider keys as own properties without mutating prototypes", () => {
+    const input = JSON.parse(
+      '{"__proto__":{"provider":"proto"},"constructor":{"provider":"constructor"},"prototype":{"provider":"prototype"}}'
+    ) as unknown;
+    const result = redactJson(input, {
+      policy: "standard",
+      key: Buffer.alloc(32, 0x41),
+      contentClass: "native",
+      runId: "run-hostile-keys"
+    });
+
+    expect(result.storage).toBe("content");
+    if (result.storage !== "content") throw new Error("expected redacted JSON content");
+    expect(Object.getPrototypeOf(result.redacted)).toBeNull();
+    expect(Object.keys(result.redacted)).toEqual(["__proto__", "constructor", "prototype"]);
+    expect(Object.hasOwn(result.redacted, "__proto__")).toBe(true);
+    expect(JSON.stringify(result.redacted)).toBe(JSON.stringify(input));
+    expect((Object.prototype as Record<string, unknown>).provider).toBeUndefined();
+  });
+
+  it("caps deeply nested native JSON before descent with a content-free marker and audit", () => {
+    let input: unknown = { leaf: "UNREDACTED_DEEP_SENTINEL" };
+    for (let depth = 0; depth < 20_000; depth += 1) input = { next: input };
+
+    const result = redactJson(input, {
+      policy: "standard",
+      key: Buffer.alloc(32, 0x41),
+      contentClass: "native",
+      runId: "run-depth-cap"
+    });
+
+    expect(result.storage).toBe("content");
+    if (result.storage !== "content") throw new Error("expected redacted JSON content");
+    const serialized = result.redactedBytes.copy().toString("utf8");
+    expect(serialized).toContain("[[REDACTED:json-max-depth]]");
+    expect(serialized).not.toContain("UNREDACTED_DEEP_SENTINEL");
+    expect(result.audits).toEqual([{ reason: "json-max-depth", count: 1 }]);
+  });
+
+  it("does not recursively serialize a deeply nested sensitive native value", () => {
+    let deepSecret: unknown = { leaf: "UNREDACTED_DEEP_SECRET_SENTINEL" };
+    for (let depth = 0; depth < 20_000; depth += 1) deepSecret = [deepSecret];
+
+    const result = redactJson(
+      { token: deepSecret },
+      {
+        policy: "standard",
+        key: Buffer.alloc(32, 0x41),
+        contentClass: "native",
+        runId: "run-sensitive-depth-cap"
+      }
+    );
+
+    expect(result.storage).toBe("content");
+    if (result.storage !== "content") throw new Error("expected redacted JSON content");
+    const serialized = result.redactedBytes.copy().toString("utf8");
+    expect(serialized).toContain("[[REDACTED:json-max-depth]]");
+    expect(serialized).not.toContain("UNREDACTED_DEEP_SECRET_SENTINEL");
+    expect(result.audits).toEqual([{ reason: "json-max-depth", count: 1 }]);
   });
 
   it("uses a fixed audit rule ID instead of deriving it from a native property name", () => {
