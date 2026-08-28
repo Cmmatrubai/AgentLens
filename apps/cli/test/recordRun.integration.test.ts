@@ -521,6 +521,51 @@ describe("recordRun lifecycle", () => {
     });
   });
 
+  it("preserves an interruption delivered immediately after open-event recovery", async () => {
+    const context = await fixture();
+    const controller = new AbortController();
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=open-item"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: silentOutput,
+        signal: controller.signal,
+        onRecoveryAppended: () => controller.abort()
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const open = run.events.find(({ kind, source }) =>
+      kind === "command" && source.itemId === "command-open"
+    );
+
+    expect(result).toMatchObject({
+      status: "interrupted",
+      exitCode: 0,
+      terminatingSignal: null
+    });
+    expect(run.run).toMatchObject({
+      status: "interrupted",
+      exitCode: 0,
+      terminatingSignal: null,
+      terminalReason: "explicit_interruption",
+      contradictionCodes: ["provider_completed_but_interrupted"]
+    });
+    expect(open).toMatchObject({ status: "in_progress", provenance: "observed" });
+    expect(run.events.filter(({ kind }) => kind === "recorder.recovery")).toHaveLength(1);
+    expect(run.events.filter(({ kind }) => kind === "recorder.interruption")).toHaveLength(1);
+    expect(run.events.filter(({ kind, provenance }) =>
+      kind === "error" && provenance === "recorder"
+    )).toEqual([]);
+    expect(new Set(run.events.map(({ sequence }) => sequence)).size).toBe(run.events.length);
+  });
+
   it("persists final Git evidence after a child commit even when status is clean", async () => {
     const context = await fixture();
     const result = await recordRun(

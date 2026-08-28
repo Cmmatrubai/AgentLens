@@ -49,6 +49,7 @@ export interface RecordRunDependencies {
   readonly nextId?: () => string;
   readonly onRunIdPrinted?: (runId: string) => void | Promise<void>;
   readonly onFinalGitPersisted?: () => void | Promise<void>;
+  readonly onRecoveryAppended?: () => void | Promise<void>;
 }
 
 export interface RecordResult {
@@ -142,6 +143,27 @@ function appendInterruption(
     summary: "Explicit interruption",
     normalizedPayload: { explicitInterruption: true }
   }, nextId);
+}
+
+async function appendRecoveriesForOpenEvents(
+  repository: RunRepository,
+  state: RecordingState,
+  runId: string,
+  receivedAt: string,
+  nextId: () => string,
+  onRecoveryAppended?: () => void | Promise<void>
+): Promise<readonly TraceEventV1[]> {
+  const recoveries = repository.appendRecoveryForOpenEvents(runId, {
+    receivedAt,
+    eventIdFor: () => nextId()
+  });
+  if (recoveries.length === 0) return recoveries;
+  state.sequence = recoveries.reduce(
+    (nextSequence, recovery) => Math.max(nextSequence, recovery.sequence + 1),
+    state.sequence
+  );
+  await onRecoveryAppended?.();
+  return recoveries;
 }
 
 function evidencePathFromStatusLine(line: string): string[] {
@@ -604,10 +626,14 @@ export async function recordRun(
     if (dependencies.signal?.aborted && interruptionEventId === undefined) {
       interruptionEventId = appendInterruption(repository, state, runId, iso(now), nextId).id;
     }
-    repository.appendRecoveryForOpenEvents(runId, {
-      receivedAt: iso(now),
-      eventIdFor: () => nextId()
-    });
+    await appendRecoveriesForOpenEvents(
+      repository,
+      state,
+      runId,
+      iso(now),
+      nextId,
+      dependencies.onRecoveryAppended
+    );
     if (dependencies.signal?.aborted && interruptionEventId === undefined) {
       interruptionEventId = appendInterruption(repository, state, runId, iso(now), nextId).id;
     }
@@ -654,10 +680,14 @@ export async function recordRun(
         }
       }
       if (markedRunning) {
-        repository.appendRecoveryForOpenEvents(runId, {
-          receivedAt: iso(now),
-          eventIdFor: () => nextId()
-        });
+        await appendRecoveriesForOpenEvents(
+          repository,
+          state,
+          runId,
+          iso(now),
+          nextId,
+          dependencies.onRecoveryAppended
+        );
       }
       if (dependencies.signal?.aborted && interruptionEventId === undefined) {
         interruptionEventId = appendInterruption(repository, state, runId, iso(now), nextId).id;

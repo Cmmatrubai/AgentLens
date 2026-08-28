@@ -300,7 +300,7 @@ Expected: FAIL because SQLite storage is absent.
 
 - [ ] **Step 6: Implement the migration and minimal repository**
 
-Use WAL, foreign keys, synchronous `NORMAL`, 5-second busy timeout, epoch milliseconds, insert-only event statements, explicit source/relationship rows, transactional event+relationship insertion, same-run relationship foreign keys, one-recovery uniqueness, and explicit Git-evidence availability states. Keep the raw connection in `databaseInternal.ts`; the public database/repository surface must not expose it. `commitArtifactMetadata` must `stat` and verify the completed artifact before its transaction. Add the storage project to the root TypeScript references, add `better-sqlite3` plus its TypeScript declarations to the storage package, update the lockfile, and authorize only the `better-sqlite3` native build in the pnpm workspace policy.
+Use WAL, foreign keys, synchronous `NORMAL`, 5-second busy timeout, epoch milliseconds, insert-only event statements, explicit source/relationship rows, transactional event+relationship insertion, same-run relationship foreign keys, one-recovery uniqueness, and explicit Git-evidence availability states. Keep the raw connection in `databaseInternal.ts`; the public database/repository surface must not expose it. `commitArtifactMetadata` must `stat` and verify the completed artifact before its transaction. Add the storage project to the root TypeScript references, add `better-sqlite3` plus its TypeScript declarations to the storage package, update the lockfile, and authorize the `better-sqlite3` native build while retaining the existing `esbuild` authorization in the pnpm workspace policy.
 
 - [ ] **Step 7: Verify GREEN, typecheck, and diff scope**
 

@@ -9,13 +9,17 @@ export interface RunsJsonOutput {
   readonly runs: readonly ReturnType<typeof runListJson>[];
 }
 
+function runDurationMs(run: RunListRecord): number | null {
+  return run.endedAt === null ? null : Math.max(0, run.endedAt - run.startedAt);
+}
+
 function runListJson(run: RunListRecord) {
   return {
     id: run.id,
     status: run.status,
     provider: run.provider,
     startedAt: new Date(run.startedAt).toISOString(),
-    durationMs: run.endedAt === null ? null : Math.max(0, run.endedAt - run.startedAt),
+    durationMs: runDurationMs(run),
     child: {
       exitCode: run.exitCode,
       terminatingSignal: run.terminatingSignal
@@ -52,8 +56,9 @@ export function runsText(runs: readonly RunListRecord[]): string {
   if (runs.length === 0) return "No AgentLens runs found.\n";
   return `${runs.map((run) => {
     const child = run.terminatingSignal ?? (run.exitCode === null ? "pending" : `exit ${run.exitCode}`);
+    const duration = runDurationMs(run);
     const git = `HEAD changed=${String(run.headChanged)} branch changed=${String(run.branchChanged)}`;
-    return `${run.id}  ${run.status}  ${run.provider}  ${new Date(run.startedAt).toISOString()}  ${child}  ${git}`;
+    return `${run.id}  ${run.status}  ${run.provider}  ${new Date(run.startedAt).toISOString()}  duration=${duration === null ? "null" : `${duration}ms`}  ${child}  ${git}`;
   }).join("\n")}\n`;
 }
 
