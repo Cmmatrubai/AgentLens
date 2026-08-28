@@ -59,7 +59,33 @@ interface TrackedDiffCapture {
 }
 
 const MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024;
+const GIT_FILTER_CONFIG_PATTERN = "^filter\\..*\\.(clean|process)$";
+const GIT_TRACE_ENVIRONMENT_KEYS = [
+  "GIT_TRACE",
+  "GIT_TRACE_FSMONITOR",
+  "GIT_TRACE_PACK_ACCESS",
+  "GIT_TRACE_PACKET",
+  "GIT_TRACE_PACKFILE",
+  "GIT_TRACE_PERFORMANCE",
+  "GIT_TRACE_REFS",
+  "GIT_TRACE_SETUP",
+  "GIT_TRACE_SHALLOW",
+  "GIT_TRACE_CURL",
+  "GIT_TRACE2",
+  "GIT_TRACE2_EVENT",
+  "GIT_TRACE2_PERF"
+] as const;
+const UNSUPPORTED_GIT_FILTER_MESSAGE =
+  "AgentLens v0.1 does not support Git evidence capture when clean or process filters are configured.";
 export const UNREPRESENTABLE_GIT_PATH = "[[UNREPRESENTABLE_GIT_PATH]]";
+
+function gitEnvironment(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of GIT_TRACE_ENVIRONMENT_KEYS) env[key] = "0";
+  env.GIT_NO_LAZY_FETCH = "1";
+  env.GIT_OPTIONAL_LOCKS = "0";
+  return env;
+}
 
 function exitCodeFor(error: Error | null): number {
   return typeof (error as NodeJS.ErrnoException | null)?.code === "number"
@@ -82,7 +108,7 @@ async function runGit(
         cwd,
         encoding: "utf8",
         maxBuffer: MAX_GIT_OUTPUT_BYTES,
-        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }
+        env: gitEnvironment()
       },
       (error, stdout, stderr) => {
         const exitCode = exitCodeFor(error);
@@ -114,7 +140,7 @@ async function runGitBytes(
         cwd,
         encoding: null,
         maxBuffer: MAX_GIT_OUTPUT_BYTES,
-        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }
+        env: gitEnvironment()
       },
       (error, stdout, stderr) => {
         const exitCode = exitCodeFor(error);
@@ -139,6 +165,19 @@ async function branch(cwd: string, options: GitCaptureOptions): Promise<string |
     [0, 1]
   );
   return result.exitCode === 0 ? result.stdout.trimEnd() : null;
+}
+
+async function refuseConfiguredGitFilters(
+  cwd: string,
+  options: GitCaptureOptions
+): Promise<void> {
+  const result = await runGit(
+    cwd,
+    ["config", "--includes", "--name-only", "--get-regexp", GIT_FILTER_CONFIG_PATTERN],
+    options,
+    [0, 1]
+  );
+  if (result.exitCode === 0) throw new Error(UNSUPPORTED_GIT_FILTER_MESSAGE);
 }
 
 export function decodeGitPathBytes(value: string | Buffer): Buffer {
@@ -522,6 +561,7 @@ export async function captureGitBefore(
   } catch (error) {
     throw new Error("AgentLens record requires a Git repository.", { cause: error });
   }
+  await refuseConfiguredGitFilters(repositoryRoot, options);
   const initialHead = (await runGit(repositoryRoot, ["rev-parse", "HEAD"], options)).stdout.trimEnd();
   const initialBranch = await branch(repositoryRoot, options);
   const initialStatus = await captureStatus(repositoryRoot, options);
@@ -540,6 +580,7 @@ export async function captureGitAfter(
   before: GitBeforeEvidence,
   options: GitCaptureOptions = {}
 ): Promise<GitAfterEvidence> {
+  await refuseConfiguredGitFilters(before.repositoryRoot, options);
   const finalHead = (await runGit(before.repositoryRoot, ["rev-parse", "HEAD"], options)).stdout.trimEnd();
   const finalBranch = await branch(before.repositoryRoot, options);
   const finalStatus = await captureStatus(before.repositoryRoot, options);

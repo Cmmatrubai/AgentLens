@@ -1,7 +1,8 @@
 import { execFile as execFileCallback, execFileSync } from "node:child_process";
-import { chmod, lstat, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -13,6 +14,23 @@ import {
 
 const execFile = promisify(execFileCallback);
 const roots: string[] = [];
+const unsupportedFilterMessage =
+  "AgentLens v0.1 does not support Git evidence capture when clean or process filters are configured.";
+const gitTraceEnvironmentKeys = [
+  "GIT_TRACE",
+  "GIT_TRACE_FSMONITOR",
+  "GIT_TRACE_PACK_ACCESS",
+  "GIT_TRACE_PACKET",
+  "GIT_TRACE_PACKFILE",
+  "GIT_TRACE_PERFORMANCE",
+  "GIT_TRACE_REFS",
+  "GIT_TRACE_SETUP",
+  "GIT_TRACE_SHALLOW",
+  "GIT_TRACE_CURL",
+  "GIT_TRACE2",
+  "GIT_TRACE2_EVENT",
+  "GIT_TRACE2_PERF"
+] as const;
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
   return (await execFile("git", args, { cwd, encoding: "utf8" })).stdout;
@@ -30,17 +48,62 @@ async function cleanRepository(): Promise<string> {
   return root;
 }
 
+async function bloblessSparseRepository(): Promise<Readonly<{
+  root: string;
+  missingInitialBlob: string;
+}>> {
+  const source = await cleanRepository();
+  await mkdir(join(source, "sparse"));
+  await writeFile(join(source, "sparse", "hidden.txt"), "hidden before\n", "utf8");
+  await git(source, "add", "sparse/hidden.txt");
+  await git(source, "commit", "-qm", "add sparse fixture");
+  const missingInitialBlob = (await git(source, "rev-parse", "HEAD:sparse/hidden.txt")).trim();
+
+  const originParent = await mkdtemp(join(tmpdir(), "agentlens-cli-origin-"));
+  roots.push(originParent);
+  const origin = join(originParent, "origin.git");
+  await git(originParent, "clone", "--bare", source, origin);
+  await git(origin, "config", "uploadpack.allowFilter", "true");
+
+  const cloneParent = await mkdtemp(join(tmpdir(), "agentlens-cli-partial-"));
+  roots.push(cloneParent);
+  await git(
+    cloneParent,
+    "clone",
+    "--filter=blob:none",
+    "--no-checkout",
+    pathToFileURL(origin).href,
+    "clone"
+  );
+  const root = join(cloneParent, "clone");
+  await git(root, "config", "user.email", "fixture@example.test");
+  await git(root, "config", "user.name", "AgentLens Fixture");
+  await git(root, "sparse-checkout", "set", "--no-cone", "tracked.txt");
+  await git(root, "checkout", "-q");
+  return { root, missingInitialBlob };
+}
+
+async function objectExistsWithoutLazyFetch(cwd: string, object: string): Promise<boolean> {
+  return execFile("git", ["cat-file", "-e", object], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_NO_LAZY_FETCH: "1" }
+  }).then(() => true, () => false);
+}
+
 async function markerHelper(
   root: string,
   name: string,
-  stdout: string
+  stdout?: string
 ): Promise<Readonly<{ command: string; marker: string }>> {
   const command = join(root, ".git", `${name}.mjs`);
   const marker = join(root, ".git", `${name}.invoked`);
   await writeFile(command, `#!/usr/bin/env node
 import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(marker)}, "invoked\\n");
-process.stdout.write(${JSON.stringify(stdout)});
+${stdout === undefined
+    ? "process.stdin.pipe(process.stdout);"
+    : `process.stdout.write(${JSON.stringify(stdout)});`}
 `, "utf8");
   await chmod(command, 0o755);
   return { command, marker };
@@ -80,6 +143,131 @@ afterEach(async () => {
 });
 
 describe("read-only Git evidence", () => {
+  it("refuses a configured clean filter before initial status can execute it", async () => {
+    const root = await cleanRepository();
+    const helper = await markerHelper(root, "clean-filter-helper");
+    await writeFile(join(root, ".gitattributes"), "tracked.txt filter=agentlens-test\n", "utf8");
+    await git(root, "add", ".gitattributes");
+    await git(root, "commit", "-qm", "configure clean filter attributes");
+    await git(root, "config", "filter.agentlens-test.clean", helper.command);
+    const future = new Date(Date.now() + 120_000);
+    await utimes(join(root, "tracked.txt"), future, future);
+
+    const captureError = await captureGitBefore(root).then(
+      () => null,
+      (error: unknown) => error instanceof Error ? error.message : String(error)
+    );
+    const helperInvoked = await readFile(helper.marker).then(() => true, () => false);
+
+    expect({ captureError, helperInvoked }).toEqual({
+      captureError: unsupportedFilterMessage,
+      helperInvoked: false
+    });
+  });
+
+  it("refuses a configured process filter before final status or diff can execute it", async () => {
+    const root = await cleanRepository();
+    await writeFile(join(root, ".gitattributes"), "tracked.txt filter=agentlens-test\n", "utf8");
+    await git(root, "add", ".gitattributes");
+    await git(root, "commit", "-qm", "configure process filter attributes");
+    const before = await captureGitBefore(root);
+    const helper = await markerHelper(root, "process-filter-helper", "");
+    await git(root, "config", "filter.agentlens-test.process", helper.command);
+    await writeFile(join(root, "tracked.txt"), "after\n", "utf8");
+
+    const captureError = await captureGitAfter(before).then(
+      () => null,
+      (error: unknown) => error instanceof Error ? error.message : String(error)
+    );
+    const helperInvoked = await readFile(helper.marker).then(() => true, () => false);
+
+    expect({ captureError, helperInvoked }).toEqual({
+      captureError: unsupportedFilterMessage,
+      helperInvoked: false
+    });
+  });
+
+  it("scrubs inherited Git trace destinations without changing the clean worktree", async () => {
+    const outcomes: Array<{
+      variable: typeof gitTraceEnvironmentKeys[number];
+      captureSucceeded: boolean;
+      traceCreated: boolean;
+    }> = [];
+    for (const variable of gitTraceEnvironmentKeys) {
+      const root = await cleanRepository();
+      const tracePath = join(root, `${variable.toLowerCase()}.trace`);
+      const previous = process.env[variable];
+      try {
+        process.env[variable] = tracePath;
+        const captureSucceeded = await captureGitBefore(root).then(() => true, () => false);
+        const traceCreated = await readFile(tracePath).then(() => true, () => false);
+        outcomes.push({ variable, captureSucceeded, traceCreated });
+      } finally {
+        if (previous === undefined) delete process.env[variable];
+        else process.env[variable] = previous;
+      }
+    }
+
+    expect(outcomes).toEqual([
+      { variable: "GIT_TRACE", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE_FSMONITOR", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE_PACK_ACCESS", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE_PACKET", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE_PACKFILE", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE_PERFORMANCE", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE_REFS", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE_SETUP", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE_SHALLOW", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE_CURL", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE2", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE2_EVENT", captureSucceeded: true, traceCreated: false },
+      { variable: "GIT_TRACE2_PERF", captureSucceeded: true, traceCreated: false }
+    ]);
+  });
+
+  it("overrides a global-configured trace2 event target", async () => {
+    const root = await cleanRepository();
+    const tracePath = join(root, "git-trace2-config.json");
+    const globalConfig = join(root, ".git", "test-global-config");
+    await git(root, "config", "--file", globalConfig, "trace2.eventTarget", tracePath);
+    const previous = process.env.GIT_CONFIG_GLOBAL;
+    let captureSucceeded: boolean;
+    let traceCreated: boolean;
+    try {
+      process.env.GIT_CONFIG_GLOBAL = globalConfig;
+      captureSucceeded = await captureGitBefore(root).then(() => true, () => false);
+      traceCreated = await readFile(tracePath).then(() => true, () => false);
+    } finally {
+      if (previous === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = previous;
+    }
+
+    expect({ captureSucceeded, traceCreated }).toEqual({
+      captureSucceeded: true,
+      traceCreated: false
+    });
+  });
+
+  it("does not lazily fetch a missing promised blob for the final diff", async () => {
+    const { root, missingInitialBlob } = await bloblessSparseRepository();
+    expect(await git(root, "status", "--porcelain=v1")).toBe("");
+    expect(await objectExistsWithoutLazyFetch(root, missingInitialBlob)).toBe(false);
+    const before = await captureGitBefore(root);
+    expect(await objectExistsWithoutLazyFetch(root, missingInitialBlob)).toBe(false);
+    const hiddenPath = Buffer.from("sparse/hidden.txt");
+    writeIndexBlob(root, hiddenPath, "hidden after\n");
+    markSkipWorktree(root, hiddenPath);
+    await git(root, "commit", "-qm", "change sparse fixture");
+
+    const captureSucceeded = await captureGitAfter(before).then(() => true, () => false);
+    const missingBlobFetched = await objectExistsWithoutLazyFetch(root, missingInitialBlob);
+
+    expect({ captureSucceeded, missingBlobFetched }).toEqual({
+      captureSucceeded: false,
+      missingBlobFetched: false
+    });
+  });
+
   it("does not refresh index bytes when a clean tracked file mtime changes", async () => {
     const root = await cleanRepository();
     const indexPath = join(root, ".git", "index");
@@ -136,9 +324,23 @@ describe("read-only Git evidence", () => {
 
     expect(observed).toEqual([
       ["rev-parse", "--show-toplevel"],
+      [
+        "config",
+        "--includes",
+        "--name-only",
+        "--get-regexp",
+        "^filter\\..*\\.(clean|process)$"
+      ],
       ["rev-parse", "HEAD"],
       ["symbolic-ref", "--quiet", "--short", "HEAD"],
       ["status", "--porcelain=v2", "--untracked-files=all", "-z"],
+      [
+        "config",
+        "--includes",
+        "--name-only",
+        "--get-regexp",
+        "^filter\\..*\\.(clean|process)$"
+      ],
       ["rev-parse", "HEAD"],
       ["symbolic-ref", "--quiet", "--short", "HEAD"],
       ["status", "--porcelain=v2", "--untracked-files=all", "-z"],
