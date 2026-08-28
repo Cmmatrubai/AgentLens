@@ -234,6 +234,7 @@ describe("runs and inspect", () => {
       typeof provenance === "string" && source.provider === "codex-exec" && Array.isArray(relationships)
     )).toBe(true);
     expect(value.events.some(({ nativePayload }) => nativePayload?.storage === "inline")).toBe(true);
+    expect(JSON.stringify(value.events)).not.toContain('"redacted"');
     expect(value.contradictions).toEqual([]);
     expect(value.gitEvidence.terminology).toEqual({
       trackedFinalDiff: "tracked final diff",
@@ -501,35 +502,53 @@ describe("runs and inspect", () => {
     expect(recoveryText.text()).toContain(`relationships: recovers:${recovery?.relationships[0]?.eventId}`);
   });
 
-  it("refuses native expansion outside standard capture and reads only redacted standard artifacts", async () => {
-    const metadataContext = await fixture();
-    const metadata = await recordRun(
-      {
-        name: "record",
-        capture: "metadata-only",
-        dataRoot: metadataContext.dataRoot,
-        childArgs: ["codex", "exec", "--json", "--fake-mode=unknown-small"]
-      },
-      { cwd: metadataContext.repo, stdin: piped(), env: metadataContext.env, stdout: silentOutput }
-    );
-    await expect(runInspectCommand({
-      name: "inspect",
-      runId: metadata.runId,
-      dataRoot: metadataContext.dataRoot,
-      json: true,
-      native: true
-    })).rejects.toThrow(/standard capture/i);
-
+  it("projects inline and artifact native content only when standard capture requests --native", async () => {
     const standardContext = await fixture();
     const standard = await recordRun(
       {
         name: "record",
         capture: "standard",
         dataRoot: standardContext.dataRoot,
-        childArgs: ["codex", "exec", "--json", "--fake-mode=unknown-large"]
+        childArgs: ["codex", "exec", "--json", "--fake-mode=native-sentinels"]
       },
       { cwd: standardContext.repo, stdin: piped(), env: standardContext.env, stdout: silentOutput }
     );
+    const hiddenJson = writer();
+    const hidden = await runInspectCommand({
+      name: "inspect",
+      runId: standard.runId,
+      dataRoot: standardContext.dataRoot,
+      json: true,
+      native: false
+    }, { stdout: hiddenJson.output });
+    const hiddenText = writer();
+    await runInspectCommand({
+      name: "inspect",
+      runId: standard.runId,
+      dataRoot: standardContext.dataRoot,
+      json: false,
+      native: false
+    }, { stdout: hiddenText.output });
+
+    for (const sentinel of [
+      "inspect-inline-visible-phrase-92841",
+      "inspect-artifact-visible-phrase-73519"
+    ]) {
+      expect(hiddenJson.text()).not.toContain(sentinel);
+      expect(hiddenText.text()).not.toContain(sentinel);
+    }
+    const hiddenNative = hidden.events
+      .filter(({ kind }) => kind === "source.unknown")
+      .map(({ nativePayload }) => nativePayload);
+    expect(hiddenNative).toEqual([
+      { storage: "inline", contentAvailable: true },
+      expect.objectContaining({
+        storage: "artifact",
+        artifactId: expect.any(String),
+        contentAvailable: true
+      })
+    ]);
+
     const nativeOutput = writer();
     const inspected = await runInspectCommand({
       name: "inspect",
@@ -538,8 +557,12 @@ describe("runs and inspect", () => {
       json: true,
       native: true
     }, { stdout: nativeOutput.output });
-    const unknown = inspected.events.find(({ kind }) => kind === "source.unknown");
-    expect(unknown?.nativeContent).toMatchObject({ type: "future.event" });
+    expect(inspected.events.find(({ source }) => source.eventType === "future.inline")?.nativeContent)
+      .toMatchObject({ future: { value: "inspect-inline-visible-phrase-92841" } });
+    expect(inspected.events.find(({ source }) => source.eventType === "future.artifact")?.nativeContent)
+      .toMatchObject({ future: { value: expect.stringContaining("inspect-artifact-visible-phrase-73519") } });
+    expect(nativeOutput.text()).toContain("inspect-inline-visible-phrase-92841");
+    expect(nativeOutput.text()).toContain("inspect-artifact-visible-phrase-73519");
 
     const nativeText = writer();
     await runInspectCommand({
@@ -549,10 +572,55 @@ describe("runs and inspect", () => {
       json: false,
       native: true
     }, { stdout: nativeText.output });
-    expect(nativeText.text()).toContain('native: {"type":"future.event","future":{"large":');
+    expect(nativeText.text()).toContain("inspect-inline-visible-phrase-92841");
+    expect(nativeText.text()).toContain("inspect-artifact-visible-phrase-73519");
   });
 
-  it("returns bounded truncation metadata instead of parsing or emitting truncated native JSON", async () => {
+  it.each(["metadata-only", "strict"] as const)(
+    "keeps native content omitted with an explicit reason for %s even when --native is requested",
+    async (capture) => {
+      const context = await fixture();
+      const recorded = await recordRun(
+        {
+          name: "record",
+          capture,
+          dataRoot: context.dataRoot,
+          childArgs: ["codex", "exec", "--json", "--fake-mode=unknown-small"]
+        },
+        { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+      );
+      const jsonOutput = writer();
+      const inspected = await runInspectCommand({
+        name: "inspect",
+        runId: recorded.runId,
+        dataRoot: context.dataRoot,
+        json: true,
+        native: true
+      }, { stdout: jsonOutput.output });
+      const unknown = inspected.events.find(({ kind }) => kind === "source.unknown");
+
+      expect(unknown?.nativePayload).toEqual({
+        storage: "omitted",
+        contentAvailable: false,
+        reason: capture
+      });
+      expect(unknown).not.toHaveProperty("nativeContent");
+      expect(jsonOutput.text()).not.toContain("SMALL_NATIVE_TOKEN");
+
+      const textOutput = writer();
+      await runInspectCommand({
+        name: "inspect",
+        runId: recorded.runId,
+        dataRoot: context.dataRoot,
+        json: false,
+        native: true
+      }, { stdout: textOutput.output });
+      expect(textOutput.text()).toContain(`contentAvailable=false reason=${capture}`);
+      expect(textOutput.text()).not.toContain("SMALL_NATIVE_TOKEN");
+    }
+  );
+
+  it("discards a provider line above the source limit before native artifact truncation", async () => {
     const context = await fixture();
     const recorded = await recordRun(
       {
@@ -571,21 +639,23 @@ describe("runs and inspect", () => {
       json: true,
       native: true
     }, { stdout: output.output });
-    const unknown = inspected.events.find(({ kind }) => kind === "source.unknown");
+    const diagnostic = inspected.events.find(({ kind, normalizedPayload }) =>
+      kind === "recorder.stream_diagnostic" &&
+      (normalizedPayload as { reason?: unknown } | undefined)?.reason === "line_too_large"
+    );
     const artifact = inspected.artifacts.find(({ kind }) => kind === "native-payload");
 
-    expect(artifact).toMatchObject({
-      truncated: true,
-      byteLength: 10 * 1024 * 1024,
-      originalByteLength: expect.any(Number)
+    expect(diagnostic).toMatchObject({
+      normalizedPayload: {
+        stream: "stdout",
+        reason: "line_too_large",
+        limitBytes: 1_048_576,
+        observedBytes: expect.any(Number)
+      }
     });
-    expect(artifact!.originalByteLength).toBeGreaterThan(artifact!.byteLength);
-    expect(unknown?.nativeContent).toEqual({
-      state: "truncated",
-      truncated: true,
-      storedByteLength: artifact!.byteLength,
-      originalByteLength: artifact!.originalByteLength
-    });
+    expect((diagnostic?.normalizedPayload as { observedBytes: number }).observedBytes)
+      .toBeGreaterThan(10 * 1024 * 1024);
+    expect(artifact).toBeUndefined();
     expect(output.text().length).toBeLessThan(100_000);
   });
 

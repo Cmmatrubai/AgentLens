@@ -25,10 +25,12 @@ const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 type Rename = (oldPath: string, newPath: string) => Promise<void>;
 type Unlink = (path: string) => Promise<void>;
+type FsyncDirectory = (path: string) => Promise<void>;
 
 export interface ArtifactStoreOptions {
   readonly rename?: Rename;
   readonly unlink?: Unlink;
+  readonly fsyncDirectory?: FsyncDirectory;
 }
 
 export interface WriteRedactedArtifact {
@@ -261,11 +263,13 @@ export class ArtifactStore {
   readonly #dataRoot: string;
   readonly #rename: Rename;
   readonly #unlink: Unlink;
+  readonly #fsyncDirectory: FsyncDirectory;
 
   constructor(dataRoot: string, options: ArtifactStoreOptions = {}) {
     this.#dataRoot = dataRoot;
     this.#rename = options.rename ?? fsRename;
     this.#unlink = options.unlink ?? fsUnlink;
+    this.#fsyncDirectory = options.fsyncDirectory ?? fsyncDirectory;
   }
 
   pathForArtifactId(artifactId: string): string {
@@ -295,6 +299,7 @@ export class ArtifactStore {
     if (existingFinal !== undefined) {
       if (existingFinal.isSymbolicLink()) throw artifactPathError(finalPath);
       await validateArtifactFile(finalPath, capped.bytes, sha256);
+      await this.#fsyncDirectory(finalDirectory);
       return {
         id: sha256,
         runId: input.runId,
@@ -326,7 +331,7 @@ export class ArtifactStore {
       await this.#rename(tempPath, finalPath);
       renamed = true;
       await validateArtifactFile(finalPath, capped.bytes, sha256);
-      await fsyncDirectory(finalDirectory);
+      await this.#fsyncDirectory(finalDirectory);
 
       return {
         id: sha256,

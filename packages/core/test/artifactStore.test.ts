@@ -169,6 +169,55 @@ describe("ArtifactStore", () => {
     expect(allDurableBytes).not.toContain(sourceSentinel);
   });
 
+  it("repairs an existing artifact's directory durability before returning it", async () => {
+    const dataRoot = await createRoot();
+    const redacted = redactText("safe existing artifact", {
+      policy: "standard",
+      key: Buffer.alloc(32, 0x41),
+      contentClass: "output"
+    });
+    const input = {
+      runId: "run-existing-artifact",
+      kind: "command-output",
+      redactedBytes: redactedTextBytes(redacted),
+      mediaType: "text/plain"
+    };
+    const failedWriter = new ArtifactStore(dataRoot, {
+      fsyncDirectory: async () => {
+        throw new Error("injected first-writer directory sync failure");
+      }
+    });
+
+    await expect(failedWriter.writeRedacted(input)).rejects.toThrow(
+      "injected first-writer directory sync failure"
+    );
+
+    let syncEntered!: () => void;
+    let releaseSync!: () => void;
+    const entered = new Promise<void>((resolve) => { syncEntered = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseSync = resolve; });
+    const repairingWriter = new ArtifactStore(dataRoot, {
+      fsyncDirectory: async () => {
+        syncEntered();
+        await gate;
+      }
+    });
+    let settled = false;
+    const repair = repairingWriter.writeRedacted(input).then((completed) => {
+      settled = true;
+      return completed;
+    });
+
+    await entered;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    releaseSync();
+    const completed = await repair;
+
+    expect(settled).toBe(true);
+    await expect(readFile(completed.path, "utf8")).resolves.toBe(redacted.text);
+  });
+
   it("rejects invalid bytes instead of labeling them application/json", async () => {
     const dataRoot = await createRoot();
     const store = new ArtifactStore(dataRoot);

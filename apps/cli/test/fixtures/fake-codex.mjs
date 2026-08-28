@@ -93,6 +93,17 @@ switch (mode) {
     emit({ type: "future.event", future: { large: "x".repeat(40 * 1024) } });
     terminal();
     break;
+  case "native-sentinels":
+    emit({
+      type: "future.inline",
+      future: { value: "inspect-inline-visible-phrase-92841" }
+    });
+    emit({
+      type: "future.artifact",
+      future: { value: `inspect-artifact-visible-phrase-73519${"x".repeat(40 * 1024)}` }
+    });
+    terminal();
+    break;
   case "unknown-truncated":
     emit({ type: "future.event", future: { large: "x".repeat(10 * 1024 * 1024 + 1024) } });
     terminal();

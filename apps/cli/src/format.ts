@@ -37,7 +37,7 @@ export function runsJson(runs: readonly RunListRecord[]): RunsJsonOutput {
   return { runs: runs.map(runListJson) };
 }
 
-function provenanceLabel(event: TraceEventV1): string {
+function provenanceLabel(event: Pick<TraceEventV1, "kind" | "provenance">): string {
   if (event.kind === "recorder.recovery") return "Recorder recovery";
   switch (event.provenance) {
     case "observed":
@@ -214,42 +214,231 @@ async function readValidatedNativeArtifact(
   }
 }
 
-export async function inspectJson(detail: RunDetail, native: boolean, artifactRoot?: string) {
-  if (native && detail.run.capturePolicy !== "standard") {
-    throw new Error("--native is available only for runs recorded with standard capture.");
+export type InspectNativePayloadDto =
+  | Readonly<{ storage: "inline"; contentAvailable: boolean; reason?: string }>
+  | Readonly<{
+      storage: "artifact";
+      artifactId: string;
+      contentAvailable: boolean;
+      reason?: string;
+    }>
+  | Readonly<{ storage: "omitted"; contentAvailable: false; reason: string }>;
+
+export interface InspectEventDto {
+  readonly id: string;
+  readonly runId: string;
+  readonly sequence: number;
+  readonly receivedAt: string;
+  readonly sourceOccurredAt?: string;
+  readonly kind: TraceEventV1["kind"];
+  readonly status: TraceEventV1["status"];
+  readonly provenance: TraceEventV1["provenance"];
+  readonly source: TraceEventV1["source"];
+  readonly relationships: TraceEventV1["relationships"];
+  readonly summary: string;
+  readonly normalizedPayload?: unknown;
+  readonly derivation?: NonNullable<TraceEventV1["derivation"]>;
+  readonly nativePayload?: InspectNativePayloadDto;
+  readonly nativeContent?: unknown;
+}
+
+function projectEventBase(event: TraceEventV1): Omit<InspectEventDto, "nativePayload" | "nativeContent"> {
+  const source = {
+    provider: event.source.provider,
+    ...(event.source.sessionId === undefined ? {} : { sessionId: event.source.sessionId }),
+    ...(event.source.threadId === undefined ? {} : { threadId: event.source.threadId }),
+    ...(event.source.turnId === undefined ? {} : { turnId: event.source.turnId }),
+    ...(event.source.itemId === undefined ? {} : { itemId: event.source.itemId }),
+    ...(event.source.toolId === undefined ? {} : { toolId: event.source.toolId }),
+    ...(event.source.eventType === undefined ? {} : { eventType: event.source.eventType }),
+    ...(event.source.itemType === undefined ? {} : { itemType: event.source.itemType }),
+    ...(event.source.correlationId === undefined ? {} : { correlationId: event.source.correlationId })
+  };
+  return {
+    id: event.id,
+    runId: event.runId,
+    sequence: event.sequence,
+    receivedAt: event.receivedAt,
+    ...(event.sourceOccurredAt === undefined ? {} : { sourceOccurredAt: event.sourceOccurredAt }),
+    kind: event.kind,
+    status: event.status,
+    provenance: event.provenance,
+    source,
+    relationships: event.relationships.map(({ type, eventId }) => ({ type, eventId })),
+    summary: event.summary,
+    ...(event.normalizedPayload === undefined
+      ? {}
+      : { normalizedPayload: event.normalizedPayload }),
+    ...(event.derivation === undefined
+      ? {}
+      : {
+          derivation: {
+            name: event.derivation.name,
+            version: event.derivation.version,
+            sourceEventIds: [...event.derivation.sourceEventIds],
+            ...(event.derivation.confidence === undefined
+              ? {}
+              : { confidence: event.derivation.confidence })
+          }
+        })
+  };
+}
+
+function projectedNativeMetadata(
+  event: TraceEventV1,
+  capturePolicy: RunDetail["run"]["capturePolicy"]
+): InspectNativePayloadDto | undefined {
+  const stored = event.nativePayload;
+  if (stored === undefined) return undefined;
+  if (stored.storage === "omitted") {
+    return { storage: "omitted", contentAvailable: false, reason: stored.reason };
   }
+  if (capturePolicy !== "standard") {
+    return stored.storage === "inline"
+      ? { storage: "inline", contentAvailable: false, reason: capturePolicy }
+      : {
+          storage: "artifact",
+          artifactId: stored.artifactId,
+          contentAvailable: false,
+          reason: capturePolicy
+        };
+  }
+  return stored.storage === "inline"
+    ? { storage: "inline", contentAvailable: true }
+    : { storage: "artifact", artifactId: stored.artifactId, contentAvailable: true };
+}
+
+async function projectInspectEvent(
+  event: TraceEventV1,
+  native: boolean,
+  capturePolicy: RunDetail["run"]["capturePolicy"],
+  artifacts: ReadonlyMap<string, StoredArtifact>,
+  artifactRoot?: string
+): Promise<InspectEventDto> {
+  const projected = projectEventBase(event);
+  const stored = event.nativePayload;
+  const nativePayload = projectedNativeMetadata(event, capturePolicy);
+  if (nativePayload === undefined || stored === undefined) return projected;
+  if (!native || capturePolicy !== "standard" || stored.storage === "omitted") {
+    return { ...projected, nativePayload };
+  }
+  if (stored.storage === "inline") {
+    return { ...projected, nativePayload, nativeContent: stored.redacted };
+  }
+  const artifact = artifacts.get(stored.artifactId);
+  if (!artifact) throw new Error(`Native artifact ${stored.artifactId} is unavailable.`);
+  if (!artifactRoot) throw new Error("Native artifact root is required for expansion.");
+  return {
+    ...projected,
+    nativePayload,
+    nativeContent: await readValidatedNativeArtifact(artifact, artifactRoot)
+  };
+}
+
+function projectRun(run: RunDetail["run"]) {
+  return {
+    id: run.id,
+    schemaVersion: run.schemaVersion,
+    provider: run.provider,
+    integrationVersion: run.integrationVersion,
+    agentVersion: run.agentVersion,
+    status: run.status,
+    capturePolicy: run.capturePolicy,
+    capturePolicyVersion: run.capturePolicyVersion,
+    redactionVersion: run.redactionVersion,
+    repositoryFingerprint: run.repositoryFingerprint,
+    repositoryDisplay: run.repositoryDisplay,
+    startedAt: run.startedAt,
+    endedAt: run.endedAt,
+    childPid: run.childPid,
+    exitCode: run.exitCode,
+    terminatingSignal: run.terminatingSignal,
+    providerTerminalKind: run.providerTerminalKind,
+    terminalReason: run.terminalReason,
+    contradictionCodes: [...run.contradictionCodes],
+    ...(run.label === undefined ? {} : { label: run.label }),
+    ...(run.promptSource === undefined ? {} : { promptSource: run.promptSource })
+  };
+}
+
+function projectOwnership(ownership: RunDetail["ownership"]) {
+  if (ownership === null) return null;
+  return {
+    runId: ownership.runId,
+    recorderInstanceId: ownership.recorderInstanceId,
+    recorderPid: ownership.recorderPid,
+    recorderStartToken: ownership.recorderStartToken,
+    childPid: ownership.childPid,
+    childStartToken: ownership.childStartToken,
+    childProcessGroupId: ownership.childProcessGroupId,
+    heartbeatAt: ownership.heartbeatAt,
+    condition: ownership.condition,
+    ownershipLostEventId: ownership.ownershipLostEventId,
+    updatedAt: ownership.updatedAt
+  };
+}
+
+function projectArtifact(artifact: StoredArtifact) {
+  return {
+    id: artifact.id,
+    runId: artifact.runId,
+    kind: artifact.kind,
+    mediaType: artifact.mediaType,
+    path: artifact.path,
+    sha256: artifact.sha256,
+    byteLength: artifact.byteLength,
+    redactionState: artifact.redactionState,
+    truncated: artifact.truncated,
+    originalByteLength: artifact.originalByteLength,
+    createdAt: artifact.createdAt
+  };
+}
+
+export interface InspectJsonOutput {
+  readonly run: ReturnType<typeof projectRun>;
+  readonly ownership: ReturnType<typeof projectOwnership>;
+  readonly metadataSemantics: ReturnType<typeof metadataSemantics>;
+  readonly capabilities: typeof codexExecCapabilities;
+  readonly contradictions: readonly string[];
+  readonly warnings: ReturnType<typeof gitWarnings>;
+  readonly events: readonly InspectEventDto[];
+  readonly gitEvidence: ReturnType<typeof inspectGitEvidence>;
+  readonly artifacts: readonly ReturnType<typeof projectArtifact>[];
+  readonly redactionAudits: RunDetail["redactionAudits"];
+}
+
+export async function inspectJson(
+  detail: RunDetail,
+  native: boolean,
+  artifactRoot?: string
+): Promise<InspectJsonOutput> {
   const artifacts = new Map(detail.artifacts.map((artifact) => [artifact.id, artifact]));
-  const events = await Promise.all(detail.events.map(async (event) => {
-    if (!native || event.nativePayload === undefined) return { ...event };
-    if (event.nativePayload.storage === "inline") {
-      return { ...event, nativeContent: event.nativePayload.redacted };
-    }
-    if (event.nativePayload.storage === "artifact") {
-      const artifact = artifacts.get(event.nativePayload.artifactId);
-      if (!artifact) throw new Error(`Native artifact ${event.nativePayload.artifactId} is unavailable.`);
-      if (!artifactRoot) throw new Error("Native artifact root is required for expansion.");
-      return { ...event, nativeContent: await readValidatedNativeArtifact(artifact, artifactRoot) };
-    }
-    return { ...event };
-  }));
+  const events = await Promise.all(detail.events.map((event) =>
+    projectInspectEvent(event, native, detail.run.capturePolicy, artifacts, artifactRoot)
+  ));
   const git = detail.gitEvidence;
   return {
-    run: detail.run,
-    ownership: detail.ownership,
+    run: projectRun(detail.run),
+    ownership: projectOwnership(detail.ownership),
     metadataSemantics: metadataSemantics(detail.run),
     capabilities: { ...codexExecCapabilities },
     contradictions: [...detail.run.contradictionCodes],
     warnings: gitWarnings(git),
     events,
     gitEvidence: inspectGitEvidence(git),
-    artifacts: detail.artifacts,
-    redactionAudits: detail.redactionAudits
+    artifacts: detail.artifacts.map(projectArtifact),
+    redactionAudits: detail.redactionAudits.map(({ eventId, artifactId, reason, count }) => ({
+      eventId,
+      artifactId,
+      reason,
+      count
+    }))
   };
 }
 
 export function inspectText(
   detail: RunDetail,
-  events: readonly (TraceEventV1 & { readonly nativeContent?: unknown })[] = detail.events
+  events: readonly InspectEventDto[]
 ): string {
   const git = detail.gitEvidence;
   const warnings = gitWarnings(git);
@@ -300,6 +489,17 @@ export function inspectText(
     );
     if (event.nativeContent !== undefined) {
       lines.push(`  native: ${JSON.stringify(event.nativeContent)}`);
+    }
+    if (event.nativePayload !== undefined) {
+      const artifactId = event.nativePayload.storage === "artifact"
+        ? ` artifactId=${event.nativePayload.artifactId}`
+        : "";
+      const reason = event.nativePayload.reason === undefined
+        ? ""
+        : ` reason=${event.nativePayload.reason}`;
+      lines.push(
+        `  native payload: storage=${event.nativePayload.storage}${artifactId} contentAvailable=${String(event.nativePayload.contentAvailable)}${reason}`
+      );
     }
   }
   return `${lines.join("\n")}\n`;
