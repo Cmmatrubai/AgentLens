@@ -2,17 +2,31 @@ import { spawn } from "node:child_process";
 import type { Readable } from "node:stream";
 import type { PromptInput } from "./promptInput.js";
 import {
+  systemProcessIdentityInspector,
+  type ProcessGroupState
+} from "./processIdentity.js";
+import {
   consumeSourceStream,
   type SourceStreamDiagnostic
 } from "./sourceStreamDecoder.js";
 
 export const DEFAULT_TERMINATION_GRACE_MS = 2_000;
+const MINIMUM_GROUP_CONFIRMATION_MS = 250;
+const GROUP_POLL_INTERVAL_MS = 10;
+
+export interface ProcessGroupTerminationFact {
+  readonly processGroupId: number;
+  readonly initialSignal: NodeJS.Signals | null;
+  readonly escalationSignal: NodeJS.Signals | null;
+  readonly confirmedGone: true;
+}
 
 export interface ChildProcessResult {
   readonly pid: number;
   readonly exitCode: number | null;
   readonly terminatingSignal: NodeJS.Signals | null;
   readonly explicitlyInterrupted: boolean;
+  readonly processGroupTermination: ProcessGroupTerminationFact | null;
 }
 
 export interface ProcessRunnerInput {
@@ -23,6 +37,7 @@ export interface ProcessRunnerInput {
   readonly signal?: AbortSignal;
   readonly forceTerminationSignal?: AbortSignal;
   readonly terminationGraceMs?: number;
+  readonly inspectProcessGroup?: (processGroupId: number) => ProcessGroupState;
   readonly now?: () => number;
   readonly onSpawn: (pid: number, processGroupId: number | null) => void | Promise<void>;
   readonly onLine: (
@@ -41,6 +56,20 @@ export class ChildSpawnError extends Error {
     super(message, options);
     this.name = "ChildSpawnError";
   }
+}
+
+export class ProcessGroupTerminationError extends Error {
+  readonly processGroupId: number;
+
+  constructor(processGroupId: number) {
+    super(`AgentLens could not confirm owned process-group shutdown for ${processGroupId}.`);
+    this.name = "ProcessGroupTerminationError";
+    this.processGroupId = processGroupId;
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function sourceConsumer(
@@ -116,20 +145,69 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
 
   let explicitlyInterrupted = false;
   let terminationTimer: ReturnType<typeof setTimeout> | undefined;
+  let initialGroupSignal: NodeJS.Signals | null = null;
+  let groupEscalationSignal: NodeJS.Signals | null = null;
+  let groupEscalationAttemptedAt: number | undefined;
+  let processGroupTermination: Promise<ProcessGroupTerminationFact> | undefined;
   const childIsOpen = (): boolean =>
     child.pid !== undefined && child.exitCode === null && child.signalCode === null;
-  const signalChild = (signal: NodeJS.Signals): void => {
-    if (!childIsOpen() || child.pid === undefined) return;
-    if (!usesProcessGroup) {
-      child.kill(signal);
-      return;
-    }
+  const signalDirectChild = (signal: NodeJS.Signals): void => {
+    if (childIsOpen()) child.kill(signal);
+  };
+  const inspectOwnedProcessGroup = (): ProcessGroupState => {
+    const processGroupId = child.pid;
+    if (processGroupId === undefined) return "ambiguous";
     try {
-      process.kill(-child.pid, signal);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
-      child.kill(signal);
+      return (input.inspectProcessGroup ?? systemProcessIdentityInspector.inspectGroup)(processGroupId);
+    } catch {
+      return "ambiguous";
     }
+  };
+  const signalOwnedProcessGroup = (signal: NodeJS.Signals): boolean => {
+    const processGroupId = child.pid;
+    if (processGroupId === undefined) return false;
+    try {
+      process.kill(-processGroupId, signal);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+      signalDirectChild(signal);
+      return false;
+    }
+  };
+  const startProcessGroupMonitor = (): Promise<ProcessGroupTerminationFact> => {
+    const processGroupId = child.pid;
+    if (processGroupId === undefined) {
+      return Promise.reject(new ProcessGroupTerminationError(-1));
+    }
+    if (processGroupTermination !== undefined) return processGroupTermination;
+    const confirmationMs = Math.max(terminationGraceMs, MINIMUM_GROUP_CONFIRMATION_MS);
+    processGroupTermination = (async () => {
+      while (true) {
+        if (inspectOwnedProcessGroup() === "gone") {
+          return Object.freeze({
+            processGroupId,
+            initialSignal: initialGroupSignal,
+            escalationSignal: groupEscalationSignal,
+            confirmedGone: true as const
+          });
+        }
+        if (
+          groupEscalationAttemptedAt !== undefined &&
+          Date.now() - groupEscalationAttemptedAt >= confirmationMs
+        ) {
+          throw new ProcessGroupTerminationError(processGroupId);
+        }
+        await delay(GROUP_POLL_INTERVAL_MS);
+      }
+    })().finally(() => {
+      if (terminationTimer !== undefined) {
+        clearTimeout(terminationTimer);
+        terminationTimer = undefined;
+      }
+    });
+    void processGroupTermination.catch(() => undefined);
+    return processGroupTermination;
   };
   const forceTerminate = (): void => {
     explicitlyInterrupted = true;
@@ -137,12 +215,28 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
       clearTimeout(terminationTimer);
       terminationTimer = undefined;
     }
-    signalChild("SIGKILL");
+    if (!usesProcessGroup) {
+      signalDirectChild("SIGKILL");
+      return;
+    }
+    if (inspectOwnedProcessGroup() !== "gone") {
+      groupEscalationAttemptedAt ??= Date.now();
+      if (signalOwnedProcessGroup("SIGKILL")) groupEscalationSignal = "SIGKILL";
+    }
+    void startProcessGroupMonitor();
   };
   const abort = (): void => {
     explicitlyInterrupted = true;
-    signalChild("SIGTERM");
-    if (childIsOpen() && terminationTimer === undefined) {
+    if (!usesProcessGroup) {
+      signalDirectChild("SIGTERM");
+      if (childIsOpen() && terminationTimer === undefined) {
+        terminationTimer = setTimeout(forceTerminate, terminationGraceMs);
+      }
+      return;
+    }
+    if (signalOwnedProcessGroup("SIGTERM")) initialGroupSignal = "SIGTERM";
+    void startProcessGroupMonitor();
+    if (terminationTimer === undefined) {
       terminationTimer = setTimeout(forceTerminate, terminationGraceMs);
     }
   };
@@ -182,6 +276,9 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
     }
 
     const result = await close;
+    const groupTermination = processGroupTermination === undefined
+      ? null
+      : await processGroupTermination;
     await streams;
     const pid = child.pid;
     if (pid === undefined) throw new Error("Codex process ID disappeared after spawn.");
@@ -189,16 +286,33 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
       pid,
       exitCode: result.code,
       terminatingSignal: result.signal,
-      explicitlyInterrupted
+      explicitlyInterrupted,
+      processGroupTermination: groupTermination
     });
   } catch (error) {
-    if (childIsOpen()) {
-      signalChild("SIGTERM");
+    let groupCleanupError: unknown;
+    if (usesProcessGroup && child.pid !== undefined) {
+      if (processGroupTermination === undefined) {
+        if (signalOwnedProcessGroup("SIGTERM")) initialGroupSignal = "SIGTERM";
+        void startProcessGroupMonitor();
+        if (terminationTimer === undefined) {
+          terminationTimer = setTimeout(forceTerminate, terminationGraceMs);
+        }
+      }
+      try {
+        await processGroupTermination;
+      } catch (cleanupError) {
+        groupCleanupError = cleanupError;
+      }
+      await close.catch(() => undefined);
+    } else if (childIsOpen()) {
+      signalDirectChild("SIGTERM");
       await waitForCloseOrGrace();
-      if (childIsOpen()) signalChild("SIGKILL");
+      if (childIsOpen()) signalDirectChild("SIGKILL");
       await close.catch(() => undefined);
     }
     await streams?.catch(() => undefined);
+    if (groupCleanupError !== undefined) throw groupCleanupError;
     throw error;
   } finally {
     if (terminationTimer !== undefined) clearTimeout(terminationTimer);

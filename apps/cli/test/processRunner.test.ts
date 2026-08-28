@@ -77,6 +77,65 @@ describe("process runner", () => {
     expect(() => process.kill(grandchildPid, 0)).toThrow();
   }, 5_000);
 
+  it("keeps escalating the owned group after the direct child exits on SIGTERM", async () => {
+    if (process.platform === "win32") return;
+    const context = await termResistantFixture();
+    const controller = new AbortController();
+    const grandchildTermFile = join(context.root, "grandchild-term.log");
+    let processGroupId: number | undefined;
+    let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+      const result = await runChildProcess({
+        childArgs: [
+          "codex",
+          "exec",
+          "--json",
+          "--fake-mode=cooperative-parent-resistant-grandchild"
+        ],
+        cwd: context.root,
+        env: {
+          ...context.env,
+          AGENTLENS_FAKE_GRANDCHILD_TERM_FILE: grandchildTermFile
+        },
+        promptInput: { mode: "buffered", source: "stdin", bytes: Buffer.alloc(0) },
+        onSpawn: (pid, groupId) => {
+          processGroupId = groupId ?? undefined;
+          safetyTimer = setTimeout(() => {
+            try { process.kill(-pid, "SIGKILL"); } catch { /* production may already have killed it */ }
+          }, 1_000);
+        },
+        onLine: (_stream, line) => {
+          if (line.includes("cooperative-parent-command")) controller.abort();
+        },
+        onDiagnostic: () => undefined,
+        signal: controller.signal,
+        terminationGraceMs: 50
+      });
+
+      const grandchildPid = Number(await readFile(context.grandchildFile, "utf8"));
+      expect(result).toMatchObject({
+        exitCode: null,
+        terminatingSignal: "SIGTERM",
+        explicitlyInterrupted: true,
+        processGroupTermination: {
+          processGroupId,
+          initialSignal: "SIGTERM",
+          escalationSignal: "SIGKILL",
+          confirmedGone: true
+        }
+      });
+      expect(await readFile(grandchildTermFile, "utf8")).toBe("term-observed\n");
+      expect(() => process.kill(grandchildPid, 0)).toThrow();
+      expect(() => process.kill(-(processGroupId ?? 0), 0)).toThrow();
+    } finally {
+      if (safetyTimer !== undefined) clearTimeout(safetyTimer);
+      if (processGroupId !== undefined) {
+        try { process.kill(-processGroupId, "SIGKILL"); } catch { /* expected after cleanup */ }
+      }
+    }
+  }, 5_000);
+
   it("escalates immediately when a second interrupt arrives", async () => {
     if (process.platform === "win32") return;
     const context = await termResistantFixture();

@@ -42,6 +42,10 @@ The run-status precedence gains one explicit fact: a validated recorder ownershi
 
 On POSIX platforms the child is started as a process-group leader. On the first user `SIGINT` or `SIGTERM`, AgentLens records interruption intent in memory and sends `SIGTERM` to the child process group. `DEFAULT_TERMINATION_GRACE_MS` is 2,000 milliseconds. If the group has not terminated by the deadline, AgentLens sends `SIGKILL`. A second user interrupt requests immediate `SIGKILL` escalation.
 
+Direct-child closure does not complete interrupted POSIX cleanup. AgentLens continues checking the owned process group independently, and final Git capture, open-event recovery, run reconciliation, and ownership release remain blocked until the operating system confirms that group is gone. The recorder process-exit event preserves the direct child's actual exit code or signal plus a separate `processGroupTermination` fact containing the group ID, initial signal, optional escalation signal, and confirmed-absence result. A cooperative direct child may therefore truthfully show `terminatingSignal: SIGTERM` while a resistant descendant records `escalationSignal: SIGKILL`.
+
+If group absence cannot be confirmed within the bounded post-escalation interval, AgentLens persists interruption and recorder-failure evidence but leaves the run and ownership nonterminal. It does not capture final Git evidence, recover open events, reconcile, or release ownership while owned work may still exist.
+
 On platforms without process-group signaling, AgentLens applies the same bounded policy to the direct child and reports the capability limitation. AgentLens waits for the child's actual close fact and stores the actual exit code or terminating signal returned by the operating system. Interruption intent, process termination, provider lifecycle, recovery, and run reconciliation remain separate facts. Killing a process never creates provider completion evidence.
 
 ## 3. Bounded JSONL ingestion and backpressure

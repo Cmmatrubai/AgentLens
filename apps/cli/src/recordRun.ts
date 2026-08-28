@@ -34,9 +34,15 @@ import {
 import { persistEventDraft } from "./persistEvent.js";
 import {
   systemProcessIdentityInspector,
+  type ProcessGroupState,
   type ProcessIdentityInspector
 } from "./processIdentity.js";
-import { ChildSpawnError, runChildProcess, type ChildProcessResult } from "./processRunner.js";
+import {
+  ChildSpawnError,
+  ProcessGroupTerminationError,
+  runChildProcess,
+  type ChildProcessResult
+} from "./processRunner.js";
 import { resolvePromptInput } from "./promptInput.js";
 
 interface OutputWriter {
@@ -51,6 +57,7 @@ export interface RecordRunDependencies {
   readonly signal?: AbortSignal;
   readonly forceTerminationSignal?: AbortSignal;
   readonly terminationGraceMs?: number;
+  readonly inspectProcessGroup?: (processGroupId: number) => ProcessGroupState;
   readonly now?: () => number;
   readonly nextId?: () => string;
   readonly processIdentityInspector?: ProcessIdentityInspector;
@@ -633,6 +640,9 @@ export async function recordRun(
       ...(dependencies.terminationGraceMs === undefined
         ? {}
         : { terminationGraceMs: dependencies.terminationGraceMs }),
+      ...(dependencies.inspectProcessGroup === undefined
+        ? {}
+        : { inspectProcessGroup: dependencies.inspectProcessGroup }),
       now,
       onSpawn: async (pid, processGroupId) => {
         repository.markRunning(runId, {
@@ -698,7 +708,8 @@ export async function recordRun(
       summary: "Child process terminal fact",
       normalizedPayload: {
         exitCode: childResult.exitCode,
-        terminatingSignal: childResult.terminatingSignal
+        terminatingSignal: childResult.terminatingSignal,
+        processGroupTermination: childResult.processGroupTermination
       }
     }, nextId);
     repository.recordProcessFact(runId, { eventId: processEvent.id });
@@ -732,6 +743,28 @@ export async function recordRun(
     return result(run, databasePath);
   } catch (error) {
     const failurePhase = error instanceof ChildSpawnError ? "spawn" : "recording";
+    if (error instanceof ProcessGroupTerminationError) {
+      try {
+        recorderFailureEventId = appendRecorderFailure(
+          repository,
+          state,
+          runId,
+          failurePhase,
+          nextId,
+          iso(now)
+        ).id;
+        if (dependencies.signal?.aborted && interruptionEventId === undefined) {
+          interruptionEventId = appendInterruption(repository, state, runId, iso(now), nextId).id;
+        }
+      } catch (persistenceError) {
+        throw new AggregateError(
+          [error, persistenceError],
+          "AgentLens could not confirm process-group shutdown or persist the conservative failure.",
+          { cause: error }
+        );
+      }
+      throw error;
+    }
     try {
       const failure = appendRecorderFailure(
         repository,

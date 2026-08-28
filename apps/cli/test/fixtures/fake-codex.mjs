@@ -287,6 +287,33 @@ switch (mode) {
     setInterval(() => {}, 1_000);
     break;
   }
+  case "cooperative-parent-resistant-grandchild": {
+    const grandchild = spawn(process.execPath, [
+      "-e",
+      `
+        const { writeFileSync } = require("node:fs");
+        process.on("SIGTERM", () => {
+          if (process.env.AGENTLENS_FAKE_GRANDCHILD_TERM_FILE) {
+            writeFileSync(process.env.AGENTLENS_FAKE_GRANDCHILD_TERM_FILE, "term-observed\\n");
+          }
+          if (process.env.AGENTLENS_FAKE_DESCENDANT_GIT_FILE) {
+            setTimeout(() => {
+              writeFileSync(process.env.AGENTLENS_FAKE_DESCENDANT_GIT_FILE, "descendant after term\\n");
+            }, 20);
+          }
+        });
+        if (process.send) process.send("ready");
+        setInterval(() => {}, 1_000);
+      `
+    ], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    await new Promise((resolve) => grandchild.once("message", resolve));
+    if (process.env.AGENTLENS_FAKE_GRANDCHILD_FILE) {
+      writeFileSync(process.env.AGENTLENS_FAKE_GRANDCHILD_FILE, String(grandchild.pid));
+    }
+    started("cooperative-parent-command");
+    setInterval(() => {}, 1_000);
+    break;
+  }
   default:
     throw new Error(`Unknown fake mode ${mode}`);
 }

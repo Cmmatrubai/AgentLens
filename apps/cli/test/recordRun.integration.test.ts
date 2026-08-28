@@ -24,6 +24,7 @@ import { recordRun } from "../src/recordRun.js";
 const execFile = promisify(execFileCallback);
 const fakeCodex = fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url));
 const roots: string[] = [];
+const processGroups: number[] = [];
 const silentOutput = { write: () => true };
 
 async function git(cwd: string, ...args: string[]): Promise<string> {
@@ -98,6 +99,9 @@ async function waitForOpenCommand(dataRoot: string, runId: () => string | undefi
 }
 
 afterEach(async () => {
+  for (const processGroupId of processGroups.splice(0)) {
+    try { process.kill(-processGroupId, "SIGKILL"); } catch { /* expected after recorder cleanup */ }
+  }
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -592,6 +596,165 @@ describe("recordRun lifecycle", () => {
     )).toBe(false);
     expect(run.events.find(({ kind }) => kind === "command")?.status).toBe("in_progress");
   });
+
+  it("waits for a resistant descendant before final Git and preserves direct and group signals", async () => {
+    if (process.platform === "win32") return;
+    const context = await fixture();
+    const controller = new AbortController();
+    const grandchildFile = join(context.root, "cooperative-grandchild.pid");
+    const grandchildTermFile = join(context.root, "cooperative-grandchild-term.log");
+    let printedRunId: string | undefined;
+    let groupGoneAtFinalGit = false;
+    let ownershipAtFinalGit: string | undefined;
+    let originalObservedCommand: string | undefined;
+
+    const recording = recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: [
+          "codex",
+          "exec",
+          "--json",
+          "--fake-mode=cooperative-parent-resistant-grandchild"
+        ]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: {
+          ...context.env,
+          AGENTLENS_FAKE_GRANDCHILD_FILE: grandchildFile,
+          AGENTLENS_FAKE_GRANDCHILD_TERM_FILE: grandchildTermFile,
+          AGENTLENS_FAKE_DESCENDANT_GIT_FILE: join(context.repo, "tracked.txt")
+        },
+        stdout: {
+          write: (chunk) => {
+            const match = /Run ID: ([^\n]+)/.exec(String(chunk));
+            if (match?.[1]) printedRunId = match[1];
+            return true;
+          }
+        },
+        signal: controller.signal,
+        terminationGraceMs: 75,
+        onFinalGitPersisted: () => {
+          if (!printedRunId) throw new Error("missing run ID at final Git boundary");
+          const snapshot = detail(context.dataRoot, printedRunId);
+          const groupId = snapshot.ownership?.childProcessGroupId;
+          if (groupId === null || groupId === undefined) {
+            throw new Error("missing process-group identity at final Git boundary");
+          }
+          try {
+            process.kill(-groupId, 0);
+          } catch {
+            groupGoneAtFinalGit = true;
+          }
+          ownershipAtFinalGit = snapshot.ownership?.condition;
+          expect(snapshot.gitEvidence).not.toBeNull();
+        }
+      }
+    );
+    await waitForOpenCommand(context.dataRoot, () => printedRunId);
+    if (!printedRunId) throw new Error("missing run ID after open command");
+    const openDetail = detail(context.dataRoot, printedRunId);
+    const openGroupId = openDetail.ownership?.childProcessGroupId;
+    if (openGroupId === null || openGroupId === undefined) {
+      throw new Error("missing process-group identity after open command");
+    }
+    processGroups.push(openGroupId);
+    originalObservedCommand = JSON.stringify(openDetail.events.find(({ kind }) => kind === "command"));
+    controller.abort();
+    const result = await recording;
+    const run = detail(context.dataRoot, result.runId);
+    const groupId = run.ownership?.childProcessGroupId;
+    const grandchildPid = Number(await readFile(grandchildFile, "utf8"));
+    const processExit = run.events.find(({ kind }) => kind === "recorder.process_exit");
+
+    expect(result).toMatchObject({
+      status: "interrupted",
+      exitCode: null,
+      terminatingSignal: "SIGTERM"
+    });
+    expect(processExit?.normalizedPayload).toMatchObject({
+      exitCode: null,
+      terminatingSignal: "SIGTERM",
+      processGroupTermination: {
+        processGroupId: groupId,
+        initialSignal: "SIGTERM",
+        escalationSignal: "SIGKILL",
+        confirmedGone: true
+      }
+    });
+    expect(await readFile(grandchildTermFile, "utf8")).toBe("term-observed\n");
+    expect(await readFile(join(context.repo, "tracked.txt"), "utf8")).toBe("descendant after term\n");
+    expect(groupGoneAtFinalGit).toBe(true);
+    expect(ownershipAtFinalGit).toBe("active");
+    expect(run.ownership?.condition).toBe("released");
+    expect(() => process.kill(grandchildPid, 0)).toThrow();
+    expect(() => process.kill(-(groupId ?? 0), 0)).toThrow();
+    expect(run.events.filter(({ kind }) => kind === "recorder.interruption")).toHaveLength(1);
+    expect(run.events.some(({ kind, provenance }) =>
+      kind === "turn.completed" && provenance === "observed"
+    )).toBe(false);
+    expect(JSON.stringify(run.events.find(({ kind }) => kind === "command")))
+      .toBe(originalObservedCommand);
+  }, 10_000);
+
+  it("leaves Git and ownership nonfinal when process-group disappearance cannot be confirmed", async () => {
+    if (process.platform === "win32") return;
+    const context = await fixture();
+    const controller = new AbortController();
+    let printedRunId: string | undefined;
+    const recording = recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=hang"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: {
+          write: (chunk) => {
+            const match = /Run ID: ([^\n]+)/.exec(String(chunk));
+            if (match?.[1]) printedRunId = match[1];
+            return true;
+          }
+        },
+        signal: controller.signal,
+        terminationGraceMs: 25,
+        inspectProcessGroup: () => "ambiguous"
+      }
+    );
+    await waitForOpenCommand(context.dataRoot, () => printedRunId);
+    if (!printedRunId) throw new Error("missing run ID after open command");
+    const open = detail(context.dataRoot, printedRunId);
+    const processGroupId = open.ownership?.childProcessGroupId;
+    if (processGroupId === null || processGroupId === undefined) {
+      throw new Error("missing process-group identity after open command");
+    }
+    processGroups.push(processGroupId);
+    controller.abort();
+
+    await expect(recording).rejects.toThrow("could not confirm owned process-group shutdown");
+    const nonfinal = detail(context.dataRoot, printedRunId);
+    expect(nonfinal.run).toMatchObject({ status: "running", endedAt: null });
+    expect(nonfinal.ownership?.condition).toBe("active");
+    expect(nonfinal.gitEvidence).toBeNull();
+    expect(nonfinal.events.filter(({ kind }) => kind === "recorder.interruption")).toHaveLength(1);
+    expect(nonfinal.events.filter(({ kind, provenance, normalizedPayload }) =>
+      kind === "error" &&
+      provenance === "recorder" &&
+      typeof normalizedPayload === "object" &&
+      normalizedPayload !== null &&
+      !Array.isArray(normalizedPayload) &&
+      (normalizedPayload as Record<string, unknown>).recorderFailure === true
+    )).toHaveLength(1);
+    expect(nonfinal.events.some(({ kind }) => kind === "run.reconciled")).toBe(false);
+  }, 10_000);
 
   it("reconciles a signal received after child terminal and final Git persistence as interrupted", async () => {
     const context = await fixture();
