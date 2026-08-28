@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
-import { lstat, mkdir, open } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, open, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 function pathError(path: string): Error {
   return new Error(`AgentLens storage path cannot be a symbolic link or non-regular file: ${path}`);
@@ -38,7 +38,43 @@ export async function ownerOnlyDatabaseFiles(databasePath: string): Promise<void
   }
 }
 
-export async function prepareDataRoot(dataRoot: string): Promise<string> {
+async function canonicalProspectivePath(path: string): Promise<string> {
+  let existing = resolve(path);
+  const missing: string[] = [];
+  while (true) {
+    try {
+      return resolve(await realpath(existing), ...missing);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = dirname(existing);
+      if (parent === existing) throw error;
+      missing.unshift(basename(existing));
+      existing = parent;
+    }
+  }
+}
+
+async function assertOutsideRepository(dataRoot: string, repositoryRoot: string): Promise<void> {
+  const [canonicalDataRoot, canonicalRepositoryRoot] = await Promise.all([
+    canonicalProspectivePath(dataRoot),
+    realpath(repositoryRoot)
+  ]);
+  const repositoryRelative = relative(canonicalRepositoryRoot, canonicalDataRoot);
+  if (
+    repositoryRelative === "" ||
+    (!isAbsolute(repositoryRelative) &&
+      repositoryRelative !== ".." &&
+      !repositoryRelative.startsWith(`..${sep}`))
+  ) {
+    throw new Error("AgentLens data root cannot equal or be contained by the recorded repository.");
+  }
+}
+
+export async function prepareDataRoot(
+  dataRoot: string,
+  repositoryRoot?: string
+): Promise<string> {
+  if (repositoryRoot !== undefined) await assertOutsideRepository(dataRoot, repositoryRoot);
   await mkdir(dataRoot, { recursive: true, mode: 0o700 });
   const rootStat = await lstat(dataRoot);
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw pathError(dataRoot);

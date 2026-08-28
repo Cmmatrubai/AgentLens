@@ -242,6 +242,200 @@ describe("runs and inspect", () => {
     expect(JSON.parse(output.text())).toEqual(value);
   });
 
+  it("shows complete source/Git evidence and explicit old-to-new Git warnings in text and JSON", async () => {
+    const context = await fixture();
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=git-change"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const jsonOutput = writer();
+    const value = await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: jsonOutput.output }
+    );
+    const gitEvidence = value.gitEvidence;
+    if (!gitEvidence.available) throw new Error("expected Git evidence");
+
+    expect(gitEvidence.trackedFinalDiffAvailability).toBe("artifact");
+    expect(gitEvidence.untrackedMetadataAvailability).toBe("absent");
+
+    expect(value.warnings).toEqual([
+      {
+        code: "git_head_changed",
+        message: "Git HEAD changed during the run.",
+        oldValue: gitEvidence.initialHead,
+        newValue: gitEvidence.finalHead
+      },
+      {
+        code: "git_branch_changed",
+        message: "Git branch changed during the run.",
+        oldValue: gitEvidence.initialBranch,
+        newValue: gitEvidence.finalBranch
+      }
+    ]);
+    expect(JSON.parse(jsonOutput.text())).toEqual(value);
+
+    const textOutput = writer();
+    await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: false, native: false },
+      { stdout: textOutput.output }
+    );
+    const text = textOutput.text();
+    expect(text).toContain(
+      `Git initial: HEAD=${gitEvidence.initialHead} branch=${String(gitEvidence.initialBranch)}`
+    );
+    expect(text).toContain(
+      `Git final: HEAD=${gitEvidence.finalHead} branch=${String(gitEvidence.finalBranch)}`
+    );
+    expect(text).toContain("tracked final diff=artifact");
+    expect(text).toContain("untracked-file metadata=absent");
+    expect(text).toContain(
+      `WARNING: Git HEAD changed during the run: ${gitEvidence.initialHead} -> ${gitEvidence.finalHead}`
+    );
+    expect(text).toContain(
+      `WARNING: Git branch changed during the run: ${String(gitEvidence.initialBranch)} -> ${String(gitEvidence.finalBranch)}`
+    );
+    expect(text).toContain(
+      "source: provider=codex-exec sessionId=none threadId=fixture-thread turnId=fixture-turn itemId=message-git-change toolId=none eventType=item.completed itemType=agent_message correlationId=none"
+    );
+    expect(text).toContain("relationships: none");
+  });
+
+  it("explicitly marks every Git field unavailable when final evidence cannot be recovered", async () => {
+    const context = await fixture();
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=remove-git"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const jsonOutput = writer();
+    const json = await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: jsonOutput.output }
+    );
+
+    expect(json.gitEvidence).toMatchObject({
+      available: false,
+      initialHead: null,
+      finalHead: null,
+      initialBranch: null,
+      finalBranch: null,
+      headChanged: null,
+      branchChanged: null,
+      trackedFinalDiffAvailability: "unavailable",
+      untrackedMetadataAvailability: "unavailable"
+    });
+    expect(JSON.parse(jsonOutput.text())).toEqual(json);
+
+    const textOutput = writer();
+    await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: false, native: false },
+      { stdout: textOutput.output }
+    );
+    expect(textOutput.text()).toContain("Git initial: HEAD=unavailable branch=unavailable");
+    expect(textOutput.text()).toContain("Git final: HEAD=unavailable branch=unavailable");
+    expect(textOutput.text()).toContain(
+      "Git evidence availability: tracked final diff=unavailable; untracked-file metadata=unavailable"
+    );
+  });
+
+  it("exposes every available provider source identifier in text and JSON", async () => {
+    const context = await fixture();
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=source-identifiers"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const jsonOutput = writer();
+    const json = await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: jsonOutput.output }
+    );
+    const event = json.events.find(({ source }) => source.sessionId === "fixture-session");
+
+    expect(event?.source).toEqual({
+      provider: "codex-exec",
+      sessionId: "fixture-session",
+      threadId: "fixture-thread",
+      turnId: "fixture-turn",
+      itemId: "fixture-item",
+      toolId: "fixture-tool",
+      eventType: "item.completed",
+      itemType: "mcp_tool_call",
+      correlationId: "fixture-correlation"
+    });
+    expect(event?.relationships).toEqual([]);
+    expect(JSON.parse(jsonOutput.text())).toEqual(json);
+
+    const textOutput = writer();
+    await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: false, native: false },
+      { stdout: textOutput.output }
+    );
+    expect(textOutput.text()).toContain(
+      "source: provider=codex-exec sessionId=fixture-session threadId=fixture-thread turnId=fixture-turn itemId=fixture-item toolId=fixture-tool eventType=item.completed itemType=mcp_tool_call correlationId=fixture-correlation"
+    );
+    expect(textOutput.text()).toContain("relationships: none");
+  });
+
+  it("explains agent-version and prompt-source limitations in text and JSON", async () => {
+    const context = await fixture();
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const jsonOutput = writer();
+    const json = await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: jsonOutput.output }
+    );
+
+    expect(json.metadataSemantics).toEqual({
+      agentVersion: {
+        value: "unknown",
+        availability: "unavailable",
+        reason: "Codex exec JSONL does not expose the agent version in v0.1."
+      },
+      promptSource: {
+        value: "stdin-buffered",
+        meaning: "prompt/stdin transport mode",
+        semanticPromptLocation: false,
+        promptParsedOrAltered: false
+      }
+    });
+    expect(JSON.parse(jsonOutput.text())).toEqual(json);
+
+    const textOutput = writer();
+    await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: false, native: false },
+      { stdout: textOutput.output }
+    );
+    expect(textOutput.text()).toContain(
+      "Agent version: unknown (unavailable: Codex exec JSONL does not expose the agent version in v0.1.)"
+    );
+    expect(textOutput.text()).toContain(
+      "Prompt source: stdin-buffered (prompt/stdin transport mode; semantic prompt location=false; prompt parsed or altered=false)"
+    );
+  });
+
   it("reserves Recorder recovery for recovery events and labels every other recorder event Recorder", async () => {
     const context = await fixture();
     const recorded = await recordRun(
@@ -261,6 +455,50 @@ describe("runs and inspect", () => {
 
     expect(output.text()).toContain("[Recorder] recorder.process_exit");
     expect(output.text()).not.toContain("[Recorder recovery] recorder.process_exit");
+
+    const recoveryContext = await fixture();
+    const recoveryRun = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: recoveryContext.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=open-item"]
+      },
+      {
+        cwd: recoveryContext.repo,
+        stdin: piped(),
+        env: recoveryContext.env,
+        stdout: silentOutput
+      }
+    );
+    const recoveryJson = await runInspectCommand(
+      {
+        name: "inspect",
+        runId: recoveryRun.runId,
+        dataRoot: recoveryContext.dataRoot,
+        json: true,
+        native: false
+      },
+      { stdout: silentOutput }
+    );
+    const recovery = recoveryJson.events.find(({ kind }) => kind === "recorder.recovery");
+    expect(recovery?.relationships).toEqual([
+      expect.objectContaining({ type: "recovers", eventId: expect.any(String) })
+    ]);
+
+    const recoveryText = writer();
+    await runInspectCommand(
+      {
+        name: "inspect",
+        runId: recoveryRun.runId,
+        dataRoot: recoveryContext.dataRoot,
+        json: false,
+        native: false
+      },
+      { stdout: recoveryText.output }
+    );
+    expect(recoveryText.text()).toContain("[Recorder recovery] recorder.recovery");
+    expect(recoveryText.text()).toContain(`relationships: recovers:${recovery?.relationships[0]?.eventId}`);
   });
 
   it("refuses native expansion outside standard capture and reads only redacted standard artifacts", async () => {
@@ -312,6 +550,43 @@ describe("runs and inspect", () => {
       native: true
     }, { stdout: nativeText.output });
     expect(nativeText.text()).toContain('native: {"type":"future.event","future":{"large":');
+  });
+
+  it("returns bounded truncation metadata instead of parsing or emitting truncated native JSON", async () => {
+    const context = await fixture();
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=unknown-truncated"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const output = writer();
+    const inspected = await runInspectCommand({
+      name: "inspect",
+      runId: recorded.runId,
+      dataRoot: context.dataRoot,
+      json: true,
+      native: true
+    }, { stdout: output.output });
+    const unknown = inspected.events.find(({ kind }) => kind === "source.unknown");
+    const artifact = inspected.artifacts.find(({ kind }) => kind === "native-payload");
+
+    expect(artifact).toMatchObject({
+      truncated: true,
+      byteLength: 10 * 1024 * 1024,
+      originalByteLength: expect.any(Number)
+    });
+    expect(artifact!.originalByteLength).toBeGreaterThan(artifact!.byteLength);
+    expect(unknown?.nativeContent).toEqual({
+      state: "truncated",
+      truncated: true,
+      storedByteLength: artifact!.byteLength,
+      originalByteLength: artifact!.originalByteLength
+    });
+    expect(output.text().length).toBeLessThan(100_000);
   });
 
   it.each(["path", "symlink", "digest"] as const)(

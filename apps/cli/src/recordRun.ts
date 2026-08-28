@@ -441,7 +441,7 @@ export async function recordRun(
   const before = await captureGitBefore(cwd);
   const promptInput = await resolvePromptInput(command.childArgs, stdin);
   const dataRoot = resolve(command.dataRoot);
-  const databasePath = await prepareDataRoot(dataRoot);
+  const databasePath = await prepareDataRoot(dataRoot, before.repositoryRoot);
   const key = await loadOrCreateRedactionKey(dataRoot);
   const database = openDatabase(databasePath);
   await ownerOnlyDatabaseFiles(databasePath);

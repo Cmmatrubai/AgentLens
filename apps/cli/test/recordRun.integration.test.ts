@@ -2,10 +2,12 @@ import { execFile as execFileCallback } from "node:child_process";
 import {
   chmod,
   copyFile,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -118,6 +120,109 @@ describe("recordRun lifecycle", () => {
     });
   });
 
+  it("refuses a missing data-root child inside the repository before storage or spawn", async () => {
+    const context = await fixture();
+    const startedFile = join(context.root, "in-repo-child-started.log");
+    const dataRoot = join(context.repo, "missing", "agentlens-data");
+
+    await expect(recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: { ...context.env, AGENTLENS_FAKE_STARTED_FILE: startedFile },
+        stdout: silentOutput
+      }
+    )).rejects.toThrow(/data root.*repository/i);
+
+    await expect(lstat(join(context.repo, "missing"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(startedFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses the canonical repository root itself as data-root before storage or spawn", async () => {
+    const context = await fixture();
+    const startedFile = join(context.root, "repository-root-started.log");
+    const originalHead = (await git(context.repo, "rev-parse", "HEAD")).trim();
+
+    await expect(recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.repo,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: { ...context.env, AGENTLENS_FAKE_STARTED_FILE: startedFile },
+        stdout: silentOutput
+      }
+    )).rejects.toThrow(/data root.*repository/i);
+
+    expect((await git(context.repo, "rev-parse", "HEAD")).trim()).toBe(originalHead);
+    expect(await git(context.repo, "status", "--porcelain")).toBe("");
+    await expect(lstat(join(context.repo, "agentlens.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(join(context.repo, "secrets"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(startedFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses canonical in-repository containment through a symlinked parent before storage or spawn", async () => {
+    const context = await fixture();
+    const startedFile = join(context.root, "canonical-child-started.log");
+    const repositoryAlias = join(context.root, "repository-alias");
+    const dataRoot = join(repositoryAlias, "agentlens-data");
+    await symlink(context.repo, repositoryAlias);
+
+    await expect(recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: { ...context.env, AGENTLENS_FAKE_STARTED_FILE: startedFile },
+        stdout: silentOutput
+      }
+    )).rejects.toThrow(/data root.*repository/i);
+
+    await expect(lstat(join(context.repo, "agentlens-data"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(startedFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses a symlink alias of the canonical repository root before storage or spawn", async () => {
+    const context = await fixture();
+    const startedFile = join(context.root, "canonical-root-alias-started.log");
+    const repositoryAlias = join(context.root, "repository-root-alias");
+    await symlink(context.repo, repositoryAlias);
+
+    await expect(recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: repositoryAlias,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: { ...context.env, AGENTLENS_FAKE_STARTED_FILE: startedFile },
+        stdout: silentOutput
+      }
+    )).rejects.toThrow(/data root.*repository/i);
+
+    await expect(lstat(join(context.repo, "agentlens.sqlite"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(join(context.repo, "secrets"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(startedFile)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("prints the run id before the real fake child starts and forwards exact argv", async () => {
     const context = await fixture();
     const orderFile = join(context.root, "order.log");
@@ -155,6 +260,32 @@ describe("recordRun lifecycle", () => {
     ]);
     expect(JSON.parse(await readFile(argvCapture, "utf8"))).toEqual(childArgs.slice(1));
     expect(detail(context.dataRoot, result.runId).run.childPid).toEqual(expect.any(Number));
+  });
+
+  it("does not label ID-less thread or turn starts as interrupted recovery", async () => {
+    const context = await fixture();
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const run = detail(context.dataRoot, result.runId);
+
+    expect(run.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: "thread.started",
+        source: expect.objectContaining({ threadId: "fixture-thread" })
+      }),
+      expect.objectContaining({
+        kind: "turn.started",
+        source: expect.objectContaining({ turnId: "fixture-turn" })
+      })
+    ]));
+    expect(run.events.filter(({ kind }) => kind === "recorder.recovery")).toEqual([]);
   });
 
   it("keeps provider completion and a nonzero process exit as separate contradictory facts", async () => {

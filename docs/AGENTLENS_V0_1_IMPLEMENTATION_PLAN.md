@@ -21,7 +21,9 @@
 - Raw real probes remain ignored; only sanitized fixtures plus their manifest are committed.
 - Unknown/malformed Codex input never crashes recording or destroys the run.
 - Git commands are read-only; dirty repositories refuse before child spawn.
+- A canonical data root equal to or contained by the canonical recorded repository, including through symlink aliases, refuses before storage creation or child spawn and leaves both paths untouched.
 - Child argv, stdin bytes, model, sandbox, permissions, approval configuration, and working directory are never silently changed.
+- `agentVersion` remains explicitly `unknown` because Codex exec JSONL does not expose it in v0.1; `promptSource` describes prompt/stdin transport only, never semantic prompt location, and prompts are not parsed or altered.
 - Final Git evidence means tracked final diff relative to initial HEAD plus untracked-file metadata, not forensic attribution or untracked contents.
 - Each task follows strict red-green-refactor, fresh task tests/typecheck/diff review, independent review, then commit.
 
@@ -244,21 +246,24 @@ git commit -m "feat: redact content before durable storage"
 - Create: `packages/storage/package.json`
 - Create: `packages/storage/tsconfig.json`
 - Create: `packages/storage/migrations/001_initial.sql`
+- Create: `packages/storage/migrations/002_storage_invariants.sql`
 - Create: `packages/storage/src/database.ts`
+- Create: `packages/storage/src/databaseInternal.ts`
 - Create: `packages/storage/src/runRepository.ts`
 - Create: `packages/storage/src/index.ts`
 - Create: `packages/storage/test/migrations.test.ts`
 - Create: `packages/storage/test/runRepository.test.ts`
 - Create: `packages/storage/test/artifactMetadata.test.ts`
+- Create: `packages/storage/test/publicSurface.test.ts`
 
 **Interfaces:**
 - Produces: `openDatabase(path): AgentLensDatabase`.
 - Produces: `RunRepository.createRun`, `markRunning`, `appendEvent`, `commitArtifactMetadata`, `saveGitEvidence`, `recordProcessFact`, `reconcileRun`, `appendRecoveryForOpenEvents`, `listRuns`, and `getRunDetail`.
 - `appendEvent` is the only event-write API. No event-update/delete method exists.
 
-- [ ] **Step 1: Write the failing migration test**
+- [ ] **Step 1: Write the failing migration tests**
 
-Assert v1 creates `runs`, `events`, `event_sources`, `event_relationships`, `artifacts`, `git_evidence`, `redaction_audits`, and required indexes; foreign keys are enabled; migrations rerun safely.
+Assert migrations 001 and 002 create `runs`, `events`, `event_sources`, same-run `event_relationships`, `artifacts`, stateful `git_evidence`, `redaction_audits`, one-recovery and lookup indexes, and required database pragmas. Assert discovery reruns safely and migration 002 applies forward to an existing v1 database.
 
 - [ ] **Step 2: Write failing append-only recovery tests**
 
@@ -278,7 +283,7 @@ it("requires a derived_from relationship for derived events", () => {
 });
 ```
 
-Also assert a second recovery call is idempotent by relationship and does not append a duplicate.
+Also assert a second recovery call is idempotent by relationship and does not append a duplicate. Assert the public storage surface exposes neither the raw SQLite connection nor a repository database handle that could bypass append-only event APIs.
 
 - [ ] **Step 3: Write failing reconciliation-table tests**
 
@@ -295,12 +300,12 @@ Expected: FAIL because SQLite storage is absent.
 
 - [ ] **Step 6: Implement the migration and minimal repository**
 
-Use WAL, foreign keys, synchronous `NORMAL`, 5-second busy timeout, epoch milliseconds, insert-only event statements, explicit source/relationship rows, and transactional event+relationship insertion. `commitArtifactMetadata` must `stat` and verify the completed artifact before its transaction. Add the storage project to the root TypeScript references, add `better-sqlite3` plus its TypeScript declarations to the storage package, update the lockfile, and authorize only the `better-sqlite3` native build in the pnpm workspace policy.
+Use WAL, foreign keys, synchronous `NORMAL`, 5-second busy timeout, epoch milliseconds, insert-only event statements, explicit source/relationship rows, transactional event+relationship insertion, same-run relationship foreign keys, one-recovery uniqueness, and explicit Git-evidence availability states. Keep the raw connection in `databaseInternal.ts`; the public database/repository surface must not expose it. `commitArtifactMetadata` must `stat` and verify the completed artifact before its transaction. Add the storage project to the root TypeScript references, add `better-sqlite3` plus its TypeScript declarations to the storage package, update the lockfile, and authorize only the `better-sqlite3` native build in the pnpm workspace policy.
 
 - [ ] **Step 7: Verify GREEN, typecheck, and diff scope**
 
 Run: `pnpm vitest packages/storage/test --run && pnpm typecheck && git diff --check`  
-Expected: PASS with the first observed row byte-for-byte unchanged after recovery.
+Expected: PASS with migrations `[1, 2]`, hidden raw mutation handles, same-run relationships, explicit Git-evidence states, and the first observed row byte-for-byte unchanged after recovery.
 
 - [ ] **Step 8: Commit**
 
@@ -314,10 +319,6 @@ git commit -m "feat: persist append-only AgentLens runs"
 **Files:**
 - Modify: `pnpm-lock.yaml`
 - Modify: `tsconfig.json`
-- Modify: `vitest.workspace.ts`
-- Modify: `packages/core/package.json`
-- Modify: `packages/codex/package.json`
-- Modify: `packages/storage/package.json`
 - Create: `packages/codex/package.json`
 - Create: `packages/codex/tsconfig.json`
 - Create: `packages/codex/src/lineDecoder.ts`
@@ -391,6 +392,10 @@ git commit -m "feat: normalize Codex JSONL evidence"
 - Modify: `package.json`
 - Modify: `pnpm-lock.yaml`
 - Modify: `tsconfig.json`
+- Modify: `vitest.workspace.ts`
+- Modify: `packages/core/package.json`
+- Modify: `packages/codex/package.json`
+- Modify: `packages/storage/package.json`
 - Create: `apps/cli/package.json`
 - Create: `apps/cli/tsconfig.json`
 - Create: `apps/cli/src/args.ts`
@@ -426,23 +431,23 @@ git commit -m "feat: normalize Codex JSONL evidence"
 
 Name the breaks: AgentLens could inject flags/change argv, or fail to preserve stdin prompts.
 
-Assert exact child argv equality for ordinary prompts; reject missing delimiter/non-Codex/missing exec/missing `--json`; buffer and forward every non-TTY stdin stream unchanged (including `codex exec -`, promptless piped prompts, and prompt-plus-stdin context); store only redacted/omitted representation; reject explicit `codex exec -` with TTY stdin.
+Assert exact child argv equality for ordinary prompts; reject missing delimiter/non-Codex/missing exec/missing `--json`; buffer and forward every non-TTY stdin stream unchanged (including `codex exec -`, promptless piped prompts, and prompt-plus-stdin context); store only redacted/omitted representation; reject explicit `codex exec -` with TTY stdin. Assert `promptSource` records only `stdin-buffered`/`tty-inherited` transport and neither locates, parses, nor alters a semantic prompt.
 
 - [ ] **Step 2: Write failing Git evidence tests**
 
-Use real disposable repos and a recording fake. Assert dirty status refuses before fake spawn; executed Git subcommands are restricted to the read-only allowlist; NUL-delimited porcelain status preserves exact path bytes in memory; valid UTF-8 rename/untracked paths persist unchanged; undecodable paths persist only a content-free placeholder while exact bytes still drive contained `lstat` type/size capture; initial/final HEAD/branch/status persist; a child-created commit with a clean final worktree still produces tracked final diff relative to initial HEAD; branch changes flag; untracked contents are absent while metadata remains; `git diff --check <initial-head> --` result persists.
+Use real disposable repos and a recording fake. Assert dirty status refuses before fake spawn; a canonical data root equal to or inside the canonical repository rejects before any storage creation or spawn, including through symlink aliases, and leaves repository/data state untouched; executed Git subcommands are restricted to the read-only allowlist; NUL-delimited porcelain status preserves exact path bytes in memory; valid UTF-8 rename/untracked paths persist unchanged; undecodable paths persist only a content-free placeholder while exact bytes still drive contained `lstat` type/size capture; initial/final HEAD/branch/status persist; a child-created commit with a clean final worktree still produces tracked final diff relative to initial HEAD; branch changes flag; untracked contents are absent while metadata remains; `git diff --check <initial-head> --` result persists.
 
 - [ ] **Step 3: Write failing recorder lifecycle tests**
 
-The fake Codex supports success, failed-then-recovery, nonzero, malformed, unknown, stderr, stdin-echo, commit, branch-change, untracked, and hang modes. Assert run ID exists and is printed before fake child begins; provider and process facts remain separate; contradictions reconcile by spec precedence; interruption keeps observed `in_progress` unchanged and appends one `recorder.recovery`; child exit/signal remains nullable and never fabricated.
+The fake Codex supports success, failed-then-recovery, nonzero, malformed, unknown, oversized/truncated native, stderr, stdin-echo, commit, branch/Git change, untracked, complete source identifiers, and hang modes. Assert run ID exists and is printed before fake child begins; provider and process facts remain separate; contradictions reconcile by spec precedence; interruption keeps observed `in_progress` unchanged and appends one `recorder.recovery`; child exit/signal remains nullable and never fabricated.
 
 - [ ] **Step 4: Write failing native-payload/privacy tests**
 
-Assert standard mode stores small unknown fields inline after redaction and large native JSON as an artifact. Assert metadata-only unique sentinel strings placed in prompt/message/command/output/diff/native/stderr never appear in a byte scan of the entire closed data root, including SQLite/WAL/SHM/artifacts/temp paths. Assert standard bearer token becomes the exact keyed-marker shape and `.env` diff block/content is absent.
+Assert standard mode stores small unknown fields inline after redaction and large native JSON as an artifact. Oversized artifacts carry a visible marker and explicit truncation/original-length metadata; native inspection returns bounded truncation metadata instead of parsing or emitting incomplete JSON. Assert metadata-only unique sentinel strings placed in prompt/message/command/output/diff/native/stderr never appear in a byte scan of the entire closed data root, including SQLite/WAL/SHM/artifacts/temp paths. Assert standard bearer token becomes the exact keyed-marker shape and `.env` diff block/content is absent.
 
 - [ ] **Step 5: Write failing `runs`/`inspect` tests**
 
-Assert `runs --json` includes status, child exit/signal, head/branch-change flags, and capability summary. Assert `inspect --json` returns immutable chronological events, sources, relationships, native payload representation, contradictions, and exact Git terminology `tracked final diff` and `untracked-file metadata`. Text labels use `Recorder recovery` only for `recorder.recovery`; other recorder events use `Recorder`.
+Assert `runs --json` includes status, child exit/signal, head/branch-change flags, and capability summary. Assert text and JSON `inspect` return immutable chronological events; every present session/thread, turn, item/tool, event/item-type, and correlation source ID; AgentLens relationships; native payload representation; contradictions; initial/final HEAD and branch; tracked-final-diff and untracked-metadata availability; and explicit old-to-new HEAD/branch warnings. Text labels use `Recorder recovery` only for `recorder.recovery`; other recorder events use `Recorder`. Both formats explain that `agentVersion: "unknown"` is a Codex exec JSONL v0.1 limitation and `promptSource` is prompt/stdin transport metadata rather than semantic prompt location.
 
 - [ ] **Step 6: Run RED**
 
@@ -451,7 +456,7 @@ Expected: FAIL because the CLI vertical slice does not exist.
 
 - [ ] **Step 7: Implement argument/prompt and Git preflight**
 
-Keep child argv bytes/ordering exact. Buffer every non-TTY stdin stream fully in memory, capture it under policy, and forward the original bytes unchanged. Use Node `spawn` with argument arrays for the child and `execFile` with argument arrays for exact read-only Git commands. Capture porcelain status as a NUL-delimited byte stream; use exact bytes for path containment and metadata, but persist only valid UTF-8 display or a content-free placeholder. Refuse dirty/non-Git before child spawn.
+Keep child argv bytes/ordering exact. Buffer every non-TTY stdin stream fully in memory, capture it under policy, and forward the original bytes unchanged. Use Node `spawn` with argument arrays for the child and `execFile` with argument arrays for exact read-only Git commands. Capture porcelain status as a NUL-delimited byte stream; use exact bytes for path containment and metadata, but persist only valid UTF-8 display or a content-free placeholder. Refuse dirty/non-Git before child spawn. Canonicalize the repository and prospective data-root path (including the nearest existing ancestor) and reject equality/containment before storage creation or spawn.
 
 - [ ] **Step 8: Implement streaming persistence and reconciliation**
 
@@ -459,7 +464,7 @@ Create run `starting`, print id, spawn child with separate pipes/no PTY, mark `r
 
 - [ ] **Step 9: Implement `runs` and `inspect`**
 
-Set `apps/cli/package.json` to expose `{ "bin": { "agentlens": "dist/main.js" } }`, add the CLI package to the root TypeScript references and lockfile workspace importer, extend the root Vitest workspace pattern from packages to packages plus apps, add a Node shebang to the compiled entry point, and give the core/Codex/storage packages conditional root exports whose TypeScript types resolve to source while plain Node resolves compiled `dist/index.js`. The root development script explicitly activates the `development` export condition, and the source entry consumes pnpm's one leading `--` wrapper delimiter. Add fresh-install development-invocation and plain-Node packaged-binary smoke tests; do not depend on runtime `tsx` registration. Support text and JSON output with the exact fields/labels in the spec. `--native` refuses non-standard capture and otherwise loads only redacted inline/artifact native content.
+Set `apps/cli/package.json` to expose `{ "bin": { "agentlens": "dist/main.js" } }`, add the CLI package to the root TypeScript references and lockfile workspace importer, extend the root Vitest workspace pattern from packages to packages plus apps, add a Node shebang to the compiled entry point, and give the core/Codex/storage packages conditional root exports whose TypeScript types resolve to source while plain Node resolves compiled `dist/index.js`. The root development script explicitly activates the `development` export condition, and the source entry consumes pnpm's one leading `--` wrapper delimiter. Add fresh-install development-invocation and plain-Node packaged-binary smoke tests; do not depend on runtime `tsx` registration. Support text and JSON output with the exact fields, warnings, source IDs, relationships, Git availability, metadata semantics, and labels in the spec. `--native` refuses non-standard capture and otherwise loads only redacted inline/artifact native content.
 
 - [ ] **Step 10: Verify GREEN, typecheck, and diff scope**
 
@@ -468,7 +473,7 @@ Expected: PASS with no UI/API/Claude/derivation code.
 
 - [ ] **Step 11: Run milestone real-process checks**
 
-Use clean disposable repositories and isolated `--data-root` directories for success, failed-command recovery, interrupt, malformed/unknown fake input, metadata-only sentinels, standard token/diff redaction, and dirty refusal. For the successful and recovery cases, run the installed current `codex exec --json` where deterministic prompting permits; use the deterministic fake only for malformed/unknown, forced signal timing, and sentinel injection that a real provider cannot safely guarantee.
+Use clean disposable repositories and isolated `--data-root` directories for success, failed-command recovery, interrupt, malformed/unknown fake input, metadata-only sentinels, standard token/diff redaction, dirty refusal, and canonical in-repository data-root refusal. Verify complete inspect source/Git output and truncation bounds. For the successful and recovery cases, run the installed current `codex exec --json` where deterministic prompting permits; use the deterministic fake only for malformed/unknown, forced signal timing, and sentinel injection that a real provider cannot safely guarantee.
 
 - [ ] **Step 12: Commit**
 

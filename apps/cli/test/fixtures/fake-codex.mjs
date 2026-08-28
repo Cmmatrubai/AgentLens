@@ -61,6 +61,10 @@ switch (mode) {
     completed("command-recovery", "completed", 0);
     terminal();
     break;
+  case "open-item":
+    started("command-open");
+    terminal();
+    break;
   case "nonzero":
     terminal();
     process.exitCode = 7;
@@ -77,6 +81,10 @@ switch (mode) {
     break;
   case "unknown-large":
     emit({ type: "future.event", future: { large: "x".repeat(40 * 1024) } });
+    terminal();
+    break;
+  case "unknown-truncated":
+    emit({ type: "future.event", future: { large: "x".repeat(10 * 1024 * 1024 + 1024) } });
     terminal();
     break;
   case "unknown-large-repeated": {
@@ -108,6 +116,37 @@ switch (mode) {
     break;
   case "branch-change":
     execFileSync("git", ["checkout", "-qb", "fake-child-branch"]);
+    terminal();
+    break;
+  case "git-change":
+    writeFileSync("tracked.txt", "child committed change\n");
+    execFileSync("git", ["add", "tracked.txt"]);
+    execFileSync("git", ["commit", "-qm", "fake child commit"]);
+    execFileSync("git", ["checkout", "-qb", "fake-child-branch"]);
+    emit({
+      type: "item.completed",
+      thread_id: "fixture-thread",
+      turn_id: "fixture-turn",
+      item: { id: "message-git-change", type: "agent_message", text: "git changed", status: "completed" }
+    });
+    terminal();
+    break;
+  case "source-identifiers":
+    emit({
+      type: "item.completed",
+      session_id: "fixture-session",
+      thread_id: "fixture-thread",
+      turn_id: "fixture-turn",
+      call_id: "fixture-correlation",
+      item: {
+        id: "fixture-item",
+        tool_id: "fixture-tool",
+        type: "mcp_tool_call",
+        server: "fixture-server",
+        tool: "fixture-tool-name",
+        status: "completed"
+      }
+    });
     terminal();
     break;
   case "remove-git":

@@ -198,7 +198,7 @@ Artifacts are content-addressed from already-redacted bytes. Creation order is:
 
 Filesystem creation and SQLite insertion are not one atomic transaction. A crash may leave an orphan file; startup/maintenance may garbage-collect artifacts not referenced by a committed row. A committed artifact row must never reference a file that was not successfully created.
 
-Artifact content is capped at 10 MiB after redaction and has a visible truncation marker. Inline normalized/native previews are capped at 32 KiB. Temporary files are removed on handled failures.
+Artifact content is capped at 10 MiB after redaction and has a visible truncation marker plus explicit truncation/original-length metadata. Inline normalized/native previews are capped at 32 KiB. Inspection never parses or emits an incomplete truncated native JSON document; it returns bounded truncation metadata instead. Temporary files are removed on handled failures.
 
 ## 8. SQLite v1
 
@@ -266,11 +266,15 @@ agentlens inspect RUN_ID [--data-root PATH] [--json] [--native]
 
 `record` requires the delimiter, a `codex` executable basename, `exec`, and `--json`. It never injects flags or changes prompt/model/sandbox/approval/permissions/cwd. It emits the run ID before child work starts.
 
+The canonical `--data-root` must be outside the canonical recorded repository root. Equality and containment are rejected before storage/key/database creation and before child spawn, including when either path is reached through a symlink alias. A rejected preflight leaves both repository and proposed data path untouched.
+
 For an argv prompt, the exact child argument vector is forwarded; any displayed/stored command or possible prompt text passes capture policy. AgentLens does not attempt to semantically parse every future Codex option.
 
 For every non-TTY stdin stream—including `codex exec -`, `codex exec` with no argv prompt, and prompt-plus-stdin context—AgentLens reads stdin fully into memory before spawning, applies capture policy to its representation, then writes the **unchanged original bytes** to child stdin and closes it. Original stdin bytes are never written before redaction. Explicit `codex exec -` with TTY stdin fails preflight with instructions to pipe input. Other TTY stdin is inherited unchanged.
 
-`runs` shows id, status, provider, start time, duration, child exit/signal, and Git HEAD/branch-change flags. `inspect` shows chronological immutable events with provenance labels, source identifiers, relationships, process/provider contradictions, tracked final diff availability, and untracked-file metadata availability. `--native` displays redacted inline/artifact native payloads only in standard mode.
+`promptSource` is transport metadata only: `stdin-buffered` or `tty-inherited` describes how prompt/stdin bytes reached the child. It does not claim a semantic prompt location. AgentLens does not parse or alter prompt content.
+
+`runs` shows id, status, provider, start time, duration, child exit/signal, and Git HEAD/branch-change flags. In both text and JSON, `inspect` shows chronological immutable events with every available session/thread, turn, item/tool, event/item-type, and correlation source identifier; AgentLens event relationships; process/provider contradictions; initial/final HEAD and branch; tracked-final-diff and untracked-metadata availability; and explicit old-to-new warnings when HEAD or branch changes. The text label **Recorder recovery** is used only for `recorder.recovery`. `--native` displays redacted inline/artifact native payloads only in standard mode.
 
 ## 11. Provider capabilities
 
@@ -284,7 +288,7 @@ interface AdapterCapabilities {
 }
 ```
 
-Codex exec v0.1 declares `sourceTimestamps: false`, `fileReads: "unavailable"`, `toolOutput: "partial"`, `toolDurations: "unavailable"`, and `interruptionSignal: "partial"`. The CLI never renders unavailable capability as missing agent behavior.
+Codex exec v0.1 declares `sourceTimestamps: false`, `fileReads: "unavailable"`, `toolOutput: "partial"`, `toolDurations: "unavailable"`, and `interruptionSignal: "partial"`. Codex exec JSONL does not expose a safe agent-version fact in this milestone, so `agentVersion` remains the explicit value `unknown`; AgentLens does not invoke a mutating or prompt-altering probe to guess it. The CLI never renders an unavailable capability as missing agent behavior.
 
 Claude Code is not implemented in this milestone.
 
@@ -307,12 +311,14 @@ Task 7 adds the local authenticated API and React UI. Generic recorder events di
 - Sanitized fixture manifest and lifecycle fixtures are committed; raw traces are ignored.
 - Unknown and malformed source input appends inspectable events and never destroys the run.
 - Observed lifecycle events are immutable; interruption appends correlated recovery.
-- Small redacted native payload is inline; large redacted native payload is an artifact; unknown fields remain inspectable.
+- Small redacted native payload is inline; large redacted native payload is an artifact; unknown fields remain inspectable; truncated native artifacts expose bounded metadata instead of incomplete JSON.
 - Metadata-only sentinel content is absent from the entire data root.
 - Standard mode uses keyed HMAC markers and excludes sensitive paths, including diff blocks.
 - Artifact metadata never references an artifact that was not successfully created; orphan files are tolerated.
 - Successful, failure/recovery, interrupted, malformed/unknown, privacy, and dirty-repository milestone checks pass.
+- A canonical data root equal to or inside the recorded repository, including through a symlink alias, fails before any storage creation or child spawn and leaves repository/data state untouched.
 - Git evidence reveals HEAD/branch changes, tracked final diff relative to initial HEAD, diff-check result, and untracked-file metadata without claiming attribution or untracked contents.
-- `runs` and `inspect` expose provider facts, process facts, relationships, reconciliation, and capability limits without contradiction loss.
+- `runs` and text/JSON `inspect` expose provider facts, process facts, every available native source identifier, AgentLens relationships, reconciliation, initial/final Git values, evidence availability, explicit HEAD/branch-change warnings, and capability limits without contradiction loss.
+- `agentVersion: "unknown"` is visibly explained as a v0.1 provider limitation; `promptSource` is visibly explained as prompt/stdin transport metadata, not semantic prompt location, and prompt content is neither parsed nor altered.
 
 This document is the binding v0.1 design. Implementation deviations require concrete test evidence and must be recorded in the final milestone report.
