@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import type { CapturePolicy } from "./capturePolicy.js";
+import { shouldExcludePath } from "./sensitivePathPolicy.js";
 
 export type ContentClass =
   | "summary"
@@ -35,6 +36,26 @@ const authenticRedactionResults = new WeakSet<object>();
 const MAX_JSON_REDACTION_DEPTH = 100;
 const JSON_MAX_DEPTH_REASON = "json-max-depth";
 const JSON_MAX_DEPTH_MARKER = `[[REDACTED:${JSON_MAX_DEPTH_REASON}]]`;
+const JSON_PATH_PROPERTY_NAMES = new Set([
+  "file",
+  "files",
+  "filepath",
+  "filepaths",
+  "filename",
+  "filenames",
+  "path",
+  "paths",
+  "sourcepath",
+  "targetpath",
+  "targetpaths",
+  "destinationpath"
+]);
+const JSON_PATH_MAP_PROPERTY_NAMES = new Set([
+  "filecontents",
+  "files",
+  "filesbypath",
+  "contentsbyfile"
+]);
 
 export interface RedactionResult {
   readonly [redactedResultBrand]: true;
@@ -208,6 +229,15 @@ export function redactText(input: string, context: RedactionContext): RedactionR
     return createResult(fixedMetadataText[context.contentClass], []);
   }
 
+  if (context.contentClass === "path") {
+    const exclusion = shouldExcludePath(input, context.policy);
+    if (exclusion.exclude && exclusion.reason) {
+      return createResult(`[[EXCLUDED:${exclusion.reason}]]`, [
+        { reason: exclusion.reason, count: 1 }
+      ]);
+    }
+  }
+
   const redacted = redactDetectedTokens(input, context.key);
   const audits = [...redacted.counts].map(([reason, count]) => ({ reason, count }));
   return createResult(redacted.text, audits);
@@ -252,6 +282,50 @@ function reachesJsonDepthLimit(value: object, startingDepth: number): boolean {
   return false;
 }
 
+function normalizedJsonPropertyName(propertyName: string): string {
+  return propertyName.replace(/[_-]/g, "").toLowerCase();
+}
+
+function excludedPathReason(path: string): string | undefined {
+  const exclusion = shouldExcludePath(path, "standard");
+  return exclusion.exclude ? exclusion.reason : undefined;
+}
+
+function pathValues(value: unknown): readonly string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === "string");
+  return [];
+}
+
+function looksLikePathMapKey(key: string): boolean {
+  return key.startsWith(".") || key.includes("/") || key.includes("\\");
+}
+
+function sensitiveStandalonePathReason(
+  value: object,
+  propertyName?: string
+): string | undefined {
+  if (Array.isArray(value)) return undefined;
+  const entries = Object.entries(value);
+  for (const [entryKey, entryValue] of entries) {
+    if (!JSON_PATH_PROPERTY_NAMES.has(normalizedJsonPropertyName(entryKey))) continue;
+    for (const path of pathValues(entryValue)) {
+      const reason = excludedPathReason(path);
+      if (reason) return reason;
+    }
+  }
+
+  const isPathMap =
+    propertyName !== undefined &&
+    JSON_PATH_MAP_PROPERTY_NAMES.has(normalizedJsonPropertyName(propertyName));
+  for (const [entryKey] of entries) {
+    if (!isPathMap && !looksLikePathMapKey(entryKey)) continue;
+    const reason = excludedPathReason(entryKey);
+    if (reason) return reason;
+  }
+  return undefined;
+}
+
 function redactJsonValue(
   value: unknown,
   key: Buffer,
@@ -262,6 +336,14 @@ function redactJsonValue(
   if (depth >= MAX_JSON_REDACTION_DEPTH && value !== null && typeof value === "object") {
     audits.set(JSON_MAX_DEPTH_REASON, (audits.get(JSON_MAX_DEPTH_REASON) ?? 0) + 1);
     return JSON_MAX_DEPTH_MARKER;
+  }
+
+  if (value !== null && typeof value === "object") {
+    const pathReason = sensitiveStandalonePathReason(value, propertyName);
+    if (pathReason) {
+      audits.set(pathReason, (audits.get(pathReason) ?? 0) + 1);
+      return `[[EXCLUDED:${pathReason}]]`;
+    }
   }
 
   const reason = propertyName ? sensitiveJsonReason(propertyName) : undefined;
