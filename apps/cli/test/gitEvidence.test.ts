@@ -1,5 +1,5 @@
 import { execFile as execFileCallback, execFileSync } from "node:child_process";
-import { lstat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -28,6 +28,22 @@ async function cleanRepository(): Promise<string> {
   await git(root, "add", "tracked.txt");
   await git(root, "commit", "-qm", "initial");
   return root;
+}
+
+async function markerHelper(
+  root: string,
+  name: string,
+  stdout: string
+): Promise<Readonly<{ command: string; marker: string }>> {
+  const command = join(root, ".git", `${name}.mjs`);
+  const marker = join(root, ".git", `${name}.invoked`);
+  await writeFile(command, `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(marker)}, "invoked\\n");
+process.stdout.write(${JSON.stringify(stdout)});
+`, "utf8");
+  await chmod(command, 0o755);
+  return { command, marker };
 }
 
 function writeIndexBlob(root: string, path: Buffer, body: string): void {
@@ -64,6 +80,43 @@ afterEach(async () => {
 });
 
 describe("read-only Git evidence", () => {
+  it("does not refresh index bytes when a clean tracked file mtime changes", async () => {
+    const root = await cleanRepository();
+    const indexPath = join(root, ".git", "index");
+    const indexBefore = await readFile(indexPath);
+    const future = new Date(Date.now() + 120_000);
+    await utimes(join(root, "tracked.txt"), future, future);
+
+    await captureGitBefore(root);
+
+    expect(await readFile(indexPath)).toEqual(indexBefore);
+  });
+
+  it("does not invoke a configured fsmonitor helper during capture", async () => {
+    const root = await cleanRepository();
+    const helper = await markerHelper(root, "fsmonitor-helper", "fsmonitor-token\\n");
+    await git(root, "config", "core.fsmonitor", helper.command);
+
+    await captureGitBefore(root);
+
+    await expect(readFile(helper.marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not invoke a configured textconv helper for the tracked final diff", async () => {
+    const root = await cleanRepository();
+    const helper = await markerHelper(root, "textconv-helper", "converted\\n");
+    await writeFile(join(root, ".gitattributes"), "tracked.txt diff=agentlens-test\n", "utf8");
+    await git(root, "add", ".gitattributes");
+    await git(root, "commit", "-qm", "configure diff attributes");
+    await git(root, "config", "diff.agentlens-test.textconv", helper.command);
+    const before = await captureGitBefore(root);
+    await writeFile(join(root, "tracked.txt"), "after\n", "utf8");
+
+    await captureGitAfter(before);
+
+    await expect(readFile(helper.marker)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("refuses tracked, staged, or untracked dirt before child spawn can happen", async () => {
     const root = await cleanRepository();
     await writeFile(join(root, "untracked.txt"), "dirty\n", "utf8");
@@ -89,7 +142,7 @@ describe("read-only Git evidence", () => {
       ["rev-parse", "HEAD"],
       ["symbolic-ref", "--quiet", "--short", "HEAD"],
       ["status", "--porcelain=v2", "--untracked-files=all", "-z"],
-      ["diff", "--binary", "--no-ext-diff", before.initialHead, "--"],
+      ["diff", "--binary", "--no-ext-diff", "--no-textconv", before.initialHead, "--"],
       ["diff", "--check", before.initialHead, "--"]
     ]);
   });

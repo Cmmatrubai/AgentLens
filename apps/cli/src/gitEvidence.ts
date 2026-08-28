@@ -77,8 +77,13 @@ async function runGit(
   return new Promise((resolvePromise, reject) => {
     execFile(
       "git",
-      [...args],
-      { cwd, encoding: "utf8", maxBuffer: MAX_GIT_OUTPUT_BYTES },
+      ["-c", "core.fsmonitor=false", ...args],
+      {
+        cwd,
+        encoding: "utf8",
+        maxBuffer: MAX_GIT_OUTPUT_BYTES,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }
+      },
       (error, stdout, stderr) => {
         const exitCode = exitCodeFor(error);
         if (!acceptedExitCodes.includes(exitCode)) {
@@ -104,8 +109,13 @@ async function runGitBytes(
   return new Promise((resolvePromise, reject) => {
     execFile(
       "git",
-      [...args],
-      { cwd, encoding: null, maxBuffer: MAX_GIT_OUTPUT_BYTES },
+      ["-c", "core.fsmonitor=false", ...args],
+      {
+        cwd,
+        encoding: null,
+        maxBuffer: MAX_GIT_OUTPUT_BYTES,
+        env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" }
+      },
       (error, stdout, stderr) => {
         const exitCode = exitCodeFor(error);
         if (!acceptedExitCodes.includes(exitCode)) {
@@ -536,7 +546,7 @@ export async function captureGitAfter(
   const trackedFinalDiff = safeTrackedDiff((
     await runGitBytes(
       before.repositoryRoot,
-      ["diff", "--binary", "--no-ext-diff", before.initialHead, "--"],
+      ["diff", "--binary", "--no-ext-diff", "--no-textconv", before.initialHead, "--"],
       options
     )
   ).stdout);
