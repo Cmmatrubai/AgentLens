@@ -78,16 +78,108 @@ afterEach(() => {
 });
 
 describe("append-only events and recovery", () => {
+  it.each([
+    {
+      name: "thread.started even when it carries an incidental item ID",
+      kind: "thread.started",
+      source: {
+        provider: "codex-exec" as const,
+        threadId: "fixture-thread",
+        itemId: "incidental-item-id",
+        eventType: "thread.started"
+      }
+    },
+    {
+      name: "ID-less turn.started",
+      kind: "turn.started",
+      source: {
+        provider: "codex-exec" as const,
+        threadId: "fixture-thread",
+        turnId: "fixture-turn",
+        eventType: "turn.started"
+      }
+    }
+  ])("does not invent recovery for $name", ({ kind, source }) => {
+    const { repository, close } = setup();
+    try {
+      const started = repository.appendEvent(event("provider-start", 0, "in_progress", {
+        kind,
+        source
+      }));
+
+      expect(repository.appendRecoveryForOpenEvents(runId, {
+        receivedAt: "2026-08-26T20:01:00.000Z",
+        eventIdFor: (openEvent) => `recovery-${openEvent.id}`
+      })).toEqual([]);
+      expect(repository.getRunDetail(runId).events).toEqual([started]);
+    } finally {
+      close();
+    }
+  });
+
+  it("does not invent recovery after a successful normal provider run", () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("thread-start", 0, "in_progress", {
+        kind: "thread.started",
+        source: {
+          provider: "codex-exec",
+          threadId: "fixture-thread",
+          eventType: "thread.started"
+        }
+      }));
+      repository.appendEvent(event("turn-start", 1, "in_progress", {
+        kind: "turn.started",
+        source: {
+          provider: "codex-exec",
+          threadId: "fixture-thread",
+          turnId: "fixture-turn",
+          eventType: "turn.started"
+        }
+      }));
+      repository.appendEvent(event("turn-complete", 2, "completed", {
+        kind: "turn.completed",
+        source: {
+          provider: "codex-exec",
+          threadId: "fixture-thread",
+          turnId: "fixture-turn",
+          eventType: "turn.completed"
+        }
+      }));
+
+      expect(repository.appendRecoveryForOpenEvents(runId, {
+        receivedAt: "2026-08-26T20:01:00.000Z",
+        eventIdFor: (openEvent) => `recovery-${openEvent.id}`
+      })).toEqual([]);
+      expect(repository.getRunDetail(runId).events).toHaveLength(3);
+    } finally {
+      close();
+    }
+  });
+
   it("appends recorder recovery without mutating the observed start byte-for-byte", () => {
     const { repository, close } = setup();
     try {
       const started = repository.appendEvent(event("event-start", 0, "in_progress"));
-      repository.appendRecoveryForOpenEvents(runId, {
+      const recovered = repository.appendRecoveryForOpenEvents(runId, {
         receivedAt: "2026-08-26T20:01:00.000Z",
         eventIdFor: (openEvent) => `recovery-${openEvent.id}`
       });
 
       const events = repository.getRunDetail(runId).events;
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]).toMatchObject({
+        id: "recovery-event-start",
+        source: {
+          provider: "codex-exec",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-1",
+          itemType: "command_execution",
+          eventType: "recorder.recovery"
+        },
+        relationships: [{ type: "recovers", eventId: started.id }]
+      });
       expect(events[0]).toEqual(started);
       expect(events[0]?.status).toBe("in_progress");
       expect(events[1]).toMatchObject({
@@ -101,30 +193,36 @@ describe("append-only events and recovery", () => {
     }
   });
 
+  it("recovers an open provider tool lifecycle with a stable tool identity", () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("tool-start", 0, "in_progress", {
+        kind: "tool",
+        source: {
+          provider: "codex-exec",
+          turnId: "turn-1",
+          toolId: "tool-1",
+          eventType: "tool.started",
+          itemType: "mcp_tool_call"
+        }
+      }));
+
+      const recovered = repository.appendRecoveryForOpenEvents(runId, {
+        receivedAt: "2026-08-26T20:01:00.000Z",
+        eventIdFor: (openEvent) => `recovery-${openEvent.id}`
+      });
+
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]).toMatchObject({
+        source: { toolId: "tool-1", eventType: "recorder.recovery" },
+        relationships: [{ type: "recovers", eventId: "tool-start" }]
+      });
+    } finally {
+      close();
+    }
+  });
+
   it.each([
-    {
-      name: "a child item terminal does not close its parent turn",
-      started: {
-        kind: "turn.started",
-        source: {
-          provider: "codex-exec" as const,
-          threadId: "thread-1",
-          turnId: "turn-1",
-          eventType: "turn.started"
-        }
-      },
-      terminal: {
-        kind: "command",
-        source: {
-          provider: "codex-exec" as const,
-          threadId: "thread-1",
-          turnId: "turn-1",
-          itemId: "child-item",
-          eventType: "item.completed",
-          itemType: "command_execution"
-        }
-      }
-    },
     {
       name: "an item type mismatch does not close the observed item",
       started: {
@@ -519,11 +617,17 @@ describe("run-fact reconciliation", () => {
 
       const detail = repository.getRunDetail(runId);
       expect(detail.run).toMatchObject(result);
+      const expectedReconciliationEventStatus = {
+        completed: "completed",
+        failed: "failed",
+        interrupted: "interrupted",
+        recorder_error: "failed"
+      } as const;
       expect(detail.events.at(-1)).toMatchObject({
         id: "run-reconciled",
         kind: "run.reconciled",
         provenance: "derived",
-        status: testCase.expectedStatus === "completed" ? "completed" : "failed"
+        status: expectedReconciliationEventStatus[testCase.expectedStatus]
       });
       expect(detail.events.at(-1)?.normalizedPayload).toMatchObject({
         status: testCase.expectedStatus,

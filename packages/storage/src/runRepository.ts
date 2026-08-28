@@ -6,6 +6,7 @@ import {
   traceEventV1Schema,
   type CapturePolicy,
   type CompletedArtifact,
+  type EventStatus,
   type NativeSourceV1,
   type RedactionAudit,
   type RunStatus,
@@ -262,6 +263,12 @@ interface ReconciliationDecision {
   contradictionCodes: string[];
 }
 
+function reconciliationEventStatus(status: ReconciliationDecision["status"]): EventStatus {
+  if (status === "completed") return "completed";
+  if (status === "interrupted") return "interrupted";
+  return "failed";
+}
+
 function epochMilliseconds(value: string): number {
   const milliseconds = Date.parse(value);
   if (!Number.isFinite(milliseconds)) throw new Error(`Invalid event timestamp: ${value}`);
@@ -513,6 +520,12 @@ function sameNativeIdentity(started: TraceEventV1, candidate: TraceEventV1): boo
   if (started.source.turnId !== undefined) return candidate.source.turnId === started.source.turnId;
   if (started.source.threadId !== undefined) return candidate.source.threadId === started.source.threadId;
   return started.source.sessionId !== undefined && candidate.source.sessionId === started.source.sessionId;
+}
+
+function isRecoverableProviderLifecycle(event: TraceEventV1): boolean {
+  const { eventType, itemId, toolId } = event.source;
+  const hasStableNativeIdentity = itemId !== undefined || toolId !== undefined;
+  return hasStableNativeIdentity && (eventType === "item.started" || eventType === "tool.started");
 }
 
 function recoverySourceMatches(target: TraceEventV1, recovery: TraceEventV1): boolean {
@@ -851,7 +864,7 @@ export class RunRepository {
         sequence: this.nextSequence(runId),
         receivedAt: input.receivedAt,
         kind: "run.reconciled",
-        status: decision.status === "completed" ? "completed" : "failed",
+        status: reconciliationEventStatus(decision.status),
         provenance: "derived",
         source: { provider: run.provider, correlationId: runId },
         relationships: uniqueSupportingEventIds.map((eventId) => ({ type: "derived_from" as const, eventId })),
@@ -908,6 +921,7 @@ export class RunRepository {
       const openEvents = events.filter((candidate) =>
         candidate.provenance === "observed" &&
         candidate.status === "in_progress" &&
+        isRecoverableProviderLifecycle(candidate) &&
         !recoveredIds.has(candidate.id) &&
         !events.some((terminal) =>
           terminal.id !== candidate.id &&
