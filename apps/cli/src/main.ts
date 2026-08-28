@@ -10,17 +10,24 @@ async function runRecordWithProcessSignals(
   command: Extract<ReturnType<typeof parseAgentLensArgs>, { name: "record" }>
 ): Promise<number> {
   const controller = new AbortController();
+  const forceController = new AbortController();
   let receivedSignal: "SIGINT" | "SIGTERM" | undefined;
+  let interruptCount = 0;
   const interrupt = (signal: "SIGINT" | "SIGTERM") => (): void => {
     receivedSignal ??= signal;
-    controller.abort();
+    interruptCount += 1;
+    if (interruptCount === 1) controller.abort();
+    else forceController.abort();
   };
   const onSigint = interrupt("SIGINT");
   const onSigterm = interrupt("SIGTERM");
-  process.once("SIGINT", onSigint);
-  process.once("SIGTERM", onSigterm);
+  process.on("SIGINT", onSigint);
+  process.on("SIGTERM", onSigterm);
   try {
-    const recorded = await runRecordCommand(command, { signal: controller.signal });
+    const recorded = await runRecordCommand(command, {
+      signal: controller.signal,
+      forceTerminationSignal: forceController.signal
+    });
     if (receivedSignal === "SIGINT") return 130;
     if (receivedSignal === "SIGTERM") return 143;
     return recorded.cliExitCode;

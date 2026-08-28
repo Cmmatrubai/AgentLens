@@ -228,4 +228,83 @@ describe("packaged AgentLens binary", () => {
     expect(inspected.events.filter(({ kind }) => kind === "recorder.interruption")).toHaveLength(1);
     expect(inspected.events.filter(({ kind }) => kind === "run.reconciled")).toHaveLength(1);
   }, 15_000);
+
+  it("uses a second public interrupt for immediate process-group escalation", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "agentlens-cli-double-signal-"));
+    roots.push(root);
+    const repo = join(root, "repo");
+    const bin = join(root, "bin");
+    const dataRoot = join(root, "data");
+    const startedFile = join(root, "child-started.log");
+    const grandchildFile = join(root, "grandchild.pid");
+    await mkdir(repo);
+    await mkdir(bin);
+    await execFile("git", ["init", "-q"], { cwd: repo });
+    await execFile("git", ["config", "user.email", "fixture@example.test"], { cwd: repo });
+    await execFile("git", ["config", "user.name", "AgentLens Fixture"], { cwd: repo });
+    await writeFile(join(repo, "tracked.txt"), "before\n", "utf8");
+    await execFile("git", ["add", "tracked.txt"], { cwd: repo });
+    await execFile("git", ["commit", "-qm", "initial"], { cwd: repo });
+    await copyFile(fakeCodex, join(bin, "codex"));
+    await chmod(join(bin, "codex"), 0o700);
+
+    const child = spawn(process.execPath, [
+      compiledMain,
+      "record",
+      "--data-root", dataRoot,
+      "--",
+      "codex", "exec", "--json", "--fake-mode=ignore-term"
+    ], {
+      cwd: repo,
+      env: {
+        ...process.env,
+        NODE_OPTIONS: "",
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
+        AGENTLENS_FAKE_STARTED_FILE: startedFile,
+        AGENTLENS_FAKE_GRANDCHILD_FILE: grandchildFile
+      },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    child.stdin.end();
+    let stdout = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    const closed = new Promise<Readonly<{ code: number | null; signal: NodeJS.Signals | null }>>(
+      (resolve) => child.once("close", (code, signal) => resolve({ code, signal }))
+    );
+
+    await waitForFile(startedFile);
+    await waitForFile(grandchildFile);
+    const runId = /Run ID: ([0-9a-f-]+)/.exec(stdout)?.[1];
+    if (!runId) throw new Error("public recorder did not print a run ID");
+    const interruptedAt = Date.now();
+    child.kill("SIGINT");
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    child.kill("SIGINT");
+    const terminal = await closed;
+
+    const inspected = await runInspectCommand({
+      name: "inspect",
+      runId,
+      dataRoot,
+      json: true,
+      native: false
+    }, { cwd: repo, stdout: { write: () => true } });
+
+    expect(Date.now() - interruptedAt).toBeLessThan(1_000);
+    expect(terminal).toEqual({ code: 130, signal: null });
+    expect(inspected.run).toMatchObject({
+      status: "interrupted",
+      exitCode: null,
+      terminatingSignal: "SIGKILL"
+    });
+    expect(inspected.events.filter(({ kind }) => kind === "recorder.recovery")).toHaveLength(1);
+    expect(inspected.events.some(({ kind, provenance }) =>
+      kind === "turn.completed" && provenance === "observed"
+    )).toBe(false);
+    const groupId = inspected.ownership?.childProcessGroupId;
+    if (groupId === null || groupId === undefined) throw new Error("missing process-group identity");
+    expect(() => process.kill(-groupId, 0)).toThrow();
+  }, 15_000);
 });

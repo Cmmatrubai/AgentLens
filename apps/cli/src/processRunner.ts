@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import type { PromptInput } from "./promptInput.js";
 
+export const DEFAULT_TERMINATION_GRACE_MS = 2_000;
+
 export interface ChildProcessResult {
   readonly pid: number;
   readonly exitCode: number | null;
@@ -14,6 +16,8 @@ export interface ProcessRunnerInput {
   readonly env: NodeJS.ProcessEnv;
   readonly promptInput: PromptInput;
   readonly signal?: AbortSignal;
+  readonly forceTerminationSignal?: AbortSignal;
+  readonly terminationGraceMs?: number;
   readonly now?: () => number;
   readonly onSpawn: (pid: number, processGroupId: number | null) => void | Promise<void>;
   readonly onLine: (
@@ -89,6 +93,10 @@ function writeBufferedInput(stream: NodeJS.WritableStream, bytes: Buffer): Promi
 
 export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildProcessResult> {
   if (input.childArgs[0] !== "codex") throw new Error("Process runner only spawns the codex basename.");
+  const terminationGraceMs = input.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS;
+  if (!Number.isFinite(terminationGraceMs) || terminationGraceMs < 0) {
+    throw new Error("Termination grace period must be a non-negative number of milliseconds.");
+  }
   const usesProcessGroup = process.platform !== "win32";
   const child = spawn("codex", [...input.childArgs.slice(1)], {
     cwd: input.cwd,
@@ -117,26 +125,58 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
   });
 
   let explicitlyInterrupted = false;
+  let terminationTimer: ReturnType<typeof setTimeout> | undefined;
+  const childIsOpen = (): boolean =>
+    child.pid !== undefined && child.exitCode === null && child.signalCode === null;
+  const signalChild = (signal: NodeJS.Signals): void => {
+    if (!childIsOpen() || child.pid === undefined) return;
+    if (!usesProcessGroup) {
+      child.kill(signal);
+      return;
+    }
+    try {
+      process.kill(-child.pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+      child.kill(signal);
+    }
+  };
+  const forceTerminate = (): void => {
+    explicitlyInterrupted = true;
+    if (terminationTimer !== undefined) {
+      clearTimeout(terminationTimer);
+      terminationTimer = undefined;
+    }
+    signalChild("SIGKILL");
+  };
   const abort = (): void => {
     explicitlyInterrupted = true;
-    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-      if (usesProcessGroup) {
-        try {
-          process.kill(-child.pid, "SIGTERM");
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-        }
-      } else {
-        child.kill("SIGTERM");
-      }
+    signalChild("SIGTERM");
+    if (childIsOpen() && terminationTimer === undefined) {
+      terminationTimer = setTimeout(forceTerminate, terminationGraceMs);
     }
   };
   input.signal?.addEventListener("abort", abort, { once: true });
+  input.forceTerminationSignal?.addEventListener("abort", forceTerminate, { once: true });
   if (input.signal?.aborted) abort();
+  if (input.forceTerminationSignal?.aborted) forceTerminate();
 
   const close = new Promise<Readonly<{ code: number | null; signal: NodeJS.Signals | null }>>(
     (resolve) => child.once("close", (code, signal) => resolve({ code, signal }))
   );
+  const waitForCloseOrGrace = async (): Promise<void> => {
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        close.then(() => undefined),
+        new Promise<void>((resolve) => {
+          graceTimer = setTimeout(resolve, terminationGraceMs);
+        })
+      ]);
+    } finally {
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+    }
+  };
 
   let streams: Promise<void[]> | undefined;
   try {
@@ -162,21 +202,17 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
       explicitlyInterrupted
     });
   } catch (error) {
-    if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-      if (usesProcessGroup) {
-        try {
-          process.kill(-child.pid, "SIGTERM");
-        } catch (signalError) {
-          if ((signalError as NodeJS.ErrnoException).code !== "ESRCH") throw signalError;
-        }
-      } else {
-        child.kill("SIGTERM");
-      }
+    if (childIsOpen()) {
+      signalChild("SIGTERM");
+      await waitForCloseOrGrace();
+      if (childIsOpen()) signalChild("SIGKILL");
       await close.catch(() => undefined);
     }
     await streams?.catch(() => undefined);
     throw error;
   } finally {
+    if (terminationTimer !== undefined) clearTimeout(terminationTimer);
     input.signal?.removeEventListener("abort", abort);
+    input.forceTerminationSignal?.removeEventListener("abort", forceTerminate);
   }
 }

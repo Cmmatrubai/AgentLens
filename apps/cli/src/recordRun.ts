@@ -49,6 +49,8 @@ export interface RecordRunDependencies {
   readonly stdout?: OutputWriter;
   readonly env?: NodeJS.ProcessEnv;
   readonly signal?: AbortSignal;
+  readonly forceTerminationSignal?: AbortSignal;
+  readonly terminationGraceMs?: number;
   readonly now?: () => number;
   readonly nextId?: () => string;
   readonly processIdentityInspector?: ProcessIdentityInspector;
@@ -600,6 +602,12 @@ export async function recordRun(
       env,
       promptInput,
       ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+      ...(dependencies.forceTerminationSignal === undefined
+        ? {}
+        : { forceTerminationSignal: dependencies.forceTerminationSignal }),
+      ...(dependencies.terminationGraceMs === undefined
+        ? {}
+        : { terminationGraceMs: dependencies.terminationGraceMs }),
       now,
       onSpawn: async (pid, processGroupId) => {
         repository.markRunning(runId, {

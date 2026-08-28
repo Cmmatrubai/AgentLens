@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { appendFileSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 const args = process.argv.slice(2);
 const modeArg = args.find((argument) => argument.startsWith("--fake-mode="));
@@ -253,6 +253,19 @@ switch (mode) {
     }
     setInterval(() => {}, 1_000);
     break;
+  case "ignore-term": {
+    process.on("SIGTERM", () => {});
+    const grandchild = spawn(process.execPath, [
+      "-e",
+      "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"
+    ], { stdio: "ignore" });
+    if (process.env.AGENTLENS_FAKE_GRANDCHILD_FILE) {
+      writeFileSync(process.env.AGENTLENS_FAKE_GRANDCHILD_FILE, String(grandchild.pid));
+    }
+    started("term-resistant-command");
+    setInterval(() => {}, 1_000);
+    break;
+  }
   default:
     throw new Error(`Unknown fake mode ${mode}`);
 }

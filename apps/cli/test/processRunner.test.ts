@@ -1,4 +1,4 @@
-import { chmod, copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,103 @@ afterEach(async () => {
 });
 
 describe("process runner", () => {
+  async function termResistantFixture() {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-term-resistant-"));
+    roots.push(root);
+    const bin = join(root, "bin");
+    const grandchildFile = join(root, "grandchild.pid");
+    await mkdir(bin);
+    await copyFile(fakeCodex, join(bin, "codex"));
+    await chmod(join(bin, "codex"), 0o700);
+    return {
+      root,
+      grandchildFile,
+      env: {
+        ...process.env,
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
+        AGENTLENS_FAKE_GRANDCHILD_FILE: grandchildFile
+      }
+    };
+  }
+
+  it("escalates a resistant process group after the bounded grace period", async () => {
+    if (process.platform === "win32") return;
+    const context = await termResistantFixture();
+    const controller = new AbortController();
+    const forceController = new AbortController();
+    let childPid: number | undefined;
+    let interruptedAt = 0;
+    let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const result = await runChildProcess({
+      childArgs: ["codex", "exec", "--json", "--fake-mode=ignore-term"],
+      cwd: context.root,
+      env: context.env,
+      promptInput: { mode: "buffered", source: "stdin", bytes: Buffer.alloc(0) },
+      onSpawn: (pid) => {
+        childPid = pid;
+        safetyTimer = setTimeout(() => {
+          try { process.kill(-pid, "SIGKILL"); } catch { /* production may already have killed it */ }
+        }, 800);
+      },
+      onLine: (_stream, line) => {
+        if (interruptedAt === 0 && line.includes("term-resistant-command")) {
+          interruptedAt = Date.now();
+          controller.abort();
+        }
+      },
+      signal: controller.signal,
+      forceTerminationSignal: forceController.signal,
+      terminationGraceMs: 50
+    });
+    if (safetyTimer !== undefined) clearTimeout(safetyTimer);
+
+    expect(Date.now() - interruptedAt).toBeLessThan(400);
+    expect(result).toMatchObject({
+      pid: childPid,
+      exitCode: null,
+      terminatingSignal: "SIGKILL",
+      explicitlyInterrupted: true
+    });
+    const grandchildPid = Number(await readFile(context.grandchildFile, "utf8"));
+    expect(() => process.kill(grandchildPid, 0)).toThrow();
+  }, 5_000);
+
+  it("escalates immediately when a second interrupt arrives", async () => {
+    if (process.platform === "win32") return;
+    const context = await termResistantFixture();
+    const controller = new AbortController();
+    const forceController = new AbortController();
+    let interruptedAt = 0;
+    let safetyTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const result = await runChildProcess({
+      childArgs: ["codex", "exec", "--json", "--fake-mode=ignore-term"],
+      cwd: context.root,
+      env: context.env,
+      promptInput: { mode: "buffered", source: "stdin", bytes: Buffer.alloc(0) },
+      onSpawn: (pid) => {
+        safetyTimer = setTimeout(() => {
+          try { process.kill(-pid, "SIGKILL"); } catch { /* force escalation may already have killed it */ }
+        }, 800);
+      },
+      onLine: (_stream, line) => {
+        if (interruptedAt === 0 && line.includes("term-resistant-command")) {
+          interruptedAt = Date.now();
+          controller.abort();
+          setTimeout(() => forceController.abort(), 25);
+        }
+      },
+      signal: controller.signal,
+      forceTerminationSignal: forceController.signal,
+      terminationGraceMs: 2_000
+    });
+    if (safetyTimer !== undefined) clearTimeout(safetyTimer);
+
+    expect(Date.now() - interruptedAt).toBeLessThan(250);
+    expect(result.terminatingSignal).toBe("SIGKILL");
+  }, 5_000);
+
   it("starts Codex as a POSIX process-group leader and reports the group identity", async () => {
     if (process.platform === "win32") return;
     const root = await mkdtemp(join(tmpdir(), "agentlens-process-group-"));

@@ -505,6 +505,51 @@ describe("recordRun lifecycle", () => {
     expect(run.events.find(({ kind }) => kind === "command")?.status).toBe("in_progress");
   });
 
+  it("persists the actual SIGKILL fact after bounded escalation without inventing provider completion", async () => {
+    if (process.platform === "win32") return;
+    const context = await fixture();
+    const controller = new AbortController();
+    let printedRunId: string | undefined;
+    const recording = recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=ignore-term"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: {
+          ...context.env,
+          AGENTLENS_FAKE_GRANDCHILD_FILE: join(context.root, "grandchild.pid")
+        },
+        stdout: {
+          write: (chunk) => {
+            const match = /Run ID: ([^\n]+)/.exec(String(chunk));
+            if (match?.[1]) printedRunId = match[1];
+            return true;
+          }
+        },
+        signal: controller.signal,
+        terminationGraceMs: 50
+      }
+    );
+    await waitForOpenCommand(context.dataRoot, () => printedRunId);
+    controller.abort();
+    const result = await recording;
+    const run = detail(context.dataRoot, result.runId);
+
+    expect(result.status).toBe("interrupted");
+    expect(run.run).toMatchObject({ exitCode: null, terminatingSignal: "SIGKILL" });
+    expect(run.events.filter(({ kind }) => kind === "recorder.interruption")).toHaveLength(1);
+    expect(run.events.filter(({ kind }) => kind === "recorder.recovery")).toHaveLength(1);
+    expect(run.events.some(({ kind, provenance }) =>
+      kind === "turn.completed" && provenance === "observed"
+    )).toBe(false);
+    expect(run.events.find(({ kind }) => kind === "command")?.status).toBe("in_progress");
+  });
+
   it("reconciles a signal received after child terminal and final Git persistence as interrupted", async () => {
     const context = await fixture();
     const controller = new AbortController();
