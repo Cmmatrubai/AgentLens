@@ -177,10 +177,15 @@ export async function recoverStaleRuns(
       continue;
     }
 
-    const loss = input.repository.appendOwnershipLoss(ownership.runId, {
+    const lossResult = input.repository.appendOwnershipLossIfCurrent(ownership.runId, {
+      expectedRecorderInstanceId: ownership.recorderInstanceId,
       eventId: nextId(),
       receivedAt: iso(now)
     });
+    if (lossResult.kind === "already_terminal" || lossResult.kind === "ownership_changed") {
+      continue;
+    }
+    const loss = lossResult.event;
     const detail = input.repository.getRunDetail(ownership.runId);
     const child = await childState(detail, inspector);
     if (child === "alive") {

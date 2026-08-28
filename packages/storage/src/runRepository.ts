@@ -99,9 +99,16 @@ export interface ReconciliationInput {
 }
 
 export interface OwnershipLossInput {
+  expectedRecorderInstanceId: string;
   eventId: string;
   receivedAt: string;
 }
+
+export type OwnershipLossResult =
+  | { readonly kind: "recorded"; readonly event: TraceEventV1 }
+  | { readonly kind: "already_lost"; readonly event: TraceEventV1 }
+  | { readonly kind: "already_terminal" }
+  | { readonly kind: "ownership_changed" };
 
 export interface RecoveryContext {
   receivedAt: string;
@@ -932,19 +939,27 @@ export class RunRepository {
     }).immediate();
   }
 
-  appendOwnershipLoss(runId: string, input: OwnershipLossInput): TraceEventV1 {
+  appendOwnershipLossIfCurrent(runId: string, input: OwnershipLossInput): OwnershipLossResult {
+    if (input.expectedRecorderInstanceId.length === 0) {
+      throw new Error("Expected recorder instance ID must be non-empty.");
+    }
     return this.#connection.transaction(() => {
       const run = this.requireRunRow(runId);
-      if (run.status !== "starting" && run.status !== "running") {
-        const ownership = this.requireOwnership(runId);
-        if (ownership.ownershipLostEventId) {
-          return this.requireEventInRun(runId, ownership.ownershipLostEventId);
-        }
-        throw new Error(`Run ${runId} is terminal without ownership-loss evidence.`);
-      }
       const ownership = this.requireOwnership(runId);
+      if (run.status !== "starting" && run.status !== "running") {
+        return { kind: "already_terminal" } as const;
+      }
+      if (
+        ownership.recorderInstanceId !== input.expectedRecorderInstanceId ||
+        ownership.condition === "released"
+      ) {
+        return { kind: "ownership_changed" } as const;
+      }
       if (ownership.ownershipLostEventId) {
-        return this.requireEventInRun(runId, ownership.ownershipLostEventId);
+        return {
+          kind: "already_lost",
+          event: this.requireEventInRun(runId, ownership.ownershipLostEventId)
+        } as const;
       }
       const event = traceEventV1Schema.parse({
         id: input.eventId,
@@ -970,10 +985,16 @@ export class RunRepository {
       const updated = this.#connection.prepare(`
         UPDATE run_ownership
         SET ownership_lost_event_id = ?, updated_at = ?
-        WHERE run_id = ? AND ownership_lost_event_id IS NULL
-      `).run(input.eventId, epochMilliseconds(input.receivedAt), runId);
+        WHERE run_id = ? AND recorder_instance_id = ?
+          AND condition != 'released' AND ownership_lost_event_id IS NULL
+      `).run(
+        input.eventId,
+        epochMilliseconds(input.receivedAt),
+        runId,
+        input.expectedRecorderInstanceId
+      );
       if (updated.changes !== 1) throw new Error("Ownership-loss event lost its append race.");
-      return event;
+      return { kind: "recorded", event } as const;
     }).immediate();
   }
 

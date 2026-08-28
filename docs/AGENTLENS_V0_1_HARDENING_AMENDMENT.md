@@ -24,6 +24,8 @@ The active recorder refreshes its heartbeat once per second. Heartbeat age alone
 
 `runs` and `inspect` perform a bounded stale-run check before reading. They may append recovery facts and terminalize a run only when the recorder is confirmed dead and both the child identity and stored process group are confirmed gone. They never signal a child.
 
+The initial nonterminal ownership list is only a recovery-candidate snapshot. After the asynchronous recorder identity check, storage atomically rechecks that the run is still nonterminal, the expected recorder instance still owns it, and ownership is not released before appending `recorder.ownership_lost`. The operation returns explicit recorded, already-lost, already-terminal, or ownership-changed outcomes. Normal finalization, release, or ownership transfer that wins this race is a benign no-op and cannot add false crash evidence or make a concurrent read fail.
+
 When the recorder is dead but the child or process group remains alive, the run remains `running`, ownership becomes `orphan_child_active`, and one append-only `recorder.ownership_lost` fact exposes the condition. A later `runs` or `inspect` call may finish recovery after that child/group is independently gone. v0.1 does not add a child-termination command; the safe resolution is natural/external child termination followed by another read. This avoids turning a read command into process control.
 
 When recorder and child/group are confirmed gone, recovery is append-only and idempotent:

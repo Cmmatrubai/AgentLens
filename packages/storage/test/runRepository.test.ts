@@ -1227,15 +1227,20 @@ describe("run and Git evidence reads", () => {
       const started = repository.appendEvent(event("provider-open", 0, "in_progress"));
       const original = JSON.stringify(started);
 
-      const lost = repository.appendOwnershipLoss(runId, {
+      const firstLoss = repository.appendOwnershipLossIfCurrent(runId, {
+        expectedRecorderInstanceId: "recorder-instance-1",
         eventId: "ownership-lost",
         receivedAt: "2026-08-26T20:01:00.000Z"
       });
-      const repeated = repository.appendOwnershipLoss(runId, {
+      expect(firstLoss.kind).toBe("recorded");
+      if (firstLoss.kind !== "recorded") throw new Error("ownership loss was not recorded");
+      const lost = firstLoss.event;
+      const repeated = repository.appendOwnershipLossIfCurrent(runId, {
+        expectedRecorderInstanceId: "recorder-instance-1",
         eventId: "ownership-lost-duplicate",
         receivedAt: "2026-08-26T20:01:01.000Z"
       });
-      expect(repeated.id).toBe(lost.id);
+      expect(repeated).toMatchObject({ kind: "already_lost", event: { id: lost.id } });
       expect(repository.markOrphanChildActive(runId, {
         recorderInstanceId: "recorder-instance-1",
         updatedAt: 1_777_777_778_100
@@ -1294,6 +1299,80 @@ describe("run and Git evidence reads", () => {
       expect(detail.events.some(({ kind }) => kind === "recorder.process_exit")).toBe(false);
       expect(detail.events.some(({ kind }) => kind.startsWith("turn.") && kind.endsWith("completed")))
         .toBe(false);
+    } finally {
+      close();
+    }
+  });
+
+  it("treats changed or terminal ownership snapshots as explicit no-op outcomes", () => {
+    const { repository, close } = setup();
+    try {
+      repository.markRunning(runId, runningInput());
+      expect(repository.claimRecoveryOwnership(runId, {
+        expectedRecorderInstanceId: "recorder-instance-1",
+        recovery: validOwnership({
+          recorderInstanceId: "new-recorder-instance",
+          recorderPid: 202,
+          recorderStartToken: "start-token-202",
+          heartbeatAt: 1_777_777_778_000
+        })
+      })).toBe(true);
+
+      expect(repository.appendOwnershipLossIfCurrent(runId, {
+        expectedRecorderInstanceId: "recorder-instance-1",
+        eventId: "stale-ownership-loss",
+        receivedAt: "2026-08-26T20:01:00.000Z"
+      })).toEqual({ kind: "ownership_changed" });
+      expect(repository.getRunDetail(runId).events).toHaveLength(0);
+
+      const process = repository.appendEvent({
+        id: "process-exit-after-transfer",
+        runId,
+        sequence: 0,
+        receivedAt: "2026-08-26T20:01:01.000Z",
+        kind: "recorder.process_exit",
+        status: "completed",
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        relationships: [],
+        summary: "Child process terminal fact",
+        normalizedPayload: { exitCode: 0, terminatingSignal: null }
+      });
+      repository.recordProcessFact(runId, { eventId: process.id });
+      repository.reconcileRun(runId, {
+        eventId: "normal-terminal-reconciliation",
+        receivedAt: "2026-08-26T20:01:02.000Z",
+        endedAt: 1_777_777_778_200
+      });
+
+      expect(repository.appendOwnershipLossIfCurrent(runId, {
+        expectedRecorderInstanceId: "new-recorder-instance",
+        eventId: "terminal-ownership-loss",
+        receivedAt: "2026-08-26T20:01:03.000Z"
+      })).toEqual({ kind: "already_terminal" });
+      expect(repository.getRunDetail(runId).events.some(({ kind }) =>
+        kind === "recorder.ownership_lost"
+      )).toBe(false);
+    } finally {
+      close();
+    }
+  });
+
+  it("does not record ownership loss after the matching owner released a nonterminal run", () => {
+    const { repository, close } = setup();
+    try {
+      repository.markRunning(runId, runningInput());
+      expect(repository.releaseOwnership(runId, {
+        recorderInstanceId: "recorder-instance-1",
+        updatedAt: 1_777_777_778_000
+      })).toBe(true);
+
+      expect(repository.appendOwnershipLossIfCurrent(runId, {
+        expectedRecorderInstanceId: "recorder-instance-1",
+        eventId: "released-ownership-loss",
+        receivedAt: "2026-08-26T20:01:00.000Z"
+      })).toEqual({ kind: "ownership_changed" });
+      expect(repository.getRunDetail(runId).events).toHaveLength(0);
     } finally {
       close();
     }
