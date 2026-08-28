@@ -56,7 +56,7 @@ type RunStatus =
 
 Observed events are immutable and event history is append-only. `item.started` and `item.completed` are separate observed events even when they share a native item identifier. No recovery routine updates, replaces, or deletes the original `in_progress` event.
 
-If a provider start has no matching provider terminal event, AgentLens appends a `recorder.recovery` event with `provenance: "recorder"`, `status: "interrupted"`, and a `recovers` relationship to the original AgentLens event. The CLI label **Recorder recovery** is reserved for `recorder.recovery`; other recorder facts display as **Recorder**.
+If a provider start has no matching provider terminal event, AgentLens appends a `recorder.recovery` event with `provenance: "recorder"`, `status: "interrupted"`, and a `recovers` relationship to the original AgentLens event. A matching observed terminal has canonical status `completed`, `failed`, `declined`, or `interrupted`, or an exact provider-native `item`/`tool` event type with one of those terminal suffixes even when its normalized status is `unknown`. Nonterminal future events such as `item.progress` do not suppress recovery. The CLI label **Recorder recovery** is reserved for `recorder.recovery`; other recorder facts display as **Recorder**.
 
 Git evidence has `provenance: "git_recovered"`. Derived events name their algorithms and source AgentLens event IDs. Human assessments remain separate rows/events in later tasks.
 
@@ -232,13 +232,13 @@ One row per run containing initial/final HEAD, initial/final branch, initial/fin
 
 ## 9. Git evidence
 
-Preflight uses physically read-only Git commands to capture repository root, initial HEAD, initial branch (nullable for detached HEAD), and initial porcelain-v2 status. Every AgentLens-owned Git subprocess disables optional locks and the repository's configured filesystem monitor; tracked diff capture also disables external diff and text-conversion helpers. This prevents evidence collection from refreshing the Git index or executing those repository-configured helpers. Status uses Git's NUL-delimited form and remains byte-oriented in memory so filesystem containment and metadata checks use the exact path bytes. Any tracked, staged, or untracked entry refuses recording before child spawn. AgentLens never stashes, resets, checks out, commits, adds, cleans, or otherwise mutates Git state.
+Preflight uses physically read-only Git commands to capture repository root, initial HEAD, initial branch (nullable for detached HEAD), and initial porcelain-v2 status. Every AgentLens-owned Git subprocess disables optional locks and lazy object fetching, forces Git trace destinations off, and overrides the repository's configured filesystem monitor; tracked diff capture also disables external diff and text-conversion helpers. Before preflight status and again before postflight status/diff, AgentLens fails closed if effective Git configuration contains a `filter.*.clean` or `filter.*.process` command. This prevents evidence collection from refreshing the Git index, fetching and writing promised objects, writing trace files, or executing the proven repository-configured helpers. Status uses Git's NUL-delimited form and remains byte-oriented in memory so filesystem containment and metadata checks use the exact path bytes. Any tracked, staged, or untracked entry refuses recording before child spawn. AgentLens never stashes, resets, checks out, commits, adds, cleans, or otherwise mutates Git state.
 
 Postflight captures:
 
 - final HEAD and branch;
 - final porcelain-v2 status;
-- **tracked final diff relative to the initial HEAD and current working tree/index**, including changes committed by Codex (`GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false diff --binary --no-ext-diff --no-textconv <initial-head> --`);
+- **tracked final diff relative to the initial HEAD and current working tree/index**, including changes committed by Codex (`GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 git -c core.fsmonitor=false diff --binary --no-ext-diff --no-textconv <initial-head> --`, with trace destinations forced off by the recorder environment);
 - `git diff --check <initial-head> --` result;
 - untracked-file metadata (relative path under policy, type, size, and no contents).
 
@@ -247,6 +247,8 @@ If HEAD or branch changes, CLI inspection exposes the initial and final values a
 Durable Git path display is valid UTF-8 only. A path that cannot be represented in the string schema is stored as the content-free `[[UNREPRESENTABLE_GIT_PATH]]` placeholder; its undecodable bytes and any path-bearing tracked-diff block are not persisted. Exact raw path bytes remain memory-only for containment plus `lstat` type/size capture.
 
 Terminology is exact: v0.1 captures **tracked final diff + untracked-file metadata**. It does not capture untracked contents and does not claim an “exact final diff” or forensic attribution. All Git evidence is final repository evidence only.
+
+Git capability limits are explicit: v0.1 refuses repositories whenever an effective clean/process filter is configured, even if that filter would not apply to the paths changed in the run. A partial clone whose required evidence objects are not already local fails closed rather than fetching them. These failures remain queryable as recorder facts; AgentLens does not weaken the read-only boundary to complete capture.
 
 ## 10. CLI and prompt/stdin contract
 
