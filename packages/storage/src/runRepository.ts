@@ -528,6 +528,11 @@ function isRecoverableProviderLifecycle(event: TraceEventV1): boolean {
   return hasStableNativeIdentity && (eventType === "item.started" || eventType === "tool.started");
 }
 
+function isObservedTerminalEvent(event: TraceEventV1): boolean {
+  return event.provenance === "observed" &&
+    (event.status === "completed" || event.status === "failed" || event.status === "interrupted");
+}
+
 function recoverySourceMatches(target: TraceEventV1, recovery: TraceEventV1): boolean {
   if (target.source.provider !== recovery.source.provider) return false;
   const keys: readonly (keyof NativeSourceV1)[] = [
@@ -925,8 +930,7 @@ export class RunRepository {
         !recoveredIds.has(candidate.id) &&
         !events.some((terminal) =>
           terminal.id !== candidate.id &&
-          terminal.provenance === "observed" &&
-          terminal.status !== "in_progress" &&
+          isObservedTerminalEvent(terminal) &&
           sameNativeIdentity(candidate, terminal)
         )
       );
@@ -1036,8 +1040,7 @@ export class RunRepository {
     if (alreadyRecovered) throw new Error(`Event ${targetId} already has a recorder recovery.`);
     const hasTerminal = this.readEvents(event.runId).some((candidate) =>
       candidate.id !== target.id &&
-      candidate.provenance === "observed" &&
-      candidate.status !== "in_progress" &&
+      isObservedTerminalEvent(candidate) &&
       sameNativeIdentity(target, candidate)
     );
     if (hasTerminal) throw new Error(`Event ${targetId} already has an observed terminal event.`);

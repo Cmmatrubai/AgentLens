@@ -193,6 +193,41 @@ describe("append-only events and recovery", () => {
     }
   });
 
+  it("keeps a same-item unknown progress observation open for recovery", () => {
+    const { repository, close } = setup();
+    try {
+      const started = repository.appendEvent(event("event-start", 0, "in_progress"));
+      const progress = repository.appendEvent(event("event-progress", 1, "unknown", {
+        source: {
+          provider: "codex-exec",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "item-1",
+          eventType: "item.progress",
+          itemType: "command_execution"
+        }
+      }));
+
+      const recovered = repository.appendRecoveryForOpenEvents(runId, {
+        receivedAt: "2026-08-26T20:01:00.000Z",
+        eventIdFor: (openEvent) => `recovery-${openEvent.id}`
+      });
+
+      expect(recovered).toHaveLength(1);
+      expect(recovered[0]).toMatchObject({
+        id: "recovery-event-start",
+        relationships: [{ type: "recovers", eventId: started.id }]
+      });
+      expect(repository.getRunDetail(runId).events).toEqual([
+        started,
+        progress,
+        recovered[0]
+      ]);
+    } finally {
+      close();
+    }
+  });
+
   it("recovers an open provider tool lifecycle with a stable tool identity", () => {
     const { repository, close } = setup();
     try {
