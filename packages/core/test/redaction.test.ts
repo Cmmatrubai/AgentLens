@@ -267,6 +267,40 @@ describe("JSON redaction", () => {
     expect(result.audits).toEqual([{ reason: "sensitive-path.env", count: 1 }]);
   });
 
+  it.each([
+    {
+      path: "private/credentialsbackup",
+      adjacentContent: "CREDENTIALS_PREFIX_ADJACENT_SECRET",
+      reason: "sensitive-path.credentials"
+    },
+    {
+      path: "private/secretsbackup",
+      adjacentContent: "SECRETS_PREFIX_ADJACENT_SECRET",
+      reason: "sensitive-path.secrets"
+    }
+  ])(
+    "excludes a structured $path prefix and its adjacent content",
+    ({ path, adjacentContent, reason }) => {
+      const result = redactJson(
+        { path, content: adjacentContent },
+        {
+          policy: "standard",
+          key: Buffer.alloc(32, 0x41),
+          contentClass: "native",
+          runId: "run-sensitive-prefix-path"
+        }
+      );
+
+      expect(result.storage).toBe("content");
+      if (result.storage !== "content") throw new Error("expected redacted JSON content");
+      expect(result.redacted).toBe(`[[EXCLUDED:${reason}]]`);
+      const serialized = result.redactedBytes.copy().toString("utf8");
+      expect(serialized).not.toContain(path);
+      expect(serialized).not.toContain(adjacentContent);
+      expect(result.audits).toEqual([{ reason, count: 1 }]);
+    }
+  );
+
   it("excludes only the sensitive change object in nested file-change arrays", () => {
     const result = redactJson(
       {

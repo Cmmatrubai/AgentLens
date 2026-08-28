@@ -36,11 +36,11 @@ const pathRules: readonly { reason: string; matches: (path: string, segments: st
   },
   {
     reason: "sensitive-path.credentials",
-    matches: (_path, segments) => segments.some((segment) => /^credentials(?:[._-].*)?$/i.test(segment))
+    matches: (_path, segments) => segments.some((segment) => /^credentials.*$/i.test(segment))
   },
   {
     reason: "sensitive-path.secrets",
-    matches: (_path, segments) => segments.some((segment) => /^secrets?(?:[._-].*)?$/i.test(segment))
+    matches: (_path, segments) => segments.some((segment) => /^(?:secret$|secrets.*$)/i.test(segment))
   }
 ];
 

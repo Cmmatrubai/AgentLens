@@ -13,7 +13,10 @@ describe("sensitive path policy", () => {
     ["config/.env.production", "sensitive-path.env"],
     ["certs/client.pem", "sensitive-path.key"],
     ["home/.ssh/id_ed25519", "sensitive-path.ssh"],
-    [".aws/credentials", "sensitive-path.aws"]
+    [".aws/credentials", "sensitive-path.aws"],
+    ["private/credentialsbackup", "sensitive-path.credentials"],
+    ["private/secretsbackup", "sensitive-path.secrets"],
+    ["private/secret", "sensitive-path.secrets"]
   ])("excludes %s", (path, reason) => {
     expect(shouldExcludePath(path, "standard")).toEqual({ exclude: true, reason });
   });
