@@ -32,6 +32,10 @@ import {
   type GitBeforeEvidence
 } from "./gitEvidence.js";
 import { persistEventDraft } from "./persistEvent.js";
+import {
+  systemProcessIdentityInspector,
+  type ProcessIdentityInspector
+} from "./processIdentity.js";
 import { ChildSpawnError, runChildProcess, type ChildProcessResult } from "./processRunner.js";
 import { resolvePromptInput } from "./promptInput.js";
 
@@ -47,6 +51,9 @@ export interface RecordRunDependencies {
   readonly signal?: AbortSignal;
   readonly now?: () => number;
   readonly nextId?: () => string;
+  readonly processIdentityInspector?: ProcessIdentityInspector;
+  readonly recorderPid?: number;
+  readonly heartbeatIntervalMs?: number;
   readonly onRunIdPrinted?: (runId: string) => void | Promise<void>;
   readonly onFinalGitPersisted?: () => void | Promise<void>;
   readonly onRecoveryAppended?: () => void | Promise<void>;
@@ -61,12 +68,12 @@ export interface RecordResult {
   readonly databasePath: string;
 }
 
-interface RecordingState {
+export interface RecordingState {
   sequence: number;
   providerTerminalEventId?: string;
 }
 
-interface GitPersistenceContext {
+export interface GitPersistenceContext {
   readonly runId: string;
   readonly capturePolicy: CapturePolicy;
   readonly key: Buffer;
@@ -97,7 +104,7 @@ function result(run: RunRecord, databasePath: string): RecordResult {
   });
 }
 
-function repositoryFingerprint(repositoryRoot: string, key: Buffer): string {
+export function repositoryFingerprint(repositoryRoot: string, key: Buffer): string {
   return redactText(repositoryRoot, { policy: "strict", key, contentClass: "path" }).text;
 }
 
@@ -269,7 +276,7 @@ async function optionalTextEvidence(
   return requiredTextEvidence(context, kind, raw, contentClass, mediaType);
 }
 
-function redactedBranch(value: string | null, policy: CapturePolicy, key: Buffer): string | null {
+export function redactedBranch(value: string | null, policy: CapturePolicy, key: Buffer): string | null {
   if (value === null) return null;
   return redactText(value, { policy, key, contentClass: "path" }).text;
 }
@@ -309,7 +316,7 @@ async function persistInitialGit(
   return initialStatus;
 }
 
-async function persistFinalGit(
+export async function persistFinalGit(
   before: GitBeforeEvidence,
   after: GitAfterEvidence,
   initialStatus: RequiredGitEvidenceRef,
@@ -318,7 +325,8 @@ async function persistFinalGit(
   state: RecordingState,
   nextId: () => string,
   receivedAt: string,
-  capturedAt: number
+  capturedAt: number,
+  recovered?: Readonly<{ storedInitialBranch: string | null; branchChanged: boolean }>
 ): Promise<void> {
   const finalStatusText = context.capturePolicy === "standard"
     ? filterSensitiveStatus(after.finalStatus)
@@ -360,7 +368,9 @@ async function persistFinalGit(
   const input: GitEvidenceInput = {
     initialHead: before.initialHead,
     finalHead: after.finalHead,
-    initialBranch: redactedBranch(before.initialBranch, context.capturePolicy, context.key),
+    initialBranch: recovered === undefined
+      ? redactedBranch(before.initialBranch, context.capturePolicy, context.key)
+      : recovered.storedInitialBranch,
     finalBranch: redactedBranch(after.finalBranch, context.capturePolicy, context.key),
     initialStatus,
     finalStatus,
@@ -369,7 +379,7 @@ async function persistFinalGit(
     diffCheckPassed: after.diffCheck.passed,
     untrackedMetadata,
     headChanged: after.headChanged,
-    branchChanged: after.branchChanged,
+    branchChanged: recovered?.branchChanged ?? after.branchChanged,
     capturedAt
   };
   repository.saveGitEvidence(context.runId, input);
@@ -384,7 +394,7 @@ async function persistFinalGit(
     summary: "Final Git evidence",
     normalizedPayload: {
       headChanged: after.headChanged,
-      branchChanged: after.branchChanged,
+      branchChanged: recovered?.branchChanged ?? after.branchChanged,
       finalStatus,
       trackedFinalDiff,
       diffCheck,
@@ -459,6 +469,14 @@ export async function recordRun(
   const env = dependencies.env ?? process.env;
   const now = dependencies.now ?? Date.now;
   const nextId = dependencies.nextId ?? randomUUID;
+  const processIdentityInspector =
+    dependencies.processIdentityInspector ?? systemProcessIdentityInspector;
+  const recorderPid = dependencies.recorderPid ?? process.pid;
+  const recorderStartToken = await processIdentityInspector.captureStartToken(recorderPid);
+  if (recorderStartToken === null) {
+    throw new Error("AgentLens could not establish the recorder process start identity.");
+  }
+  const recorderInstanceId = randomUUID();
 
   const before = await captureGitBefore(cwd);
   const promptInput = await resolvePromptInput(command.childArgs, stdin);
@@ -486,6 +504,8 @@ export async function recordRun(
   let markedRunning = false;
   let recorderFailureEventId: string | undefined;
   let interruptionEventId: string | undefined;
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let heartbeatFailure: Error | undefined;
   try {
     const redactedLabel = redactedOptionalText(command.label, command.capture, key, "label");
     repository.createRun({
@@ -507,7 +527,23 @@ export async function recordRun(
         "path"
       ) ?? "repository",
       startedAt: now()
+    }, {
+      recorderInstanceId,
+      recorderPid,
+      recorderStartToken,
+      heartbeatAt: now()
     });
+    heartbeatTimer = setInterval(() => {
+      try {
+        const heartbeatAt = now();
+        const refreshed = repository.refreshOwnership(runId, { recorderInstanceId, heartbeatAt });
+        if (!refreshed) {
+          heartbeatFailure = new Error("Recorder ownership heartbeat was rejected.");
+        }
+      } catch (error) {
+        heartbeatFailure = error instanceof Error ? error : new Error(String(error));
+      }
+    }, dependencies.heartbeatIntervalMs ?? 1_000);
     stdout.write(`Run ID: ${runId}\n`);
     stdout.write(
       "Warning: secret detection reduces risk but cannot guarantee captured content is free of sensitive material; review before any future export.\n"
@@ -565,9 +601,25 @@ export async function recordRun(
       promptInput,
       ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
       now,
-      onSpawn: (pid) => {
-        repository.markRunning(runId, { childPid: pid });
+      onSpawn: async (pid, processGroupId) => {
+        repository.markRunning(runId, {
+          recorderInstanceId,
+          childPid: pid,
+          childStartToken: null,
+          childProcessGroupId: processGroupId,
+          updatedAt: now()
+        });
         markedRunning = true;
+        const childStartToken = await processIdentityInspector.captureStartToken(pid);
+        if (childStartToken === null) {
+          throw new Error("AgentLens could not establish the child process start identity.");
+        }
+        if (!repository.setChildStartToken(runId, {
+          recorderInstanceId,
+          childPid: pid,
+          childStartToken,
+          updatedAt: now()
+        })) throw new Error("Child process identity could not be attached to recorder ownership.");
       },
       onLine: (stream, line, receivedAt) => {
         const receivedAtIso = new Date(receivedAt).toISOString();
@@ -598,6 +650,7 @@ export async function recordRun(
       }
     });
     await lineQueue;
+    if (heartbeatFailure) throw heartbeatFailure;
 
     if (childResult.explicitlyInterrupted) {
       const interruption = appendInterruption(repository, state, runId, iso(now), nextId);
@@ -711,6 +764,7 @@ export async function recordRun(
       );
     }
   } finally {
+    if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
     database.close();
     await ownerOnlyDatabaseFiles(databasePath);
   }

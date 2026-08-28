@@ -14,6 +14,35 @@ afterEach(async () => {
 });
 
 describe("process runner", () => {
+  it("starts Codex as a POSIX process-group leader and reports the group identity", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "agentlens-process-group-"));
+    roots.push(root);
+    const bin = join(root, "bin");
+    await mkdir(bin);
+    await copyFile(fakeCodex, join(bin, "codex"));
+    await chmod(join(bin, "codex"), 0o700);
+    const controller = new AbortController();
+    let reportedPid: number | undefined;
+    let reportedGroup: number | undefined;
+
+    await runChildProcess({
+      childArgs: ["codex", "exec", "--json", "--fake-mode=hang"],
+      cwd: root,
+      env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` },
+      promptInput: { mode: "buffered", source: "stdin", bytes: Buffer.alloc(0) },
+      onSpawn: (pid, processGroupId) => {
+        reportedPid = pid;
+        reportedGroup = processGroupId;
+      },
+      onLine: () => controller.abort(),
+      signal: controller.signal
+    });
+
+    expect(reportedPid).toEqual(expect.any(Number));
+    expect(reportedGroup).toBe(reportedPid);
+  });
+
   it("timestamps every source line at receipt before queued persistence", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentlens-process-runner-"));
     roots.push(root);

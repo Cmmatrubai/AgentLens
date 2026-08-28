@@ -52,8 +52,36 @@ export interface CreateRunInput {
   startedAt: number;
 }
 
+export type RecorderOwnershipCondition =
+  | "active"
+  | "orphan_child_active"
+  | "identity_ambiguous"
+  | "reconciling"
+  | "released";
+
+export interface CreateRecorderOwnershipInput {
+  recorderInstanceId: string;
+  recorderPid: number;
+  recorderStartToken: string;
+  heartbeatAt: number;
+}
+
+export interface RecorderOwnership extends CreateRecorderOwnershipInput {
+  runId: string;
+  childPid: number | null;
+  childStartToken: string | null;
+  childProcessGroupId: number | null;
+  condition: RecorderOwnershipCondition;
+  ownershipLostEventId: string | null;
+  updatedAt: number;
+}
+
 export interface MarkRunningInput {
+  recorderInstanceId: string;
   childPid: number;
+  childStartToken: string | null;
+  childProcessGroupId: number | null;
+  updatedAt: number;
 }
 
 export interface ProcessFactInput {
@@ -66,7 +94,13 @@ export interface ReconciliationInput {
   endedAt: number;
   providerTerminalEventId?: string;
   recorderFailureEventId?: string;
+  recorderCrashEventId?: string;
   interruptionEventId?: string;
+}
+
+export interface OwnershipLossInput {
+  eventId: string;
+  receivedAt: string;
 }
 
 export interface RecoveryContext {
@@ -104,6 +138,7 @@ export interface RunRecord extends CreateRunInput {
 export interface RunListRecord extends RunRecord {
   headChanged: boolean | null;
   branchChanged: boolean | null;
+  ownershipCondition: RecorderOwnershipCondition | null;
 }
 
 export interface StoredArtifact extends CompletedArtifact {
@@ -138,6 +173,7 @@ export interface RunRepositoryOptions {
 
 export interface RunDetail {
   run: RunRecord;
+  ownership: RecorderOwnership | null;
   events: TraceEventV1[];
   artifacts: StoredArtifact[];
   redactionAudits: StoredRedactionAudit[];
@@ -201,6 +237,21 @@ interface EventRow {
 interface RunListRow extends RunRow {
   git_head_changed: number | null;
   git_branch_changed: number | null;
+  ownership_condition: RecorderOwnershipCondition | null;
+}
+
+interface OwnershipRow {
+  run_id: string;
+  recorder_instance_id: string;
+  recorder_pid: number;
+  recorder_start_token: string;
+  child_pid: number | null;
+  child_start_token: string | null;
+  child_process_group_id: number | null;
+  heartbeat_at: number;
+  condition: RecorderOwnershipCondition;
+  ownership_lost_event_id: string | null;
+  updated_at: number;
 }
 
 interface RelationshipRow {
@@ -314,6 +365,37 @@ function runFromRow(row: RunRow): RunRecord {
   optionalProperty(result, "label", row.label);
   optionalProperty(result, "promptSource", row.prompt_source);
   return result;
+}
+
+function ownershipFromRow(row: OwnershipRow): RecorderOwnership {
+  return {
+    runId: row.run_id,
+    recorderInstanceId: row.recorder_instance_id,
+    recorderPid: row.recorder_pid,
+    recorderStartToken: row.recorder_start_token,
+    childPid: row.child_pid,
+    childStartToken: row.child_start_token,
+    childProcessGroupId: row.child_process_group_id,
+    heartbeatAt: row.heartbeat_at,
+    condition: row.condition,
+    ownershipLostEventId: row.ownership_lost_event_id,
+    updatedAt: row.updated_at
+  };
+}
+
+function validateOwnershipIdentity(input: CreateRecorderOwnershipInput): void {
+  if (input.recorderInstanceId.length === 0) {
+    throw new Error("Recorder instance ID must not be empty.");
+  }
+  if (!Number.isInteger(input.recorderPid) || input.recorderPid <= 0) {
+    throw new Error("Recorder PID must be a positive integer.");
+  }
+  if (input.recorderStartToken.length === 0) {
+    throw new Error("Recorder start token must not be empty.");
+  }
+  if (!Number.isInteger(input.heartbeatAt)) {
+    throw new Error("Recorder heartbeat must be epoch milliseconds.");
+  }
 }
 
 function sourceFromRow(row: EventRow): NativeSourceV1 {
@@ -441,6 +523,7 @@ function reconcileFacts(
   exitCode: number | null,
   signal: string | null,
   recorderFailure: boolean,
+  recorderCrash: boolean,
   explicitInterruption: boolean
 ): ReconciliationDecision {
   const contradictionCodes: string[] = [];
@@ -448,6 +531,9 @@ function reconcileFacts(
 
   if (provider === "completed" && recorderFailure) {
     contradictionCodes.push("provider_completed_but_recorder_failed");
+  }
+  if (provider === "completed" && recorderCrash) {
+    contradictionCodes.push("provider_completed_but_recorder_crashed");
   }
   if (provider === "completed" && interrupted) {
     contradictionCodes.push("provider_completed_but_interrupted");
@@ -464,6 +550,9 @@ function reconcileFacts(
 
   if (recorderFailure) {
     return { status: "recorder_error", terminalReason: "recorder_failure", contradictionCodes };
+  }
+  if (recorderCrash) {
+    return { status: "interrupted", terminalReason: "recorder_crash", contradictionCodes };
   }
   if (interrupted) {
     return {
@@ -627,6 +716,19 @@ function validateRecorderFailure(event: TraceEventV1, run: RunRow): void {
   ) throw new Error("Recorder failure semantics are invalid.");
 }
 
+function validateRecorderCrash(event: TraceEventV1, run: RunRow): void {
+  const payload = payloadRecord(event, "Recorder ownership loss");
+  if (
+    event.runId !== run.id ||
+    event.kind !== "recorder.ownership_lost" ||
+    event.provenance !== "recorder" ||
+    event.status !== "interrupted" ||
+    event.source.provider !== run.provider ||
+    event.source.correlationId !== run.id ||
+    payload.recorderCrash !== true
+  ) throw new Error("Recorder crash supporting event semantics are invalid.");
+}
+
 function validateInterruption(event: TraceEventV1, run: RunRow): void {
   const payload = payloadRecord(event, "Explicit interruption");
   if (
@@ -652,30 +754,227 @@ export class RunRepository {
     this.#artifactRoot = resolve(options.artifactRoot);
   }
 
-  createRun(input: CreateRunInput): RunRecord {
-    this.#connection.prepare(`
-      INSERT INTO runs (
-        id, schema_version, provider, integration_version, agent_version, status,
-        capture_policy, capture_policy_version, redaction_version, label, prompt_source,
-        repository_fingerprint, repository_display, started_at
-      ) VALUES (
-        @id, @schemaVersion, @provider, @integrationVersion, @agentVersion, 'starting',
-        @capturePolicy, @capturePolicyVersion, @redactionVersion, @label, @promptSource,
-        @repositoryFingerprint, @repositoryDisplay, @startedAt
-      )
-    `).run({ ...input, label: input.label ?? null, promptSource: input.promptSource ?? null });
-    return this.requireRun(input.id);
+  createRun(input: CreateRunInput, ownership: CreateRecorderOwnershipInput): RunRecord {
+    validateOwnershipIdentity(ownership);
+    return this.#connection.transaction(() => {
+      this.#connection.prepare(`
+        INSERT INTO runs (
+          id, schema_version, provider, integration_version, agent_version, status,
+          capture_policy, capture_policy_version, redaction_version, label, prompt_source,
+          repository_fingerprint, repository_display, started_at
+        ) VALUES (
+          @id, @schemaVersion, @provider, @integrationVersion, @agentVersion, 'starting',
+          @capturePolicy, @capturePolicyVersion, @redactionVersion, @label, @promptSource,
+          @repositoryFingerprint, @repositoryDisplay, @startedAt
+        )
+      `).run({ ...input, label: input.label ?? null, promptSource: input.promptSource ?? null });
+      this.#connection.prepare(`
+        INSERT INTO run_ownership (
+          run_id, recorder_instance_id, recorder_pid, recorder_start_token,
+          heartbeat_at, condition, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'active', ?)
+      `).run(
+        input.id,
+        ownership.recorderInstanceId,
+        ownership.recorderPid,
+        ownership.recorderStartToken,
+        ownership.heartbeatAt,
+        ownership.heartbeatAt
+      );
+      return this.requireRun(input.id);
+    }).immediate();
   }
 
   markRunning(runId: string, input: MarkRunningInput): RunRecord {
     if (!Number.isInteger(input.childPid) || input.childPid <= 0) {
       throw new Error("childPid must be a positive integer.");
     }
-    const result = this.#connection
-      .prepare("UPDATE runs SET status = 'running', child_pid = ? WHERE id = ? AND status = 'starting'")
-      .run(input.childPid, runId);
-    if (result.changes !== 1) throw new Error(`Run ${runId} is not in starting status.`);
-    return this.requireRun(runId);
+    if (
+      input.childProcessGroupId !== null &&
+      (!Number.isInteger(input.childProcessGroupId) || input.childProcessGroupId <= 0)
+    ) {
+      throw new Error("childProcessGroupId must be a positive integer or null.");
+    }
+    if (input.childStartToken !== null && input.childStartToken.length === 0) {
+      throw new Error("childStartToken must be non-empty or null.");
+    }
+    if (!Number.isInteger(input.updatedAt)) throw new Error("Ownership update time must be epoch milliseconds.");
+    return this.#connection.transaction(() => {
+      if (this.requireRunRow(runId).status !== "starting") {
+        throw new Error(`Run ${runId} is not in starting status.`);
+      }
+      const ownership = this.#connection.prepare(`
+        UPDATE run_ownership
+        SET child_pid = ?, child_start_token = ?, child_process_group_id = ?, updated_at = ?
+        WHERE run_id = ? AND recorder_instance_id = ? AND condition = 'active'
+      `).run(
+        input.childPid,
+        input.childStartToken,
+        input.childProcessGroupId,
+        input.updatedAt,
+        runId,
+        input.recorderInstanceId
+      );
+      if (ownership.changes !== 1) throw new Error(`Run ${runId} recorder ownership changed before spawn.`);
+      const result = this.#connection
+        .prepare("UPDATE runs SET status = 'running', child_pid = ? WHERE id = ? AND status = 'starting'")
+        .run(input.childPid, runId);
+      if (result.changes !== 1) throw new Error(`Run ${runId} is not in starting status.`);
+      return this.requireRun(runId);
+    }).immediate();
+  }
+
+  refreshOwnership(
+    runId: string,
+    input: { recorderInstanceId: string; heartbeatAt: number }
+  ): boolean {
+    if (!Number.isInteger(input.heartbeatAt)) throw new Error("Recorder heartbeat must be epoch milliseconds.");
+    const result = this.#connection.prepare(`
+      UPDATE run_ownership
+      SET heartbeat_at = ?, updated_at = ?
+      WHERE run_id = ? AND recorder_instance_id = ? AND condition IN ('active', 'reconciling')
+    `).run(input.heartbeatAt, input.heartbeatAt, runId, input.recorderInstanceId);
+    return result.changes === 1;
+  }
+
+  setChildStartToken(
+    runId: string,
+    input: {
+      recorderInstanceId: string;
+      childPid: number;
+      childStartToken: string;
+      updatedAt: number;
+    }
+  ): boolean {
+    if (input.childStartToken.length === 0) throw new Error("Child start token must not be empty.");
+    if (!Number.isInteger(input.updatedAt)) throw new Error("Ownership update time must be epoch milliseconds.");
+    const result = this.#connection.prepare(`
+      UPDATE run_ownership
+      SET child_start_token = ?, updated_at = ?
+      WHERE run_id = ? AND recorder_instance_id = ? AND child_pid = ? AND condition = 'active'
+    `).run(
+      input.childStartToken,
+      input.updatedAt,
+      runId,
+      input.recorderInstanceId,
+      input.childPid
+    );
+    return result.changes === 1;
+  }
+
+  releaseOwnership(
+    runId: string,
+    input: { recorderInstanceId: string; updatedAt: number }
+  ): boolean {
+    if (!Number.isInteger(input.updatedAt)) throw new Error("Ownership update time must be epoch milliseconds.");
+    const result = this.#connection.prepare(`
+      UPDATE run_ownership
+      SET condition = 'released', updated_at = ?
+      WHERE run_id = ? AND recorder_instance_id = ? AND condition != 'released'
+    `).run(input.updatedAt, runId, input.recorderInstanceId);
+    return result.changes === 1;
+  }
+
+  markOrphanChildActive(
+    runId: string,
+    input: { recorderInstanceId: string; updatedAt: number }
+  ): boolean {
+    if (!Number.isInteger(input.updatedAt)) throw new Error("Ownership update time must be epoch milliseconds.");
+    const result = this.#connection.prepare(`
+      UPDATE run_ownership
+      SET condition = 'orphan_child_active', updated_at = ?
+      WHERE run_id = ? AND recorder_instance_id = ?
+        AND condition IN ('active', 'orphan_child_active', 'identity_ambiguous')
+    `).run(input.updatedAt, runId, input.recorderInstanceId);
+    return result.changes === 1;
+  }
+
+  markOwnershipIdentityAmbiguous(
+    runId: string,
+    input: { recorderInstanceId: string; updatedAt: number }
+  ): boolean {
+    if (!Number.isInteger(input.updatedAt)) throw new Error("Ownership update time must be epoch milliseconds.");
+    const result = this.#connection.prepare(`
+      UPDATE run_ownership
+      SET condition = 'identity_ambiguous', updated_at = ?
+      WHERE run_id = ? AND recorder_instance_id = ?
+        AND condition IN ('active', 'orphan_child_active', 'identity_ambiguous')
+    `).run(input.updatedAt, runId, input.recorderInstanceId);
+    return result.changes === 1;
+  }
+
+  claimRecoveryOwnership(
+    runId: string,
+    input: {
+      expectedRecorderInstanceId: string;
+      recovery: CreateRecorderOwnershipInput;
+    }
+  ): boolean {
+    validateOwnershipIdentity(input.recovery);
+    return this.#connection.transaction(() => {
+      const run = this.requireRunRow(runId);
+      if (run.status !== "starting" && run.status !== "running") return false;
+      const result = this.#connection.prepare(`
+        UPDATE run_ownership
+        SET recorder_instance_id = ?, recorder_pid = ?, recorder_start_token = ?,
+            heartbeat_at = ?, condition = 'reconciling', updated_at = ?
+        WHERE run_id = ? AND recorder_instance_id = ? AND condition != 'released'
+      `).run(
+        input.recovery.recorderInstanceId,
+        input.recovery.recorderPid,
+        input.recovery.recorderStartToken,
+        input.recovery.heartbeatAt,
+        input.recovery.heartbeatAt,
+        runId,
+        input.expectedRecorderInstanceId
+      );
+      return result.changes === 1;
+    }).immediate();
+  }
+
+  appendOwnershipLoss(runId: string, input: OwnershipLossInput): TraceEventV1 {
+    return this.#connection.transaction(() => {
+      const run = this.requireRunRow(runId);
+      if (run.status !== "starting" && run.status !== "running") {
+        const ownership = this.requireOwnership(runId);
+        if (ownership.ownershipLostEventId) {
+          return this.requireEventInRun(runId, ownership.ownershipLostEventId);
+        }
+        throw new Error(`Run ${runId} is terminal without ownership-loss evidence.`);
+      }
+      const ownership = this.requireOwnership(runId);
+      if (ownership.ownershipLostEventId) {
+        return this.requireEventInRun(runId, ownership.ownershipLostEventId);
+      }
+      const event = traceEventV1Schema.parse({
+        id: input.eventId,
+        runId,
+        sequence: this.nextSequence(runId),
+        receivedAt: input.receivedAt,
+        kind: "recorder.ownership_lost",
+        status: "interrupted",
+        provenance: "recorder",
+        source: { provider: run.provider, correlationId: runId },
+        relationships: [],
+        summary: "Recorder ownership lost",
+        normalizedPayload: {
+          recorderCrash: true,
+          reason: "recorder_crash",
+          recorderInstanceId: ownership.recorderInstanceId,
+          recorderPid: ownership.recorderPid,
+          childPid: ownership.childPid,
+          childProcessGroupId: ownership.childProcessGroupId
+        }
+      });
+      this.insertEvent(event, []);
+      const updated = this.#connection.prepare(`
+        UPDATE run_ownership
+        SET ownership_lost_event_id = ?, updated_at = ?
+        WHERE run_id = ? AND ownership_lost_event_id IS NULL
+      `).run(input.eventId, epochMilliseconds(input.receivedAt), runId);
+      if (updated.changes !== 1) throw new Error("Ownership-loss event lost its append race.");
+      return event;
+    }).immediate();
   }
 
   appendEvent(input: TraceEventV1, audits: readonly RedactionAudit[] = []): TraceEventV1 {
@@ -849,12 +1148,16 @@ export class RunRepository {
       if (input.recorderFailureEventId) {
         validateRecorderFailure(this.requireEventInRun(runId, input.recorderFailureEventId), run);
       }
+      if (input.recorderCrashEventId) {
+        validateRecorderCrash(this.requireEventInRun(runId, input.recorderCrashEventId), run);
+      }
       if (input.interruptionEventId) {
         validateInterruption(this.requireEventInRun(runId, input.interruptionEventId), run);
       }
       if (
         preSpawn &&
         input.recorderFailureEventId === undefined &&
+        input.recorderCrashEventId === undefined &&
         input.interruptionEventId === undefined
       ) {
         throw new Error("Pre-spawn reconciliation requires validated recorder terminal support.");
@@ -864,6 +1167,7 @@ export class RunRepository {
         input.providerTerminalEventId,
         run.process_event_id,
         input.recorderFailureEventId,
+        input.recorderCrashEventId,
         input.interruptionEventId
       ].filter((value): value is string => value !== undefined && value !== null);
       const uniqueSupportingEventIds = [...new Set(supportingEventIds)];
@@ -880,6 +1184,7 @@ export class RunRepository {
         run.exit_code,
         run.terminating_signal,
         input.recorderFailureEventId !== undefined,
+        input.recorderCrashEventId !== undefined,
         explicitInterruption
       );
       const reconciliationEvent = traceEventV1Schema.parse({
@@ -900,6 +1205,7 @@ export class RunRepository {
           terminatingSignal: run.terminating_signal,
           explicitInterruption,
           recorderFailure: input.recorderFailureEventId !== undefined,
+          recorderCrash: input.recorderCrashEventId !== undefined,
           terminalReason: decision.terminalReason,
           contradictionCodes: decision.contradictionCodes,
           supportingEventIds: uniqueSupportingEventIds
@@ -928,6 +1234,11 @@ export class RunRepository {
         run.status
       );
       if (updated.changes !== 1) throw new Error("Run reconciliation lost its terminal write race.");
+      this.#connection.prepare(`
+        UPDATE run_ownership
+        SET condition = 'released', updated_at = ?
+        WHERE run_id = ?
+      `).run(input.endedAt, runId);
       return this.requireRun(runId);
     }).immediate();
   }
@@ -983,9 +1294,11 @@ export class RunRepository {
     const rows = this.#connection
       .prepare(`
         SELECT runs.*, git_evidence.head_changed AS git_head_changed,
-          git_evidence.branch_changed AS git_branch_changed
+          git_evidence.branch_changed AS git_branch_changed,
+          run_ownership.condition AS ownership_condition
         FROM runs
         LEFT JOIN git_evidence ON git_evidence.run_id = runs.id
+        LEFT JOIN run_ownership ON run_ownership.run_id = runs.id
         ORDER BY runs.started_at DESC, runs.id DESC
         LIMIT ?
       `)
@@ -993,7 +1306,8 @@ export class RunRepository {
     return rows.map((row) => ({
       ...runFromRow(row),
       headChanged: row.git_head_changed === null ? null : row.git_head_changed === 1,
-      branchChanged: row.git_branch_changed === null ? null : row.git_branch_changed === 1
+      branchChanged: row.git_branch_changed === null ? null : row.git_branch_changed === 1,
+      ownershipCondition: row.ownership_condition
     }));
   }
 
@@ -1012,6 +1326,7 @@ export class RunRepository {
       .get(runId) as GitEvidenceRow | undefined;
     return {
       run: this.requireRun(runId),
+      ownership: this.getOwnership(runId),
       events: this.readEvents(runId),
       artifacts: artifacts.map(artifactFromRow),
       redactionAudits: audits.map((audit) => ({
@@ -1022,6 +1337,23 @@ export class RunRepository {
       })),
       gitEvidence: gitEvidenceRow ? gitEvidenceFromRow(gitEvidenceRow) : null
     };
+  }
+
+  getOwnership(runId: string): RecorderOwnership | null {
+    const row = this.#connection.prepare("SELECT * FROM run_ownership WHERE run_id = ?")
+      .get(runId) as OwnershipRow | undefined;
+    return row ? ownershipFromRow(row) : null;
+  }
+
+  listNonterminalOwnership(): RecorderOwnership[] {
+    const rows = this.#connection.prepare(`
+      SELECT run_ownership.*
+      FROM run_ownership
+      JOIN runs ON runs.id = run_ownership.run_id
+      WHERE runs.status IN ('starting', 'running')
+      ORDER BY runs.started_at, runs.id
+    `).all() as OwnershipRow[];
+    return rows.map(ownershipFromRow);
   }
 
   private validateEventRelationships(event: TraceEventV1): void {
@@ -1227,6 +1559,12 @@ export class RunRepository {
     const event = this.readEvents(runId).find((candidate) => candidate.id === eventId);
     if (!event) throw new Error(`Event ${eventId} is not part of run ${runId}.`);
     return event;
+  }
+
+  private requireOwnership(runId: string): RecorderOwnership {
+    const ownership = this.getOwnership(runId);
+    if (!ownership) throw new Error(`Run ${runId} has no recorder ownership record.`);
+    return ownership;
   }
 
   private requireRunRow(runId: string): RunRow {

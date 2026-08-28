@@ -15,7 +15,7 @@ export interface ProcessRunnerInput {
   readonly promptInput: PromptInput;
   readonly signal?: AbortSignal;
   readonly now?: () => number;
-  readonly onSpawn: (pid: number) => void | Promise<void>;
+  readonly onSpawn: (pid: number, processGroupId: number | null) => void | Promise<void>;
   readonly onLine: (
     stream: "stdout" | "stderr",
     line: string,
@@ -89,10 +89,12 @@ function writeBufferedInput(stream: NodeJS.WritableStream, bytes: Buffer): Promi
 
 export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildProcessResult> {
   if (input.childArgs[0] !== "codex") throw new Error("Process runner only spawns the codex basename.");
+  const usesProcessGroup = process.platform !== "win32";
   const child = spawn("codex", [...input.childArgs.slice(1)], {
     cwd: input.cwd,
     env: input.env,
     shell: false,
+    detached: usesProcessGroup,
     stdio: [input.promptInput.mode === "inherit" ? "inherit" : "pipe", "pipe", "pipe"]
   });
 
@@ -108,7 +110,7 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
       spawnReject(new ChildSpawnError("Codex spawned without a process ID.", { cause: undefined }));
       return;
     }
-    Promise.resolve(input.onSpawn(pid)).then(spawnResolve, spawnReject);
+    Promise.resolve(input.onSpawn(pid, usesProcessGroup ? pid : null)).then(spawnResolve, spawnReject);
   });
   child.once("error", (error) => {
     spawnReject(new ChildSpawnError("Unable to spawn codex.", { cause: error }));
@@ -118,7 +120,15 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
   const abort = (): void => {
     explicitlyInterrupted = true;
     if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
+      if (usesProcessGroup) {
+        try {
+          process.kill(-child.pid, "SIGTERM");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
+      } else {
+        child.kill("SIGTERM");
+      }
     }
   };
   input.signal?.addEventListener("abort", abort, { once: true });
@@ -153,7 +163,15 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
     });
   } catch (error) {
     if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-      child.kill("SIGTERM");
+      if (usesProcessGroup) {
+        try {
+          process.kill(-child.pid, "SIGTERM");
+        } catch (signalError) {
+          if ((signalError as NodeJS.ErrnoException).code !== "ESRCH") throw signalError;
+        }
+      } else {
+        child.kill("SIGTERM");
+      }
       await close.catch(() => undefined);
     }
     await streams?.catch(() => undefined);

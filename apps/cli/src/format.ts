@@ -28,6 +28,7 @@ function runListJson(run: RunListRecord) {
       headChanged: run.headChanged,
       branchChanged: run.branchChanged
     },
+    ownership: { condition: run.ownershipCondition },
     capabilities: { ...codexExecCapabilities }
   };
 }
@@ -58,7 +59,7 @@ export function runsText(runs: readonly RunListRecord[]): string {
     const child = run.terminatingSignal ?? (run.exitCode === null ? "pending" : `exit ${run.exitCode}`);
     const duration = runDurationMs(run);
     const git = `HEAD changed=${String(run.headChanged)} branch changed=${String(run.branchChanged)}`;
-    return `${run.id}  ${run.status}  ${run.provider}  ${new Date(run.startedAt).toISOString()}  duration=${duration === null ? "null" : `${duration}ms`}  ${child}  ${git}`;
+    return `${run.id}  ${run.status}  ${run.provider}  ${new Date(run.startedAt).toISOString()}  duration=${duration === null ? "null" : `${duration}ms`}  ${child}  ownership=${run.ownershipCondition ?? "unavailable"}  ${git}`;
   }).join("\n")}\n`;
 }
 
@@ -234,6 +235,7 @@ export async function inspectJson(detail: RunDetail, native: boolean, artifactRo
   const git = detail.gitEvidence;
   return {
     run: detail.run,
+    ownership: detail.ownership,
     metadataSemantics: metadataSemantics(detail.run),
     capabilities: { ...codexExecCapabilities },
     contradictions: [...detail.run.contradictionCodes],
@@ -257,6 +259,7 @@ export function inspectText(
     `Status: ${detail.run.status}`,
     `Provider: ${detail.run.provider}`,
     `Child: exit=${String(detail.run.exitCode)} signal=${String(detail.run.terminatingSignal)}`,
+    `Ownership: ${detail.ownership?.condition ?? "unavailable"}`,
     `Contradictions: ${detail.run.contradictionCodes.join(", ") || "none"}`,
     "Git terminology: tracked final diff + untracked-file metadata",
     `Git evidence: ${git === null ? "unavailable" : `HEAD changed=${git.headChanged}, branch changed=${git.branchChanged}`}`

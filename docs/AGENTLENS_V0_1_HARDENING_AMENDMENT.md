@@ -16,9 +16,9 @@ Every nonterminal run has one durable ownership row containing:
 
 - a random recorder instance ID;
 - recorder PID and a platform process-start identity;
-- child PID, child process-group ID, and child process-start identity when spawned;
+- child PID and child process-start identity when spawned, plus a process-group ID when supported;
 - heartbeat and update timestamps; and
-- an ownership condition: `active`, `orphan_child_active`, `reconciling`, or `released`.
+- an ownership condition: `active`, `orphan_child_active`, `identity_ambiguous`, `reconciling`, or `released`.
 
 The active recorder refreshes its heartbeat once per second. Heartbeat age alone never proves death. A fresh AgentLens process may take recovery action only after the stored recorder PID/start-identity pair is confirmed gone or replaced. If process identity cannot be checked unambiguously, the run remains nonterminal and reports an ambiguous ownership condition.
 

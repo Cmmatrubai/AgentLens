@@ -29,6 +29,11 @@ function setup(): { root: string; artifactRoot: string; repository: RunRepositor
     repositoryFingerprint: "repo-fingerprint",
     repositoryDisplay: "fixture-repository",
     startedAt: 1_777_777_777_000
+  }, {
+    recorderInstanceId: "artifact-recorder",
+    recorderPid: 101,
+    recorderStartToken: "artifact-recorder-start",
+    heartbeatAt: 1_777_777_777_000
   });
   return { root, artifactRoot, repository, close: () => database.close() };
 }

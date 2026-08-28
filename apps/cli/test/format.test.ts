@@ -24,7 +24,8 @@ const completedRun: RunListRecord = {
   terminalReason: "provider_completed_and_zero_exit",
   contradictionCodes: [],
   headChanged: false,
-  branchChanged: false
+  branchChanged: false,
+  ownershipCondition: "released"
 };
 
 describe("runs formatting", () => {

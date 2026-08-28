@@ -3,6 +3,7 @@ import { openDatabase, RunRepository } from "@agentlens/storage";
 import type { InspectCommand } from "../args.js";
 import { ownerOnlyDatabaseFiles, prepareDataRoot } from "../dataRoot.js";
 import { inspectJson, inspectText } from "../format.js";
+import { recoverStaleRuns } from "../recoverRuns.js";
 
 interface OutputWriter {
   write(chunk: string | Uint8Array): unknown;
@@ -10,7 +11,7 @@ interface OutputWriter {
 
 export async function runInspectCommand(
   command: InspectCommand,
-  dependencies: { readonly stdout?: OutputWriter } = {}
+  dependencies: { readonly stdout?: OutputWriter; readonly cwd?: string } = {}
 ): Promise<Awaited<ReturnType<typeof inspectJson>>> {
   const dataRoot = resolve(command.dataRoot);
   const databasePath = await prepareDataRoot(dataRoot);
@@ -19,6 +20,11 @@ export async function runInspectCommand(
   try {
     const repository = new RunRepository(database, {
       artifactRoot: join(dataRoot, "artifacts", "sha256")
+    });
+    await recoverStaleRuns({
+      repository,
+      dataRoot,
+      cwd: dependencies.cwd ?? process.cwd()
     });
     const detail = repository.getRunDetail(command.runId);
     const value = await inspectJson(detail, command.native, join(dataRoot, "artifacts", "sha256"));

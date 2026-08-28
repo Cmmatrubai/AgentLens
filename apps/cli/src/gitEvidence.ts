@@ -576,6 +576,17 @@ export async function captureGitBefore(
   });
 }
 
+export async function resolveGitRepositoryRoot(
+  cwd: string,
+  options: GitCaptureOptions = {}
+): Promise<string> {
+  try {
+    return (await runGit(cwd, ["rev-parse", "--show-toplevel"], options)).stdout.trimEnd();
+  } catch (error) {
+    throw new Error("AgentLens recovery requires a matching Git repository.", { cause: error });
+  }
+}
+
 export async function captureGitAfter(
   before: GitBeforeEvidence,
   options: GitCaptureOptions = {}

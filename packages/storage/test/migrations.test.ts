@@ -29,6 +29,7 @@ describe("SQLite migration 001", () => {
         "events",
         "git_evidence",
         "redaction_audits",
+        "run_ownership",
         "runs",
         "schema_migrations"
       ]));
@@ -40,13 +41,14 @@ describe("SQLite migration 001", () => {
         "idx_event_sources_run_item_id",
         "idx_event_sources_run_turn_id",
         "idx_events_run_sequence",
+        "idx_run_ownership_condition",
         "idx_runs_started_at"
       ]));
       expect(inspection.foreignKeys).toBe(true);
       expect(inspection.journalMode).toBe("wal");
       expect(inspection.synchronous).toBe(1);
       expect(inspection.busyTimeout).toBe(5_000);
-      expect(inspection.migrations).toEqual([1, 2]);
+      expect(inspection.migrations).toEqual([1, 2, 3]);
     } finally {
       database.close();
     }
@@ -59,7 +61,7 @@ describe("SQLite migration 001", () => {
 
     const reopened = openDatabase(path);
     try {
-      expect(reopened.inspect().migrations).toEqual([1, 2]);
+      expect(reopened.inspect().migrations).toEqual([1, 2, 3]);
       expect(reopened.inspect().integrity).toBe("ok");
     } finally {
       reopened.close();
@@ -81,7 +83,7 @@ describe("SQLite migration 001", () => {
     const migrated = openDatabase(path);
     try {
       const inspection = migrated.inspect();
-      expect(inspection.migrations).toEqual([1, 2]);
+      expect(inspection.migrations).toEqual([1, 2, 3]);
       expect(inspection.indexes).toContain("idx_event_relationships_one_recovery");
       expect(inspection.integrity).toBe("ok");
     } finally {

@@ -3,6 +3,7 @@ import { openDatabase, RunRepository } from "@agentlens/storage";
 import type { RunsCommand } from "../args.js";
 import { ownerOnlyDatabaseFiles, prepareDataRoot } from "../dataRoot.js";
 import { runsJson, runsText, type RunsJsonOutput } from "../format.js";
+import { recoverStaleRuns } from "../recoverRuns.js";
 
 interface OutputWriter {
   write(chunk: string | Uint8Array): unknown;
@@ -10,7 +11,7 @@ interface OutputWriter {
 
 export async function runRunsCommand(
   command: RunsCommand,
-  dependencies: { readonly stdout?: OutputWriter } = {}
+  dependencies: { readonly stdout?: OutputWriter; readonly cwd?: string } = {}
 ): Promise<RunsJsonOutput> {
   const dataRoot = resolve(command.dataRoot);
   const databasePath = await prepareDataRoot(dataRoot);
@@ -19,6 +20,11 @@ export async function runRunsCommand(
   try {
     const repository = new RunRepository(database, {
       artifactRoot: join(dataRoot, "artifacts", "sha256")
+    });
+    await recoverStaleRuns({
+      repository,
+      dataRoot,
+      cwd: dependencies.cwd ?? process.cwd()
     });
     const runs = repository.listRuns({ limit: command.limit });
     const value = runsJson(runs);

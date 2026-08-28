@@ -11,6 +11,10 @@ const MIGRATIONS = [
   {
     version: 2,
     sql: readFileSync(new URL("../migrations/002_storage_invariants.sql", import.meta.url), "utf8")
+  },
+  {
+    version: 3,
+    sql: readFileSync(new URL("../migrations/003_recorder_ownership.sql", import.meta.url), "utf8")
   }
 ] as const;
 

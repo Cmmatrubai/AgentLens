@@ -95,6 +95,30 @@ afterEach(async () => {
 });
 
 describe("recordRun lifecycle", () => {
+  it("persists and releases recorder/child ownership around a completed run", async () => {
+    const context = await fixture();
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const ownership = detail(context.dataRoot, recorded.runId).ownership;
+
+    expect(ownership).toMatchObject({
+      recorderPid: process.pid,
+      recorderStartToken: expect.any(String),
+      recorderInstanceId: expect.any(String),
+      childPid: expect.any(Number),
+      childStartToken: expect.any(String),
+      childProcessGroupId: expect.any(Number),
+      condition: "released"
+    });
+  });
+
   it("refuses a dirty worktree before the fake child or durable recorder starts", async () => {
     const context = await fixture();
     const startedFile = join(context.root, "child-started.log");

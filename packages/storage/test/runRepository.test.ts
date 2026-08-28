@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase } from "../src/database.js";
 import {
   RunRepository,
+  type CreateRecorderOwnershipInput,
   type CreateRunInput,
   type GitEvidenceInput,
   type ReconciliationInput
@@ -22,8 +23,30 @@ function setup(): { repository: RunRepository; close: () => void } {
   mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
   const database = openDatabase(join(root, "agentlens.sqlite"));
   const repository = new RunRepository(database, { artifactRoot });
-  repository.createRun(validRun());
+  repository.createRun(validRun(), validOwnership());
   return { repository, close: () => database.close() };
+}
+
+function validOwnership(
+  overrides: Partial<CreateRecorderOwnershipInput> = {}
+): CreateRecorderOwnershipInput {
+  return {
+    recorderInstanceId: "recorder-instance-1",
+    recorderPid: 101,
+    recorderStartToken: "start-token-101",
+    heartbeatAt: 1_777_777_777_000,
+    ...overrides
+  };
+}
+
+function runningInput(childPid = 42) {
+  return {
+    recorderInstanceId: "recorder-instance-1",
+    childPid,
+    childStartToken: `start-token-${childPid}`,
+    childProcessGroupId: childPid,
+    updatedAt: 1_777_777_777_500
+  };
 }
 
 function validRun(overrides: Partial<CreateRunInput> = {}): CreateRunInput {
@@ -554,7 +577,10 @@ describe("append-only events and recovery", () => {
   it("rejects relationships whose target belongs to another run", () => {
     const { repository, close } = setup();
     try {
-      repository.createRun(validRun({ id: "run-other" }));
+      repository.createRun(
+        validRun({ id: "run-other" }),
+        validOwnership({ recorderInstanceId: "recorder-instance-other" })
+      );
       repository.appendEvent(event("other-source", 0, "completed", { runId: "run-other" }));
       const crossRunDerived = event("cross-run-derived", 0, "completed", {
         provenance: "derived",
@@ -722,7 +748,7 @@ describe("run-fact reconciliation", () => {
   it.each(cases)("$name", (testCase) => {
     const { repository, close } = setup();
     try {
-      repository.markRunning(runId, { childPid: 42 });
+      repository.markRunning(runId, runningInput());
       let sequence = 0;
       let providerTerminalEventId: string | undefined;
       if (testCase.provider) {
@@ -988,7 +1014,7 @@ describe("run-fact reconciliation", () => {
         endedAt: 1_777_777_779_000,
         interruptionEventId: "pre-spawn-recorder-failure"
       })).toThrow(/terminal|already reconciled/i);
-      expect(() => repository.markRunning(runId, { childPid: 42 })).toThrow(/starting/i);
+      expect(() => repository.markRunning(runId, runningInput())).toThrow(/starting/i);
       expect(repository.getRunDetail(runId)).toEqual(terminal);
     } finally {
       close();
@@ -998,7 +1024,7 @@ describe("run-fact reconciliation", () => {
   it("rejects a process fact whose stored event semantics do not match recorder evidence", () => {
     const { repository, close } = setup();
     try {
-      repository.markRunning(runId, { childPid: 42 });
+      repository.markRunning(runId, runningInput());
       repository.appendEvent(event("invalid-process", 0, "completed", {
         kind: "recorder.process_exit",
         provenance: "observed",
@@ -1015,7 +1041,7 @@ describe("run-fact reconciliation", () => {
   it("derives provider terminal classification from an observed terminal event", () => {
     const { repository, close } = setup();
     try {
-      repository.markRunning(runId, { childPid: 42 });
+      repository.markRunning(runId, runningInput());
       repository.appendEvent(event("provider-terminal", 0, "completed", {
         kind: "turn.completed",
         provenance: "recorder",
@@ -1042,7 +1068,7 @@ describe("run-fact reconciliation", () => {
   it("requires validated recorder failure and explicit interruption support", () => {
     const { repository, close } = setup();
     try {
-      repository.markRunning(runId, { childPid: 42 });
+      repository.markRunning(runId, runningInput());
       repository.appendEvent(event("process-fact", 0, "completed", {
         kind: "recorder.process_exit",
         provenance: "recorder",
@@ -1079,7 +1105,7 @@ describe("run-fact reconciliation", () => {
   it("does not overwrite process or reconciliation facts after the run is terminal", () => {
     const { repository, close } = setup();
     try {
-      repository.markRunning(runId, { childPid: 42 });
+      repository.markRunning(runId, runningInput());
       repository.appendEvent(event("provider-terminal", 0, "completed", {
         kind: "turn.completed",
         source: { provider: "codex-exec", turnId: "turn-1", eventType: "turn.completed" }
@@ -1112,7 +1138,7 @@ describe("run-fact reconciliation", () => {
         receivedAt: "2026-08-26T20:03:00.000Z",
         endedAt: 1_777_777_779_000
       })).toThrow(/terminal|already reconciled/i);
-      expect(() => repository.markRunning(runId, { childPid: 99 })).toThrow(/starting/i);
+      expect(() => repository.markRunning(runId, runningInput(99))).toThrow(/starting/i);
 
       const after = repository.getRunDetail(runId);
       expect(after.run).toEqual(terminalDetail.run);
@@ -1126,10 +1152,157 @@ describe("run-fact reconciliation", () => {
 });
 
 describe("run and Git evidence reads", () => {
+  it("persists recorder ownership, heartbeat, child identity, and release state", () => {
+    const { repository, close } = setup();
+    try {
+      expect(repository.getRunDetail(runId).ownership).toEqual({
+        runId,
+        recorderInstanceId: "recorder-instance-1",
+        recorderPid: 101,
+        recorderStartToken: "start-token-101",
+        childPid: null,
+        childStartToken: null,
+        childProcessGroupId: null,
+        heartbeatAt: 1_777_777_777_000,
+        condition: "active",
+        ownershipLostEventId: null,
+        updatedAt: 1_777_777_777_000
+      });
+
+      expect(repository.refreshOwnership(runId, {
+        recorderInstanceId: "wrong-instance",
+        heartbeatAt: 1_777_777_777_250
+      })).toBe(false);
+      expect(repository.refreshOwnership(runId, {
+        recorderInstanceId: "recorder-instance-1",
+        heartbeatAt: 1_777_777_777_250
+      })).toBe(true);
+
+      repository.markRunning(runId, runningInput());
+      expect(repository.getRunDetail(runId).ownership).toMatchObject({
+        childPid: 42,
+        childStartToken: "start-token-42",
+        childProcessGroupId: 42,
+        heartbeatAt: 1_777_777_777_250,
+        condition: "active",
+        updatedAt: 1_777_777_777_500
+      });
+
+      expect(repository.releaseOwnership(runId, {
+        recorderInstanceId: "wrong-instance",
+        updatedAt: 1_777_777_778_000
+      })).toBe(false);
+      expect(repository.releaseOwnership(runId, {
+        recorderInstanceId: "recorder-instance-1",
+        updatedAt: 1_777_777_778_000
+      })).toBe(true);
+      expect(repository.getRunDetail(runId).ownership?.condition).toBe("released");
+    } finally {
+      close();
+    }
+  });
+
+  it("stores a direct-child fallback without inventing a process-group identity", () => {
+    const { repository, close } = setup();
+    try {
+      repository.markRunning(runId, {
+        ...runningInput(),
+        childProcessGroupId: null
+      });
+
+      expect(repository.getRunDetail(runId).ownership).toMatchObject({
+        childPid: 42,
+        childStartToken: "start-token-42",
+        childProcessGroupId: null
+      });
+    } finally {
+      close();
+    }
+  });
+
+  it("claims stale ownership once and keeps recorder-crash recovery append-only", () => {
+    const { repository, close } = setup();
+    try {
+      repository.markRunning(runId, runningInput());
+      const started = repository.appendEvent(event("provider-open", 0, "in_progress"));
+      const original = JSON.stringify(started);
+
+      const lost = repository.appendOwnershipLoss(runId, {
+        eventId: "ownership-lost",
+        receivedAt: "2026-08-26T20:01:00.000Z"
+      });
+      const repeated = repository.appendOwnershipLoss(runId, {
+        eventId: "ownership-lost-duplicate",
+        receivedAt: "2026-08-26T20:01:01.000Z"
+      });
+      expect(repeated.id).toBe(lost.id);
+      expect(repository.markOrphanChildActive(runId, {
+        recorderInstanceId: "recorder-instance-1",
+        updatedAt: 1_777_777_778_100
+      })).toBe(true);
+      expect(repository.getRunDetail(runId).ownership?.condition).toBe("orphan_child_active");
+
+      expect(repository.claimRecoveryOwnership(runId, {
+        expectedRecorderInstanceId: "recorder-instance-1",
+        recovery: validOwnership({
+          recorderInstanceId: "recovery-instance-1",
+          recorderPid: 202,
+          recorderStartToken: "start-token-202",
+          heartbeatAt: 1_777_777_778_200
+        })
+      })).toBe(true);
+      expect(repository.claimRecoveryOwnership(runId, {
+        expectedRecorderInstanceId: "recorder-instance-1",
+        recovery: validOwnership({
+          recorderInstanceId: "recovery-instance-2",
+          recorderPid: 303,
+          recorderStartToken: "start-token-303",
+          heartbeatAt: 1_777_777_778_300
+        })
+      })).toBe(false);
+
+      const recoveries = repository.appendRecoveryForOpenEvents(runId, {
+        receivedAt: "2026-08-26T20:01:02.000Z",
+        eventIdFor: () => "provider-open-recovery"
+      });
+      expect(recoveries).toHaveLength(1);
+      expect(repository.appendRecoveryForOpenEvents(runId, {
+        receivedAt: "2026-08-26T20:01:03.000Z",
+        eventIdFor: () => "provider-open-recovery-duplicate"
+      })).toEqual([]);
+
+      const run = repository.reconcileRun(runId, {
+        eventId: "run-reconciled-after-crash",
+        receivedAt: "2026-08-26T20:01:04.000Z",
+        endedAt: 1_777_777_778_400,
+        recorderCrashEventId: lost.id
+      });
+      const detail = repository.getRunDetail(runId);
+
+      expect(run).toMatchObject({
+        status: "interrupted",
+        terminalReason: "recorder_crash",
+        exitCode: null,
+        terminatingSignal: null,
+        providerTerminalKind: null
+      });
+      expect(detail.ownership?.condition).toBe("released");
+      expect(JSON.stringify(detail.events.find(({ id }) => id === started.id))).toBe(original);
+      expect(detail.events.filter(({ kind }) => kind === "recorder.ownership_lost")).toHaveLength(1);
+      expect(detail.events.filter(({ kind }) => kind === "recorder.recovery")).toHaveLength(1);
+      expect(detail.events.filter(({ kind }) => kind === "run.reconciled")).toHaveLength(1);
+      expect(detail.events.some(({ kind }) => kind === "recorder.process_exit")).toBe(false);
+      expect(detail.events.some(({ kind }) => kind.startsWith("turn.") && kind.endsWith("completed")))
+        .toBe(false);
+    } finally {
+      close();
+    }
+  });
+
   it("keeps run status distinct from event status and exposes final Git facts", () => {
     const { repository, close } = setup();
     try {
-      repository.markRunning(runId, { childPid: 42 });
+      repository.markRunning(runId, runningInput());
       repository.saveGitEvidence(runId, {
         initialHead: "a".repeat(40),
         finalHead: "b".repeat(40),
