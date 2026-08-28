@@ -248,7 +248,7 @@ Durable Git path display is valid UTF-8 only. A path that cannot be represented 
 
 Terminology is exact: v0.1 captures **tracked final diff + untracked-file metadata**. It does not capture untracked contents and does not claim an “exact final diff” or forensic attribution. All Git evidence is final repository evidence only.
 
-Git capability limits are explicit: v0.1 refuses repositories whenever an effective clean/process filter is configured, even if that filter would not apply to the paths changed in the run. A partial clone whose required evidence objects are not already local fails closed rather than fetching them. These failures remain queryable as recorder facts; AgentLens does not weaken the read-only boundary to complete capture.
+Git capability limits are explicit: v0.1 refuses before run creation whenever an effective clean/process filter is already configured, even if that filter would not apply to the paths changed in the run. A filter introduced during the child run, or a partial clone whose postflight evidence requires an object that is not already local, fails closed during final evidence capture and remains queryable as a recorder failure. AgentLens does not weaken the read-only boundary to complete capture.
 
 ## 10. CLI and prompt/stdin contract
 
