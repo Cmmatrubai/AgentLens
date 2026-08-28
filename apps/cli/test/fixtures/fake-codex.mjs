@@ -75,6 +75,16 @@ switch (mode) {
     process.stderr.write("fixture stderr diagnostic\n");
     terminal();
     break;
+  case "oversized-following": {
+    const sentinel = Buffer.from("OVERSIZED_RAW_SENTINEL");
+    const sourceBytes = 64 * 1024 * 1024;
+    process.stdout.write(sentinel);
+    process.stdout.write(Buffer.alloc(sourceBytes - sentinel.byteLength, 0x78));
+    process.stdout.write("\n");
+    emit({ type: "future.following", future: { nested: 11 } });
+    terminal();
+    break;
+  }
   case "unknown-small":
     emit({ type: "future.event", future: { nested: 7 }, authorization: "Bearer SMALL_NATIVE_TOKEN" });
     terminal();

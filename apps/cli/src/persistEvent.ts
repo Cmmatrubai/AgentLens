@@ -49,6 +49,8 @@ function structuralNormalized(draft: EventDraftV1): Record<string, unknown> {
       const value = payload as Record<string, unknown>;
       if (value.stream === "stdout" || value.stream === "stderr") result.stream = value.stream;
       if (typeof value.reason === "string") result.reason = value.reason;
+      if (typeof value.limitBytes === "number") result.limitBytes = value.limitBytes;
+      if (typeof value.observedBytes === "number") result.observedBytes = value.observedBytes;
     }
   }
   if (draft.kind === "recorder.invocation") {

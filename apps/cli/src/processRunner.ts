@@ -1,5 +1,10 @@
 import { spawn } from "node:child_process";
+import type { Readable } from "node:stream";
 import type { PromptInput } from "./promptInput.js";
+import {
+  consumeSourceStream,
+  type SourceStreamDiagnostic
+} from "./sourceStreamDecoder.js";
 
 export const DEFAULT_TERMINATION_GRACE_MS = 2_000;
 
@@ -25,6 +30,10 @@ export interface ProcessRunnerInput {
     line: string,
     receivedAt: number
   ) => void | Promise<void>;
+  readonly onDiagnostic: (
+    diagnostic: SourceStreamDiagnostic,
+    receivedAt: number
+  ) => void | Promise<void>;
 }
 
 export class ChildSpawnError extends Error {
@@ -34,36 +43,17 @@ export class ChildSpawnError extends Error {
   }
 }
 
-function lineConsumer(
-  stream: NodeJS.ReadableStream,
+async function sourceConsumer(
+  stream: Readable,
   name: "stdout" | "stderr",
-  beforeLine: Promise<void>,
   onLine: ProcessRunnerInput["onLine"],
+  onDiagnostic: ProcessRunnerInput["onDiagnostic"],
   now: () => number
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let pending = "";
-    let queue = beforeLine;
-    stream.setEncoding("utf8");
-    stream.on("data", (chunk: string) => {
-      pending += chunk;
-      const lines = pending.split("\n");
-      pending = lines.pop() ?? "";
-      for (const rawLine of lines) {
-        const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
-        const receivedAt = now();
-        queue = queue.then(async () => onLine(name, line, receivedAt));
-      }
-    });
-    stream.once("error", reject);
-    stream.once("end", () => {
-      if (pending.length > 0) {
-        const line = pending.endsWith("\r") ? pending.slice(0, -1) : pending;
-        const receivedAt = now();
-        queue = queue.then(async () => onLine(name, line, receivedAt));
-      }
-      queue.then(resolve, reject);
-    });
+  await consumeSourceStream(stream, name, async (record) => {
+    const receivedAt = now();
+    if (record.type === "line") await onLine(name, record.line, receivedAt);
+    else await onDiagnostic(record, receivedAt);
   });
 }
 
@@ -183,8 +173,8 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
     await spawned;
     if (!child.stdout || !child.stderr) throw new Error("Codex stdout/stderr pipes were not created.");
     streams = Promise.all([
-      lineConsumer(child.stdout, "stdout", spawned, input.onLine, input.now ?? Date.now),
-      lineConsumer(child.stderr, "stderr", spawned, input.onLine, input.now ?? Date.now)
+      sourceConsumer(child.stdout, "stdout", input.onLine, input.onDiagnostic, input.now ?? Date.now),
+      sourceConsumer(child.stderr, "stderr", input.onLine, input.onDiagnostic, input.now ?? Date.now)
     ]);
     if (input.promptInput.mode === "buffered") {
       if (!child.stdin) throw new Error("Buffered Codex stdin pipe was not created.");

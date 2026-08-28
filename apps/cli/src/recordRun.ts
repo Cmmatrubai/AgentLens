@@ -596,6 +596,31 @@ export async function recordRun(
     }
 
     let lineQueue = Promise.resolve();
+    const enqueueDrafts = (
+      drafts: readonly EventDraftV1[],
+      receivedAtIso: string
+    ): Promise<void> => {
+      lineQueue = lineQueue.then(async () => {
+        for (const draft of drafts) {
+          const persisted = await persistEventDraft(draft, {
+            runId,
+            capturePolicy: command.capture,
+            redactionKey: key,
+            artifactStore,
+            repository,
+            committedArtifactIds,
+            nextEventId: nextId,
+            nextSequence: () => state.sequence++,
+            receivedAt: () => receivedAtIso
+          });
+          if (
+            persisted.provenance === "observed" &&
+            (persisted.kind === "turn.completed" || persisted.kind === "turn.failed")
+          ) state.providerTerminalEventId = persisted.id;
+        }
+      });
+      return lineQueue;
+    };
     const childResult = await runChildProcess({
       childArgs: command.childArgs,
       cwd,
@@ -631,30 +656,27 @@ export async function recordRun(
       },
       onLine: (stream, line, receivedAt) => {
         const receivedAtIso = new Date(receivedAt).toISOString();
-        lineQueue = lineQueue.then(async () => {
-          const decoded = decodeCodexLine(line, stream);
-          const drafts: readonly EventDraftV1[] = decoded.type === "diagnostic"
-            ? [decoded.draft]
-            : normalizeCodexRecord(decoded.record);
-          for (const draft of drafts) {
-            const persisted = await persistEventDraft(draft, {
-              runId,
-              capturePolicy: command.capture,
-              redactionKey: key,
-              artifactStore,
-              repository,
-              committedArtifactIds,
-              nextEventId: nextId,
-              nextSequence: () => state.sequence++,
-              receivedAt: () => receivedAtIso
-            });
-            if (
-              persisted.provenance === "observed" &&
-              (persisted.kind === "turn.completed" || persisted.kind === "turn.failed")
-            ) state.providerTerminalEventId = persisted.id;
+        const decoded = decodeCodexLine(line, stream);
+        return enqueueDrafts(
+          decoded.type === "diagnostic" ? [decoded.draft] : normalizeCodexRecord(decoded.record),
+          receivedAtIso
+        );
+      },
+      onDiagnostic: (diagnostic, receivedAt) => {
+        return enqueueDrafts([{
+          kind: "recorder.stream_diagnostic",
+          status: "unknown",
+          provenance: "recorder",
+          source: { provider: "codex-exec", correlationId: runId },
+          relationships: [],
+          summary: "Oversized source line discarded",
+          normalizedPayload: {
+            stream: diagnostic.stream,
+            reason: diagnostic.reason,
+            limitBytes: diagnostic.limitBytes,
+            observedBytes: diagnostic.observedBytes
           }
-        });
-        return lineQueue;
+        }], new Date(receivedAt).toISOString());
       }
     });
     await lineQueue;

@@ -59,6 +59,7 @@ describe("process runner", () => {
           controller.abort();
         }
       },
+      onDiagnostic: () => undefined,
       signal: controller.signal,
       forceTerminationSignal: forceController.signal,
       terminationGraceMs: 50
@@ -101,6 +102,7 @@ describe("process runner", () => {
           setTimeout(() => forceController.abort(), 25);
         }
       },
+      onDiagnostic: () => undefined,
       signal: controller.signal,
       forceTerminationSignal: forceController.signal,
       terminationGraceMs: 2_000
@@ -133,6 +135,7 @@ describe("process runner", () => {
         reportedGroup = processGroupId;
       },
       onLine: () => controller.abort(),
+      onDiagnostic: () => undefined,
       signal: controller.signal
     });
 
@@ -168,12 +171,13 @@ describe("process runner", () => {
           firstLine();
           await firstLineGate;
         }
-      }
+      },
+      onDiagnostic: () => undefined
     });
 
     await firstLineEntered;
     await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(receiptClock).toBeGreaterThan(1);
+    expect(receiptClock).toBe(1);
     releaseFirst();
     await resultPromise;
     expect(receivedAt.length).toBeGreaterThan(1);

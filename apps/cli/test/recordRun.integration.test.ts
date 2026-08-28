@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   symlink,
   writeFile
@@ -72,6 +73,12 @@ function detail(dataRoot: string, runId: string) {
   } finally {
     database.close();
   }
+}
+
+async function durableBytes(root: string): Promise<Buffer> {
+  const entries = await readdir(root, { recursive: true, withFileTypes: true });
+  const files = entries.filter((entry) => entry.isFile());
+  return Buffer.concat(await Promise.all(files.map((entry) => readFile(join(entry.parentPath, entry.name)))));
 }
 
 async function waitForOpenCommand(dataRoot: string, runId: () => string | undefined): Promise<void> {
@@ -381,6 +388,42 @@ describe("recordRun lifecycle", () => {
       nativePayload: { storage: "inline", redacted: { type: "future.event", future: { nested: 7 } } }
     }));
   });
+
+  it("discards a 64 MiB source line content-free and records the following valid provider line", async () => {
+    const context = await fixture();
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=oversized-following"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const events = detail(context.dataRoot, result.runId).events;
+    const oversized = events.filter(({ kind, normalizedPayload }) =>
+      kind === "recorder.stream_diagnostic" &&
+      (normalizedPayload as { reason?: unknown } | undefined)?.reason === "line_too_large"
+    );
+
+    expect(result.status).toBe("completed");
+    expect(oversized).toHaveLength(1);
+    expect(oversized[0]).toMatchObject({
+      summary: "Oversized source line discarded",
+      normalizedPayload: {
+        stream: "stdout",
+        reason: "line_too_large",
+        limitBytes: 1_048_576,
+        observedBytes: 64 * 1024 * 1024
+      }
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      kind: "source.unknown",
+      source: expect.objectContaining({ eventType: "future.following" })
+    }));
+    expect((await durableBytes(context.dataRoot)).includes(Buffer.from("OVERSIZED_RAW_SENTINEL")))
+      .toBe(false);
+  }, 20_000);
 
   it("forwards buffered stdin bytes unchanged and closes child stdin", async () => {
     const context = await fixture();
