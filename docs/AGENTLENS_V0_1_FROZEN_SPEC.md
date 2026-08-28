@@ -232,13 +232,13 @@ One row per run containing initial/final HEAD, initial/final branch, initial/fin
 
 ## 9. Git evidence
 
-Preflight uses read-only Git commands to capture repository root, initial HEAD, initial branch (nullable for detached HEAD), and initial porcelain-v2 status. Status uses Git's NUL-delimited form and remains byte-oriented in memory so filesystem containment and metadata checks use the exact path bytes. Any tracked, staged, or untracked entry refuses recording before child spawn. AgentLens never stashes, resets, checks out, commits, adds, cleans, or otherwise mutates Git state.
+Preflight uses physically read-only Git commands to capture repository root, initial HEAD, initial branch (nullable for detached HEAD), and initial porcelain-v2 status. Every AgentLens-owned Git subprocess disables optional locks and the repository's configured filesystem monitor; tracked diff capture also disables external diff and text-conversion helpers. This prevents evidence collection from refreshing the Git index or executing those repository-configured helpers. Status uses Git's NUL-delimited form and remains byte-oriented in memory so filesystem containment and metadata checks use the exact path bytes. Any tracked, staged, or untracked entry refuses recording before child spawn. AgentLens never stashes, resets, checks out, commits, adds, cleans, or otherwise mutates Git state.
 
 Postflight captures:
 
 - final HEAD and branch;
 - final porcelain-v2 status;
-- **tracked final diff relative to the initial HEAD and current working tree/index**, including changes committed by Codex (`git diff --binary --no-ext-diff <initial-head> --`);
+- **tracked final diff relative to the initial HEAD and current working tree/index**, including changes committed by Codex (`GIT_OPTIONAL_LOCKS=0 git -c core.fsmonitor=false diff --binary --no-ext-diff --no-textconv <initial-head> --`);
 - `git diff --check <initial-head> --` result;
 - untracked-file metadata (relative path under policy, type, size, and no contents).
 
