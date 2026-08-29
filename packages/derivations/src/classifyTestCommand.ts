@@ -135,7 +135,10 @@ function recognizePackageManager(
   family: "npm" | "pnpm"
 ): TestCommandClassification | null {
   if (argv[0] !== family) return null;
-  if (argv[1] === "test" || (argv[1] === "run" && isTestScript(argv[2]))) {
+  if (argv[1] === "test" || (argv[1] === "run" && argv[2] === "test")) {
+    return classification(family, "high");
+  }
+  if (argv[1] === "run" && isTestScript(argv[2])) {
     return classification(family, "medium");
   }
   return null;
@@ -147,7 +150,7 @@ function isTestScript(value: string | undefined): boolean {
 
 function recognizeYarn(argv: readonly string[]): TestCommandClassification | null {
   return argv[0] === "yarn" && (argv[1] === "test" || (argv[1] === "run" && argv[2] === "test"))
-    ? classification("yarn", "medium")
+    ? classification("yarn", "high")
     : null;
 }
 

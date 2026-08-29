@@ -13,7 +13,9 @@ describe("tokenizeSimpleCommand", () => {
     ["A=1 B_two=value pytest -q", { executable: "pytest", argv: ["pytest", "-q"] }],
     ["A=1 env -- pytest -q", { executable: "pytest", argv: ["pytest", "-q"] }],
     ["env FOO=bar pytest -q", { executable: "pytest", argv: ["pytest", "-q"] }],
-    ["command pytest -q", { executable: "pytest", argv: ["pytest", "-q"] }]
+    ["env FOO=bar -- pytest -q", { executable: "pytest", argv: ["pytest", "-q"] }],
+    ["command pytest -q", { executable: "pytest", argv: ["pytest", "-q"] }],
+    ["command -- pytest -q", { executable: "pytest", argv: ["pytest", "-q"] }]
   ])("parses supported simple syntax: %s", (command, expected) => {
     expect(tokenizeSimpleCommand(command)).toEqual(expected);
   });
@@ -38,6 +40,8 @@ describe("tokenizeSimpleCommand", () => {
     "env -u HOME pytest -q",
     "env --unset=HOME pytest -q",
     "env --chdir /tmp pytest -q",
+    "env command pytest",
+    "env -- FOO=bar pytest",
     "command -v pytest",
     "command -V pytest",
     "command -p pytest"

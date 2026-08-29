@@ -12,27 +12,24 @@ export function tokenizeSimpleCommand(input: string): SimpleCommand | null {
   let index = 0;
   while (index < words.length && assignment.test(words[index]!)) index += 1;
 
-  while (true) {
-    if (words[index] === "env") {
-      index += 1;
-      if (words[index] === "--") {
-        index += 1;
-      } else if (words[index]?.startsWith("-")) {
-        return null;
-      }
-      while (index < words.length && assignment.test(words[index]!)) index += 1;
-      continue;
+  if (words[index] === "command") {
+    index += 1;
+    if (words[index] === "--") index += 1;
+    else if (words[index]?.startsWith("-")) return null;
+  }
+
+  if (words[index] === "env") {
+    index += 1;
+    while (index < words.length && assignment.test(words[index]!)) index += 1;
+    if (words[index] === "--") index += 1;
+    else if (words[index]?.startsWith("-")) return null;
+    if (words[index] === undefined || assignment.test(words[index]!) || words[index] === "command") {
+      return null;
     }
-    if (words[index] === "command") {
-      index += 1;
-      if (words[index]?.startsWith("-")) return null;
-      continue;
-    }
-    break;
   }
 
   const executable = words[index];
-  if (executable === undefined) return null;
+  if (executable === undefined || executable === "command") return null;
   const argv = words.slice(index);
   if (
     (executable === "bash" || executable === "sh") &&

@@ -33,6 +33,7 @@ describe("classifyTestCommand", () => {
     ["go test", "go"],
     ["mvn test", "maven"],
     ["mvn -q -DskipTests=false test module", "maven"],
+    ["env FOO=bar -- pytest -q", "pytest"],
     ["gradle test", "gradle"],
     ["./gradlew test", "gradle"]
   ] as const)("classifies direct %s commands", (command, family) => {
@@ -42,12 +43,17 @@ describe("classifyTestCommand", () => {
   it.each([
     ["npm test", "npm"],
     ["npm run test", "npm"],
-    ["npm run test:unit", "npm"],
     ["pnpm test", "pnpm"],
     ["pnpm run test", "pnpm"],
-    ["pnpm run test:unit", "pnpm"],
     ["yarn test", "yarn"],
     ["yarn run test", "yarn"]
+  ] as const)("classifies exact package-manager test commands: %s", (command, family) => {
+    expect(classify(command)).toEqual(expected(family, "high"));
+  });
+
+  it.each([
+    ["npm run test:unit", "npm"],
+    ["pnpm run test:unit", "pnpm"]
   ] as const)("classifies package-manager test scripts: %s", (command, family) => {
     expect(classify(command)).toEqual(expected(family, "medium"));
   });
