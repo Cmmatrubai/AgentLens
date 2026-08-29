@@ -46,6 +46,39 @@ async function fixture() {
   };
 }
 
+async function installPrivacyCommandFixture(root: string, command: string): Promise<void> {
+  const records = [
+    {
+      type: "item.completed",
+      thread_id: "fixture-thread",
+      turn_id: "fixture-turn",
+      item: {
+        id: "privacy-policy-command",
+        type: "command_execution",
+        command,
+        aggregated_output: "privacy policy output",
+        exit_code: 0,
+        status: "completed"
+      }
+    },
+    {
+      type: "turn.completed",
+      thread_id: "fixture-thread",
+      turn_id: "fixture-turn",
+      usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 }
+    }
+  ];
+  const source = [
+    "#!/usr/bin/env node",
+    `const records = ${JSON.stringify(records)};`,
+    "for (const record of records) process.stdout.write(JSON.stringify(record) + '\\n');",
+    ""
+  ].join("\n");
+  const executable = join(root, "bin", "codex");
+  await writeFile(executable, source, "utf8");
+  await chmod(executable, 0o700);
+}
+
 async function durableBytes(root: string): Promise<Buffer> {
   const entries = await readdir(root, { recursive: true, withFileTypes: true });
   const files = entries.filter((entry) => entry.isFile());
@@ -167,6 +200,13 @@ describe("recorder privacy and artifact durability", () => {
         stdin: { state: "omitted", byteLength: 23 }
       }
     }));
+    expect(detail(context.dataRoot, result.runId).events).toContainEqual(expect.objectContaining({
+      kind: "command",
+      provenance: "observed",
+      normalizedPayload: expect.objectContaining({
+        commandEvidence: { state: "omitted", reason: "metadata-only" }
+      })
+    }));
 
     expect(detail(context.dataRoot, result.runId).gitEvidence).toMatchObject({
       initialStatus: { state: "omitted", reason: "metadata-only" },
@@ -231,6 +271,8 @@ describe("recorder privacy and artifact durability", () => {
 
   it("persists content-free omitted invocation structure in strict capture", async () => {
     const context = await fixture();
+    const commandSentinel = "STRICT_COMMAND_EVIDENCE_SENTINEL";
+    await installPrivacyCommandFixture(context.root, `printf ${commandSentinel}`);
     const result = await recordRun(
       {
         name: "record",
@@ -259,10 +301,18 @@ describe("recorder privacy and artifact durability", () => {
         stdin: { state: "omitted", byteLength: 21 }
       }
     }));
+    expect(run.events).toContainEqual(expect.objectContaining({
+      kind: "command",
+      provenance: "observed",
+      normalizedPayload: expect.objectContaining({
+        commandEvidence: { state: "omitted", reason: "strict" }
+      })
+    }));
     for (const sentinel of [
       "STRICT_PROMPT_SENTINEL",
       "STRICT_ARGV_SENTINEL",
-      "STRICT_STDIN_SENTINEL"
+      "STRICT_STDIN_SENTINEL",
+      commandSentinel
     ]) expect(durable.includes(Buffer.from(sentinel))).toBe(false);
   });
 

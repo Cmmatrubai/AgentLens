@@ -61,6 +61,59 @@ async function fixture(): Promise<{
   };
 }
 
+async function installCommandFixture(
+  root: string,
+  input: Readonly<{
+    command: string;
+    aggregatedOutput?: string;
+    exitCode?: number;
+    status?: "completed" | "failed";
+    includeStarted?: boolean;
+  }>
+): Promise<void> {
+  const terminalItem = {
+    id: "bounded-command",
+    type: "command_execution",
+    command: input.command,
+    aggregated_output: input.aggregatedOutput ?? "fixture output",
+    exit_code: input.exitCode ?? 0,
+    status: input.status ?? "completed"
+  };
+  const records = [
+    { type: "thread.started", thread_id: "fixture-thread" },
+    { type: "turn.started", thread_id: "fixture-thread", turn_id: "fixture-turn" },
+    ...(input.includeStarted
+      ? [{
+          type: "item.started",
+          thread_id: "fixture-thread",
+          turn_id: "fixture-turn",
+          item: { ...terminalItem, status: "in_progress" }
+        }]
+      : []),
+    {
+      type: "item.completed",
+      thread_id: "fixture-thread",
+      turn_id: "fixture-turn",
+      item: terminalItem
+    },
+    {
+      type: "turn.completed",
+      thread_id: "fixture-thread",
+      turn_id: "fixture-turn",
+      usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 2 }
+    }
+  ];
+  const source = [
+    "#!/usr/bin/env node",
+    `const records = ${JSON.stringify(records)};`,
+    "for (const record of records) process.stdout.write(JSON.stringify(record) + '\\n');",
+    ""
+  ].join("\n");
+  const executable = join(root, "bin", "codex");
+  await writeFile(executable, source, "utf8");
+  await chmod(executable, 0o700);
+}
+
 function piped(bytes: Buffer = Buffer.alloc(0)): NodeJS.ReadStream {
   return Object.assign(Readable.from([bytes]), { isTTY: false }) as unknown as NodeJS.ReadStream;
 }
@@ -370,6 +423,104 @@ describe("recordRun lifecycle", () => {
     ]);
     expect(commands.every(({ provenance }) => provenance === "observed")).toBe(true);
     expect(run.run).toMatchObject({ providerTerminalKind: "completed", exitCode: 0 });
+  });
+
+  it("persists already-redacted command evidence for every observed command lifecycle event", async () => {
+    const context = await fixture();
+    const sentinel = "STANDARD_COMMAND_EVIDENCE_SENTINEL";
+    await installCommandFixture(context.root, {
+      command: `printf ACCESS_TOKEN=${sentinel}`,
+      includeStarted: true
+    });
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const commands = detail(context.dataRoot, result.runId).events
+      .filter(({ kind }) => kind === "command");
+
+    expect(commands).toHaveLength(2);
+    for (const command of commands) {
+      const normalized = command.normalizedPayload as {
+        command?: unknown;
+        commandEvidence?: { state?: unknown; redactedCommand?: unknown };
+      };
+      expect(normalized).toMatchObject({
+        commandEvidence: {
+          state: "available",
+          redactedCommand: expect.stringMatching(
+            /^printf ACCESS_TOKEN=\[\[REDACTED:assignment-access-token:hmac-sha256:[0-9a-f]{32}\]\]$/
+          )
+        }
+      });
+      expect(normalized.commandEvidence?.redactedCommand).toBe(normalized.command);
+    }
+    expect((await durableBytes(context.dataRoot)).includes(Buffer.from(sentinel))).toBe(false);
+  });
+
+  it("keeps bounded command evidence and numeric exit metadata when output truncates", async () => {
+    const context = await fixture();
+    await installCommandFixture(context.root, {
+      command: "pnpm test",
+      aggregatedOutput: "x".repeat(40 * 1024),
+      exitCode: 17,
+      status: "failed"
+    });
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const command = detail(context.dataRoot, result.runId).events
+      .find(({ kind }) => kind === "command");
+
+    expect(command?.normalizedPayload).toMatchObject({
+      truncated: true,
+      exitCode: 17,
+      commandEvidence: {
+        state: "available",
+        redactedCommand: "pnpm test"
+      }
+    });
+  });
+
+  it("omits command evidence without retaining redactedCommand when the redacted UTF-8 value exceeds 16 KiB", async () => {
+    const context = await fixture();
+    await installCommandFixture(context.root, {
+      command: `pnpm test ${"🙂".repeat(4_096)}`
+    });
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const command = detail(context.dataRoot, result.runId).events
+      .find(({ kind }) => kind === "command");
+    const normalized = command?.normalizedPayload as {
+      commandEvidence?: Record<string, unknown>;
+    } | undefined;
+
+    expect(normalized?.commandEvidence).toEqual({
+      state: "omitted",
+      reason: "capture-bound"
+    });
+    expect(normalized?.commandEvidence).not.toHaveProperty("redactedCommand");
   });
 
   it("persists malformed stdout, unknown provider records, and stderr without losing the run", async () => {

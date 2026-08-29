@@ -59,7 +59,8 @@ const derivationSchema = z.object({
   name: z.string().min(1),
   version: z.string().min(1),
   sourceEventIds: z.array(z.string().min(1)).min(1),
-  confidence: z.enum(["high", "medium", "low"]).optional()
+  confidence: z.enum(["high", "medium", "low"]).optional(),
+  identity: z.string().min(1).optional()
 });
 
 const canonicalEventFields = {

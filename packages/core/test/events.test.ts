@@ -91,6 +91,36 @@ describe("frozen event evidence contracts", () => {
     ).toBeTruthy();
   });
 
+  it("preserves an optional derivation identity without requiring it from legacy derived events", () => {
+    const sourceEventId = "fixture-event-a";
+    const legacy = traceEventV1Schema.parse({
+      ...validEvent,
+      provenance: "derived",
+      relationships: [{ type: "derived_from", eventId: sourceEventId }],
+      derivation: {
+        name: "run-reconciliation",
+        version: "1",
+        sourceEventIds: [sourceEventId]
+      }
+    });
+    const identified = traceEventV1Schema.parse({
+      ...validEvent,
+      provenance: "derived",
+      relationships: [{ type: "derived_from", eventId: sourceEventId }],
+      derivation: {
+        name: "test-command",
+        version: "1",
+        sourceEventIds: [sourceEventId],
+        identity: "agentlens-derivation-sha256:fixture"
+      }
+    });
+
+    expect(legacy.derivation).not.toHaveProperty("identity");
+    expect(identified.derivation).toMatchObject({
+      identity: "agentlens-derivation-sha256:fixture"
+    });
+  });
+
   it("supports redacted inline, artifact, and omitted native payloads", () => {
     for (const nativePayload of [
       { storage: "inline", redacted: { future_field: 7 } },

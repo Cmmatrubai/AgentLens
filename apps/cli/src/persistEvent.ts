@@ -10,10 +10,63 @@ import {
   type RedactionAudit,
   type TraceEventV1
 } from "@agentlens/core";
+import {
+  MAX_COMMAND_EVIDENCE_BYTES,
+  type CommandEvidence
+} from "@agentlens/derivations";
 import type { RunRepository } from "@agentlens/storage";
 
 const INLINE_NATIVE_BYTES = 32 * 1024;
 const INLINE_NORMALIZED_BYTES = 32 * 1024;
+
+function asObject(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Readonly<Record<string, unknown>>;
+}
+
+function isObservedCommand(draft: EventDraftV1): boolean {
+  return draft.provenance === "observed" && draft.kind === "command";
+}
+
+function omittedCommandEvidence(
+  reason: "metadata-only" | "strict" | "capture-bound"
+): CommandEvidence {
+  return Object.freeze({ state: "omitted" as const, reason });
+}
+
+function commandEvidenceFromRedacted(
+  draft: EventDraftV1,
+  redactedNormalized: unknown
+): CommandEvidence | undefined {
+  if (!isObservedCommand(draft)) return undefined;
+  const command = asObject(redactedNormalized)?.command;
+  if (
+    typeof command !== "string" ||
+    Buffer.byteLength(command, "utf8") > MAX_COMMAND_EVIDENCE_BYTES
+  ) {
+    return omittedCommandEvidence("capture-bound");
+  }
+  return Object.freeze({ state: "available" as const, redactedCommand: command });
+}
+
+function withCommandEvidence(payload: unknown, evidence: CommandEvidence | undefined): unknown {
+  if (!evidence) return payload;
+  return { ...(asObject(payload) ?? {}), commandEvidence: evidence };
+}
+
+function truncatedCommandFields(
+  redactedNormalized: unknown,
+  evidence: CommandEvidence | undefined
+): Record<string, unknown> {
+  if (!evidence) return {};
+  const exitCode = asObject(redactedNormalized)?.exitCode;
+  return {
+    ...(typeof exitCode === "number" ? { exitCode } : {}),
+    commandEvidence: evidence
+  };
+}
 
 export interface PersistEventContext {
   readonly runId: string;
@@ -110,13 +163,29 @@ export async function persistEventDraft(
         runId: context.runId
       });
       if (normalized.storage !== "content") throw new Error("Standard normalized payload was omitted.");
+      const commandEvidence = commandEvidenceFromRedacted(draft, normalized.redacted);
       normalizedPayload = normalized.redactedBytes.byteLength <= INLINE_NORMALIZED_BYTES
-        ? normalized.redacted
-        : { ...structuralNormalized(draft), truncated: true };
+        ? withCommandEvidence(normalized.redacted, commandEvidence)
+        : {
+            ...structuralNormalized(draft),
+            ...truncatedCommandFields(normalized.redacted, commandEvidence),
+            truncated: true
+          };
       normalizedAudits = normalized.audits;
     } else {
-      normalizedPayload = structuralNormalized(draft);
+      normalizedPayload = withCommandEvidence(
+        structuralNormalized(draft),
+        isObservedCommand(draft)
+          ? omittedCommandEvidence(context.capturePolicy)
+          : undefined
+      );
     }
+  } else if (isObservedCommand(draft)) {
+    normalizedPayload = {
+      commandEvidence: context.capturePolicy === "standard"
+        ? omittedCommandEvidence("capture-bound")
+        : omittedCommandEvidence(context.capturePolicy)
+    };
   }
 
   let nativePayload: NativePayloadRefV1 | undefined;

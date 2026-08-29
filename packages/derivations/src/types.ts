@@ -1,5 +1,12 @@
 import type { EventStatus } from "@agentlens/core";
 
+export type CommandEvidence =
+  | Readonly<{ state: "available"; redactedCommand: string }>
+  | Readonly<{
+      state: "omitted";
+      reason: "metadata-only" | "strict" | "capture-bound";
+    }>;
+
 export interface ObservedCommand {
   readonly command: string;
   readonly exitCode: number | null;
