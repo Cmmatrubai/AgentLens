@@ -10,6 +10,7 @@
   "include": ["src/**/*.ts"],
   "references": [
     { "path": "../../packages/core" },
+    { "path": "../../packages/derivations" },
     { "path": "../../packages/storage" },
     { "path": "../../packages/codex" }
   ]

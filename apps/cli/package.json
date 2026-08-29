@@ -8,6 +8,7 @@
   "dependencies": {
     "@agentlens/codex": "workspace:*",
     "@agentlens/core": "workspace:*",
+    "@agentlens/derivations": "workspace:*",
     "@agentlens/storage": "workspace:*"
   }
 }
