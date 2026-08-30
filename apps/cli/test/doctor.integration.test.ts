@@ -289,6 +289,35 @@ describe("doctor storage inspection", () => {
     expect(await snapshot(context.dataRoot)).toEqual(before);
   });
 
+  it("classifies an unreadable exact regular WAL before unrelated storage checks", async () => {
+    const context = await fixture();
+    await mkdir(context.dataRoot, { mode: 0o700 });
+    const walPath = join(context.dataRoot, "agentlens.sqlite-wal");
+    await writeFile(walPath, "UNREADABLE_WAL_SENTINEL", { mode: 0o600 });
+    await chmod(walPath, 0o000);
+    const before = await lstat(walPath, { bigint: true });
+
+    const result = await diagnoseDoctor(context.dataRoot, nonStorageDependencies());
+
+    expect(named(result, "sqlite")).toMatchObject({
+      status: "fail",
+      metadata: { code: "wal_present" }
+    });
+    expect(named(result, "redaction_key")).toMatchObject({
+      status: "warn",
+      metadata: { code: "not_initialized" }
+    });
+    expect(JSON.stringify(result)).not.toContain("UNREADABLE_WAL_SENTINEL");
+    expect(await lstat(walPath, { bigint: true })).toMatchObject({
+      mode: before.mode,
+      uid: before.uid,
+      gid: before.gid,
+      size: before.size,
+      mtimeNs: before.mtimeNs,
+      ino: before.ino
+    });
+  });
+
   it.each([
     ["secrets", async (dataRoot: string) => mkdir(join(dataRoot, "secrets"), { mode: 0o700 })],
     ["redaction key", async (dataRoot: string) => {
@@ -449,6 +478,59 @@ describe("doctor storage inspection", () => {
     expect(JSON.stringify(result)).not.toContain("EXTERNAL_ROOT_SENTINEL");
     expect(await snapshot(context.dataRoot)).toEqual(beforeLink);
     expect(await snapshot(outside)).toEqual(beforeOutside);
+  });
+
+  it("refuses a symlink in the requested data-root parent path without following it", async () => {
+    const context = await fixture();
+    const externalParent = join(context.root, "external-parent");
+    const externalDataRoot = join(externalParent, "data");
+    const linkedParent = join(context.root, "linked-parent");
+    await initializeCurrent(externalDataRoot);
+    await symlink(externalParent, linkedParent);
+    const requestedDataRoot = join(linkedParent, "data");
+    const beforeLink = await snapshot(linkedParent);
+    const beforeOutside = await snapshot(externalParent);
+
+    const result = await diagnoseDoctor(requestedDataRoot, nonStorageDependencies());
+
+    expect(named(result, "data_root")).toMatchObject({
+      status: "fail",
+      metadata: { code: "root_symlink" }
+    });
+    expect(named(result, "sqlite")).toMatchObject({
+      status: "fail",
+      metadata: { code: "root_invalid" }
+    });
+    expect(await snapshot(linkedParent)).toEqual(beforeLink);
+    expect(await snapshot(externalParent)).toEqual(beforeOutside);
+  });
+
+  it("classifies a parent symlink before inspecting its inaccessible target", async () => {
+    const context = await fixture();
+    const externalParent = join(context.root, "inaccessible-external-parent");
+    const linkedParent = join(context.root, "linked-inaccessible-parent");
+    await mkdir(externalParent, { mode: 0o700 });
+    await chmod(externalParent, 0o000);
+    await symlink(externalParent, linkedParent);
+    const before = await lstat(externalParent, { bigint: true });
+
+    const result = await diagnoseDoctor(
+      join(linkedParent, "data"),
+      nonStorageDependencies()
+    );
+
+    expect(named(result, "data_root")).toMatchObject({
+      status: "fail",
+      metadata: { code: "root_symlink" }
+    });
+    expect(await lstat(externalParent, { bigint: true })).toMatchObject({
+      mode: before.mode,
+      uid: before.uid,
+      gid: before.gid,
+      size: before.size,
+      mtimeNs: before.mtimeNs,
+      ino: before.ino
+    });
   });
 
   it.each([
@@ -794,6 +876,25 @@ describe("doctor local readiness probes and privacy", () => {
     expect(JSON.stringify(result)).not.toMatch(/RAW_(STDOUT|STDERR|INVALID)_/);
   });
 
+  it("rejects invalid UTF-8 even when later stdout bytes contain a semantic version", async () => {
+    const context = await fixture();
+    const bin = join(context.root, "bin");
+    await mkdir(bin);
+    await writeExecutable(join(bin, "codex"), `
+      process.stdout.write(Buffer.from([0xff, 0x20, 0x31, 0x2e, 0x32, 0x2e, 0x33, 0x0a]));
+    `);
+
+    const result = await diagnoseDoctor(context.dataRoot, nonStorageDependencies({
+      codexVersion: undefined,
+      codexEnvironment: { ...process.env, PATH: bin }
+    }));
+
+    expect(named(result, "codex")).toMatchObject({
+      status: "fail",
+      metadata: { code: "version_invalid" }
+    });
+  });
+
   it("maps an inaccessible local Codex executable to spawn_failed", async () => {
     const context = await fixture();
     const bin = join(context.root, "bin");
@@ -854,6 +955,52 @@ describe("doctor local readiness probes and privacy", () => {
     expect(named(result, "codex")).toMatchObject({ status: "fail", metadata: { code } });
     expect(JSON.stringify(result)).not.toContain("OVERFLOW_RAW_SENTINEL");
     await waitForProcessExit(pid);
+  }, 10_000);
+
+  it("bounds timeout cleanup for a Codex descendant that inherits stdio", async () => {
+    const context = await fixture();
+    const bin = join(context.root, "bin");
+    const descendantPidFile = join(context.root, "descendant-pid");
+    await mkdir(bin);
+    await writeExecutable(join(bin, "codex"), `
+      const { spawn } = require("node:child_process");
+      const { writeFileSync } = require("node:fs");
+      const descendant = spawn(process.execPath, ["-e", [
+        "process.on('SIGTERM', () => {});",
+        "setInterval(() => {}, 1000);"
+      ].join("")], { stdio: ["ignore", "inherit", "inherit"] });
+      writeFileSync(process.env.DOCTOR_DESCENDANT_PID_FILE, String(descendant.pid));
+      process.on("SIGTERM", () => {});
+      setInterval(() => {}, 1000);
+    `);
+
+    const watchdog = setTimeout(async () => {
+      try {
+        const pid = Number(await readFile(descendantPidFile, "utf8"));
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // The fixed implementation should have already removed the descendant.
+      }
+    }, 4_500);
+    const startedAt = Date.now();
+    const result = await diagnoseDoctor(context.dataRoot, nonStorageDependencies({
+      codexVersion: undefined,
+      codexEnvironment: {
+        ...process.env,
+        PATH: bin,
+        DOCTOR_DESCENDANT_PID_FILE: descendantPidFile
+      }
+    }));
+    const elapsedMs = Date.now() - startedAt;
+    const descendantPid = Number(await readFile(descendantPidFile, "utf8"));
+    clearTimeout(watchdog);
+
+    expect(named(result, "codex")).toMatchObject({
+      status: "fail",
+      metadata: { code: "timeout" }
+    });
+    expect(elapsedMs).toBeLessThan(4_000);
+    await waitForProcessExit(descendantPid);
   }, 10_000);
 
   it.each([false, true])("uses exact loopback bind and leaves no listener after close failure=%s", async (

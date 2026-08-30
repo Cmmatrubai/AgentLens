@@ -97,7 +97,7 @@ Exit        0
 
 pnpm vitest --run apps/cli/test/packagedBinary.integration.test.ts apps/cli/test/readOnlyDataRoot.test.ts packages/storage/test/readOnlyDatabase.test.ts
 Test Files  3 passed (3)
-Tests       73 passed (73)
+Tests       23 passed (23)
 Exit        0
 
 pnpm vitest --run apps/cli/test
@@ -123,6 +123,74 @@ against an explicitly created temporary parent. It exited zero with `overall:
 and passed the process-group and loopback probes. The missing data root remained
 absent after the command.
 
+### Independent-review fix round
+
+Fix-round base: `a84cfba7d6afad036b6d6c52b5872da095c84141`
+
+The controller added four permanent integration regressions and reproduced the
+candidate defects. The untouched fix-round RED was reproduced exactly:
+
+```text
+pnpm vitest --run apps/cli/test/doctor.integration.test.ts
+Test Files  1 failed (1)
+Tests       4 failed | 60 passed (64)
+Exit        1
+```
+
+The failures showed direct-PID-only Codex cleanup waiting for an inherited
+stdio descendant until an external watchdog (4,502 ms); a same-owner parent
+symlink reaching an initialized external root and reporting `ok`; replacement
+UTF-8 decoding accepting a later `1.2.3` token after invalid bytes; and a mode
+`000` exact regular WAL being classified `path_inspection_failed` instead of
+the mandatory `wal_present`.
+
+Each controller regression passed alone after its minimal production fix. The
+first aggregate attempt then exposed a containment false positive: macOS temp
+paths lexically use the root-owned `/var` system alias, so an unbounded
+filesystem-root component walk incorrectly classified 48 existing storage tests
+as root failures. The implementation was corrected to validate the
+current-user-owned ancestor boundary and trust the first differently owned
+ancestor. A further parent-first ordering regression went RED before the final
+fix:
+
+```text
+pnpm vitest --run apps/cli/test/doctor.integration.test.ts -t 'classifies a parent symlink before inspecting its inaccessible target'
+Test Files  1 failed (1)
+Tests       1 failed | 64 skipped (65)
+Exit        1
+```
+
+This proved an inaccessible external target could not mask the nearer stable
+`root_symlink` classification. Final fresh fix-round gates were:
+
+```text
+pnpm vitest --run apps/cli/test/doctor.test.ts apps/cli/test/doctor.integration.test.ts apps/cli/test/args.test.ts
+Test Files  3 passed (3)
+Tests       127 passed (127)
+Exit        0
+
+pnpm vitest --run apps/cli/test/packagedBinary.integration.test.ts apps/cli/test/readOnlyDataRoot.test.ts packages/storage/test/readOnlyDatabase.test.ts
+Test Files  3 passed (3)
+Tests       23 passed (23)
+Exit        0
+
+pnpm vitest --run apps/cli/test
+Test Files  20 passed (20)
+Tests       395 passed (395)
+Exit        0
+
+pnpm test
+Test Files  38 passed (38)
+Tests       773 passed (773)
+Exit        0
+
+pnpm typecheck
+Exit        0
+
+git diff --check
+Exit        0
+```
+
 ## Implemented contract
 
 - `agentlens doctor [--data-root PATH] [--json]` is part of the public CLI
@@ -137,6 +205,10 @@ absent after the command.
 - Filesystem diagnosis uses lstat plus no-follow opens and handle identity
   checks. It examines type, ownership, mode, symlink boundaries, bounded tree
   shape, and metadata only; it never reads secret or artifact payload bytes.
+- On supported POSIX, requested-root containment checks the same-owner ancestor
+  chain parent-first and rejects symlink/non-directory substitution before
+  storage inspection. The first differently owned ancestor is the trusted
+  platform boundary, preserving valid system aliases such as macOS `/var`.
 - Sensitive path traversal is bounded to 10,000 entries by default and reports
   stable classifications/counts without leaking secret values, artifact
   content, external symlink targets, or untrusted OS error text.
@@ -147,9 +219,10 @@ absent after the command.
   classifications.
 - The Codex probe spawns exactly `codex --version` without a shell, closes stdin,
   bounds stdout and stderr to 8 KiB, applies a three-second timeout, terminates
-  and awaits the child on failure, and accepts only a bounded semantic-version
-  token. Missing, nonzero, invalid, overflow, timeout, and other spawn failures
-  remain distinct stable results.
+  and awaits the owned process group on POSIX (or direct child fallback), and
+  accepts only a bounded semantic-version token from fatal UTF-8 decoding.
+  Missing, nonzero, invalid, overflow, timeout, and other spawn failures remain
+  distinct stable results.
 - Process-group support is a local platform capability check. Loopback binds
   only `127.0.0.1` on an ephemeral port and always closes the listener.
 - Production probes are dependency-injectable and the pure diagnosis coordinator
@@ -175,8 +248,15 @@ Storage schemas, migrations, repositories, derivations, adapters, read-only
 - Filesystem observations are point-in-time. The accepted same-owner pathname
   replacement residual remains; no claim is made that validation across
   multiple path operations is globally atomic.
+- Ancestors beyond the first differently owned component are a trusted platform
+  boundary. When POSIX uid inspection is unavailable, doctor checks the final
+  root node but cannot truthfully establish ancestor ownership and retains the
+  existing `platform_unsupported` warnings.
 - WAL handling intentionally fails closed. Doctor does not checkpoint, remove,
   or infer that a present WAL is stale.
+- Owned descendant cleanup uses POSIX process groups. Non-POSIX hosts retain the
+  direct-child fallback and the separate `process_groups` limitation warning;
+  doctor does not claim process-tree support there.
 - Capability probes report the state observed during the command and do not
   promise future process-group, executable, filesystem, or port availability.
 - No storage/SQLite repair, migration, or durable mutation is attempted.

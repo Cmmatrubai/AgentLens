@@ -3,7 +3,8 @@ import { constants as fileConstants } from "node:fs";
 import { lstat, open, opendir, type FileHandle } from "node:fs/promises";
 import { constants as osConstants } from "node:os";
 import { createServer } from "node:net";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { TextDecoder } from "node:util";
 
 import {
   openDatabaseReadOnly,
@@ -178,7 +179,7 @@ async function closeHandle(handle: FileHandle): Promise<void> {
   }
 }
 
-async function inspectPath(path: string): Promise<InspectedPath> {
+async function inspectPathMetadata(path: string): Promise<InspectedPath> {
   let pathStats;
   try {
     pathStats = await lstat(path, { bigint: true });
@@ -188,40 +189,6 @@ async function inspectPath(path: string): Promise<InspectedPath> {
     throw new StableInspectionError("path_inspection_failed");
   }
   const kind = pathKind(pathStats as unknown as Awaited<ReturnType<typeof lstat>>);
-  if (kind === "symlink" || kind === "other") {
-    return Object.freeze({
-      exists: true,
-      kind,
-      mode: Number(pathStats.mode),
-      uid: Number(pathStats.uid),
-      dev: pathStats.dev,
-      ino: pathStats.ino
-    });
-  }
-
-  let handle: FileHandle;
-  try {
-    handle = await open(
-      path,
-      fileConstants.O_RDONLY |
-        fileConstants.O_NOFOLLOW |
-        (kind === "directory" ? fileConstants.O_DIRECTORY : 0)
-    );
-  } catch {
-    throw new StableInspectionError("path_inspection_failed");
-  }
-  try {
-    const handleStats = await handle.stat({ bigint: true });
-    if (
-      (kind === "directory" ? !handleStats.isDirectory() : !handleStats.isFile()) ||
-      handleStats.dev !== pathStats.dev ||
-      handleStats.ino !== pathStats.ino
-    ) {
-      throw new StableInspectionError("path_identity_changed");
-    }
-  } finally {
-    await closeHandle(handle);
-  }
   return Object.freeze({
     exists: true,
     kind,
@@ -230,6 +197,71 @@ async function inspectPath(path: string): Promise<InspectedPath> {
     dev: pathStats.dev,
     ino: pathStats.ino
   });
+}
+
+async function inspectPath(path: string): Promise<InspectedPath> {
+  const metadata = await inspectPathMetadata(path);
+  if (!metadata.exists || metadata.kind === "symlink" || metadata.kind === "other") {
+    return metadata;
+  }
+
+  let handle: FileHandle;
+  try {
+    handle = await open(
+      path,
+      fileConstants.O_RDONLY |
+        fileConstants.O_NOFOLLOW |
+        (metadata.kind === "directory" ? fileConstants.O_DIRECTORY : 0)
+    );
+  } catch {
+    throw new StableInspectionError("path_inspection_failed");
+  }
+  try {
+    const handleStats = await handle.stat({ bigint: true });
+    if (
+      (metadata.kind === "directory" ? !handleStats.isDirectory() : !handleStats.isFile()) ||
+      handleStats.dev !== metadata.dev ||
+      handleStats.ino !== metadata.ino
+    ) {
+      throw new StableInspectionError("path_identity_changed");
+    }
+  } finally {
+    await closeHandle(handle);
+  }
+  return metadata;
+}
+
+async function requestedRootBoundary(
+  dataRoot: string,
+  uid: number | null
+): Promise<"root_symlink" | "root_invalid" | null> {
+  if (uid !== null) {
+    let current = dirname(dataRoot);
+    while (true) {
+      const inspected = await inspectPathMetadata(current);
+      if (inspected.exists) {
+        if (inspected.uid !== uid) break;
+        if (inspected.kind === "symlink") return "root_symlink";
+        if (inspected.kind !== "directory") return "root_invalid";
+      }
+      const parent = dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+  const root = await inspectPathMetadata(dataRoot);
+  return root.exists && root.kind === "symlink" ? "root_symlink" : null;
+}
+
+function rootBoundaryChecks(
+  dataRootCode: "root_symlink" | "root_invalid"
+): readonly DoctorCheck[] {
+  return Object.freeze([
+    doctorCheck("data_root", "fail", dataRootCode),
+    doctorCheck("sensitive_paths", "fail", "root_invalid"),
+    doctorCheck("redaction_key", "fail", "root_invalid"),
+    doctorCheck("sqlite", "fail", "root_invalid")
+  ]);
 }
 
 function currentUid(dependencies: DoctorDependencies): number | null {
@@ -438,7 +470,7 @@ async function inspectStorageChecks(
       inspectPath(paths.secrets),
       inspectPath(paths.artifacts),
       inspectPath(paths.database),
-      inspectPath(paths.wal),
+      inspectPathMetadata(paths.wal),
       inspectPath(paths.shm)
     ]);
     const key = secrets.exists && secrets.kind === "directory"
@@ -602,7 +634,13 @@ function signalNumber(signal: NodeJS.Signals | null): number | null {
 
 function semanticVersion(stdout: Buffer): string | null {
   const semanticVersionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?$/;
-  for (const token of stdout.toString("utf8").split(/\s+/u)) {
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(stdout);
+  } catch {
+    return null;
+  }
+  for (const token of decoded.split(/\s+/u)) {
     if (Buffer.byteLength(token, "utf8") <= 128 && semanticVersionPattern.test(token)) return token;
   }
   return null;
@@ -610,9 +648,11 @@ function semanticVersion(stdout: Buffer): string | null {
 
 async function systemCodexVersion(environment?: NodeJS.ProcessEnv): Promise<CodexVersionProbe> {
   return await new Promise<CodexVersionProbe>((resolveProbe) => {
+    const usesProcessGroup = process.platform !== "win32";
     const child = spawn("codex", ["--version"], {
       env: environment ?? process.env,
       shell: false,
+      detached: usesProcessGroup,
       stdio: ["pipe", "pipe", "pipe"]
     });
     child.stdin.end();
@@ -623,11 +663,23 @@ async function systemCodexVersion(environment?: NodeJS.ProcessEnv): Promise<Code
     let spawnError: unknown;
     let killTimer: NodeJS.Timeout | undefined;
 
+    const childIsOpen = (): boolean =>
+      child.pid !== undefined && child.exitCode === null && child.signalCode === null;
+    const signalOwnedProcesses = (signal: NodeJS.Signals): void => {
+      if (usesProcessGroup && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // Fall back to the direct child when group signaling is unavailable.
+        }
+      }
+      if (childIsOpen()) child.kill(signal);
+    };
     const terminate = (): void => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      child.kill("SIGTERM");
+      signalOwnedProcesses("SIGTERM");
       killTimer ??= setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        signalOwnedProcesses("SIGKILL");
       }, 250);
     };
     const timeout = setTimeout(() => {
@@ -778,11 +830,14 @@ export async function diagnoseDoctor(
   const dataRoot = resolve(requestedDataRoot);
   let storage: readonly DoctorCheck[];
   try {
-    storage = normalizedStorageChecks(await (
-      dependencies.storageChecks ?? ((root) => inspectStorageChecks(root, dependencies))
-    )(dataRoot));
+    const boundaryCode = await requestedRootBoundary(dataRoot, currentUid(dependencies));
+    storage = boundaryCode === null
+      ? normalizedStorageChecks(await (
+          dependencies.storageChecks ?? ((root) => inspectStorageChecks(root, dependencies))
+        )(dataRoot))
+      : rootBoundaryChecks(boundaryCode);
   } catch {
-    storage = storageCheckIds.map((id) => doctorCheck(id, "fail", "probe_failed"));
+    storage = rootBoundaryChecks("root_invalid");
   }
   const [codex, processGroups, loopback] = await Promise.all([
     inspectCodex(dependencies),
