@@ -36,7 +36,18 @@ export interface AssessCommand {
   readonly json: boolean;
 }
 
-export type AgentLensCommand = RecordCommand | RunsCommand | InspectCommand | AssessCommand;
+export interface DoctorCommand {
+  readonly name: "doctor";
+  readonly dataRoot: string;
+  readonly json: boolean;
+}
+
+export type AgentLensCommand =
+  | RecordCommand
+  | RunsCommand
+  | InspectCommand
+  | AssessCommand
+  | DoctorCommand;
 
 const defaultDataRoot = join(homedir(), ".agentlens");
 const assessmentVerdicts = ["unreviewed", "success", "partial", "failure"] as const;
@@ -209,6 +220,30 @@ function assessCommand(argv: readonly string[]): AssessCommand {
   };
 }
 
+function doctorCommand(argv: readonly string[]): DoctorCommand {
+  let dataRoot = defaultDataRoot;
+  let json = false;
+  const seen = new Set<string>();
+  const claim = (option: string): void => {
+    if (seen.has(option)) throw new Error(`Duplicate doctor option: ${option}.`);
+    seen.add(option);
+  };
+  for (let index = 1; index < argv.length; index += 1) {
+    const option = argv[index];
+    if (option === "--data-root") {
+      claim(option);
+      dataRoot = requiredValue(argv, index, option);
+      index += 1;
+    } else if (option === "--json") {
+      claim(option);
+      json = true;
+    } else {
+      throw new Error(`Unknown option for doctor: ${option ?? ""}.`);
+    }
+  }
+  return { name: "doctor", dataRoot, json };
+}
+
 export function parseAgentLensArgs(argv: readonly string[]): AgentLensCommand {
   switch (argv[0]) {
     case "record":
@@ -219,7 +254,9 @@ export function parseAgentLensArgs(argv: readonly string[]): AgentLensCommand {
       return inspectCommand(argv);
     case "assess":
       return assessCommand(argv);
+    case "doctor":
+      return doctorCommand(argv);
     default:
-      throw new Error("Usage: agentlens <record|runs|inspect|assess> ...");
+      throw new Error("Usage: agentlens <record|runs|inspect|assess|doctor> ...");
   }
 }

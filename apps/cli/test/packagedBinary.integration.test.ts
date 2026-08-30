@@ -77,12 +77,42 @@ describe("packaged AgentLens binary", () => {
       maxBuffer: 10 * 1024 * 1024
     });
     const dataRoot = join(root, "data");
+    const bin = join(root, "doctor-bin");
+    await mkdir(bin);
+    await writeFile(
+      join(bin, "codex"),
+      "#!/usr/bin/env node\nprocess.stdout.write('codex-cli 1.2.3\\n');\n",
+      "utf8"
+    );
+    await chmod(join(bin, "codex"), 0o700);
 
     const result = await execFile("pnpm", [
       "agentlens", "--", "runs", "--data-root", dataRoot, "--json"
     ], { cwd: checkout, encoding: "utf8" });
 
     expect(JSON.parse(result.stdout)).toEqual({ runs: [] });
+
+    const doctor = await execFile("pnpm", [
+      "agentlens", "--", "doctor", "--data-root", dataRoot, "--json"
+    ], {
+      cwd: checkout,
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` }
+    });
+    expect(JSON.parse(doctor.stdout)).toMatchObject({
+      schemaVersion: 1,
+      overall: "warn",
+      dataRoot,
+      checks: [
+        { id: "data_root", status: "warn", metadata: { code: "not_initialized" } },
+        { id: "sensitive_paths", status: "warn", metadata: { code: "not_initialized" } },
+        { id: "redaction_key", status: "warn", metadata: { code: "not_initialized" } },
+        { id: "sqlite", status: "warn", metadata: { code: "not_initialized" } },
+        { id: "codex", status: "pass", metadata: { code: "ok", version: "1.2.3" } },
+        { id: "process_groups" },
+        { id: "loopback", status: "pass", metadata: { code: "ok", host: "127.0.0.1" } }
+      ]
+    });
   }, 120_000);
 
   it("runs the compiled Node-shebang entry without tsx or source .js resolution", async () => {
@@ -102,6 +132,14 @@ describe("packaged AgentLens binary", () => {
     await copyFile(fakeCodex, join(bin, "codex"));
     await chmod(join(bin, "codex"), 0o700);
     const env = { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` };
+    const doctorBin = join(root, "doctor-bin");
+    await mkdir(doctorBin);
+    await writeFile(
+      join(doctorBin, "codex"),
+      "#!/usr/bin/env node\nprocess.stdout.write('codex-cli 4.5.6\\n');\n",
+      "utf8"
+    );
+    await chmod(join(doctorBin, "codex"), 0o700);
 
     expect((await readFile(compiledMain, "utf8")).split("\n")[0]).toBe("#!/usr/bin/env node");
     const recorded = await plainNode([
@@ -124,6 +162,31 @@ describe("packaged AgentLens binary", () => {
     expect(listed).toMatchObject({ exitCode: 0, stderr: "" });
     expect(JSON.parse(listed.stdout)).toMatchObject({
       runs: [{ status: "completed", child: { exitCode: 0, terminatingSignal: null } }]
+    });
+
+    const doctor = await plainNode([
+      compiledMain,
+      "doctor",
+      "--data-root", dataRoot,
+      "--json"
+    ], repo, {
+      ...process.env,
+      PATH: `${doctorBin}${delimiter}${process.env.PATH ?? ""}`
+    });
+    expect(doctor).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(JSON.parse(doctor.stdout)).toMatchObject({
+      schemaVersion: 1,
+      overall: "pass",
+      dataRoot,
+      checks: [
+        { id: "data_root" },
+        { id: "sensitive_paths" },
+        { id: "redaction_key", status: "pass", metadata: { code: "ok" } },
+        { id: "sqlite", status: "pass" },
+        { id: "codex", status: "pass", metadata: { version: "4.5.6" } },
+        { id: "process_groups" },
+        { id: "loopback" }
+      ]
     });
   });
 

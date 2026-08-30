@@ -59,6 +59,35 @@ describe("AgentLens argument parsing", () => {
     expect(() => parseAgentLensArgs(["runs", "--future-option"])).toThrow(/unknown option/i);
   });
 
+  it("parses doctor with the shared data-root default and JSON option", () => {
+    expect(parseAgentLensArgs(["doctor"])).toEqual({
+      name: "doctor",
+      dataRoot: expect.any(String),
+      json: false
+    });
+    expect(parseAgentLensArgs([
+      "doctor", "--data-root", "/tmp/doctor-data", "--json"
+    ])).toEqual({
+      name: "doctor",
+      dataRoot: "/tmp/doctor-data",
+      json: true
+    });
+  });
+
+  it.each([
+    [["doctor", "--data-root"], /requires a value/i],
+    [["doctor", "--future-option"], /unknown.*doctor/i],
+    [["doctor", "positional"], /unknown.*doctor|positional/i],
+    [["doctor", "--data-root", "/tmp/one", "--data-root", "/tmp/two"], /duplicate/i],
+    [["doctor", "--json", "--json"], /duplicate/i]
+  ] as const)("refuses an invalid doctor invocation %#", (argv, message) => {
+    expect(() => parseAgentLensArgs(argv)).toThrow(message);
+  });
+
+  it("includes doctor in the public usage error", () => {
+    expect(() => parseAgentLensArgs(["future-command"])).toThrow(/doctor/i);
+  });
+
   it.each(["unreviewed", "success", "partial", "failure"] as const)(
     "parses the %s assessment verdict",
     (verdict) => {
