@@ -90,3 +90,64 @@ Manual scope/privacy review found no database, filesystem, repository, artifact-
 - No Task 6.6 contract deviation is known.
 - The summary intentionally normalizes only the currently observed v1 token fields. A future provider or adapter that adds different durable token keys will need an explicit provider-neutral mapping rather than being guessed at read time.
 - Independent review was not dispatched from this task because the assignment explicitly prohibited subagents; the controller retains the normal independent review gate before Task 6.6 acceptance.
+
+# Task 6.6 fix round 1: exact derived semantics and recorder spans
+
+## Review findings reproduced
+
+- A deterministic `test.result` row for a failed `pnpm test` source could retain the correct identity/relationship while forging `outcome: passed`; the summary counted it as complete and projected latest passed.
+- `endedAt < startedAt` was clamped to available zero, turning an invalid recorder interval into apparently known evidence.
+
+## RED
+
+Added adversarial cases for forged `test.command` family, confidence, status, and provider; forged `test.result` family, confidence, outcome, status, exit code, and provider; and a negative recorder timestamp span.
+
+    pnpm vitest --run packages/derivations/test/runSummary.test.ts
+
+Result: exit 1; 32 tests ran, 11 expected tests failed and 21 passed. All ten forged rows were counted as complete; the forged result outcome was trusted as passed; and the negative span returned available zero.
+
+A scope-review follow-up tested an inconsistent observed-event provider separately:
+
+    pnpm vitest --run packages/derivations/test/runSummary.test.ts -t "validates derived source provider against the run provider"
+
+Result: exit 1; the one selected test failed and 32 were skipped. Rows carrying the inconsistent observed provider were incorrectly counted as complete instead of being checked against the durable run provider.
+
+## Fix decisions
+
+- Deterministic ID/identity/relationship checks remain the first durable-row gate.
+- Standard available command evidence supplies the current classifier result. Each structurally matching row is then compared to the pure expected draft for the durable run provider, event status, derivation confidence, and the exact normalized payload, including family, confidence, `test-command/1`, result outcome, and exact optional exit code. Rendered summaries are not compared.
+- When command content is unavailable under metadata-only, strict, or durable standard omission, classification is inferred only from structured durable derivation payloads. Candidate command/result classifications must agree, and the same source-provider/status/payload invariants are checked using non-content source facts. No omitted command property is read.
+- A standard source that currently classifies as a non-test cannot be revived by an unrelated durable row. A positively classified standard source remains a detected attempt even when zero derived rows validate, preserving crash-gap `missingExpected: 2` semantics.
+- Negative recorder spans are unavailable with null value/provenance. Equal timestamps remain available known zero.
+
+The first GREEN attempt exposed and contained two implementation-only control-flow errors: a classifier result was accidentally assigned as a boolean, and classified zero-row crash gaps were skipped. The focused suite caught both before commit; the corrected implementation preserves the original gap tests.
+
+## GREEN and verification
+
+    pnpm vitest --run packages/derivations/test/runSummary.test.ts
+
+Result: exit 0; 1 file and 33 tests passed. The targeted run-provider case also passed alone with 32 skips.
+
+    pnpm vitest --run packages/derivations/test
+
+Result: exit 0; 5 files and 121 tests passed.
+
+    pnpm test
+
+Result: exit 0; 31 files and 450 tests passed.
+
+    pnpm typecheck
+
+Result: exit 0 (`tsc -b --pretty false`).
+
+    git diff --check
+
+Result: exit 0 with no output.
+
+## Fix-round files and residual risk
+
+- `packages/derivations/src/runSummary.ts`
+- `packages/derivations/test/runSummary.test.ts`
+- `.superpowers/sdd/2026-08-29-agentlens-task-6/task-6.6-report.md`
+
+No public type change was required. When capture policy has omitted the source command, the summary cannot independently reconstruct the original test family; it therefore validates the durable family/confidence schema, agreement between command/result rows, and every invariant available without reading omitted content. This is the intentional privacy boundary rather than a new correctness claim.

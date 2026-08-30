@@ -2,7 +2,10 @@ import type { TraceEventV1 } from "@agentlens/core";
 
 import { classifyTestCommand } from "./classifyTestCommand.js";
 import { parseCommandEvidence } from "./commandEvidence.js";
-import { derivationIdentity } from "./testDerivations.js";
+import {
+  buildTestDerivationDrafts,
+  derivationIdentity
+} from "./testDerivations.js";
 import type {
   AssessmentNoteProjection,
   HumanAssessmentSummary,
@@ -15,6 +18,8 @@ import type {
   RunSummaryGitReference,
   RunSummaryInput,
   SummaryEvidence,
+  TestCommandClassification,
+  TestDerivationDraft,
   TestDerivedKind,
   TestResultOutcome
 } from "./types.js";
@@ -23,6 +28,18 @@ const DERIVATION_NAME = "test-command";
 const DERIVATION_VERSION = "1";
 const DERIVATION_ID = "test-command/1";
 const IDENTITY_PREFIX = "agentlens-derivation-sha256:";
+const TEST_FAMILIES = new Set<TestCommandClassification["family"]>([
+  "pytest",
+  "jest",
+  "vitest",
+  "npm",
+  "pnpm",
+  "yarn",
+  "cargo",
+  "go",
+  "maven",
+  "gradle"
+]);
 
 function asObject(value: unknown): Readonly<Record<string, unknown>> | undefined {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -233,15 +250,7 @@ function hasExactSourceRelationship(event: TraceEventV1, sourceEventId: string):
     event.derivation.sourceEventIds[0] === sourceEventId;
 }
 
-function payloadHasDerivationId(event: TraceEventV1): boolean {
-  try {
-    return asObject(event.normalizedPayload)?.derivationId === DERIVATION_ID;
-  } catch {
-    return false;
-  }
-}
-
-function matchingDerivedEvent(
+function structurallyMatchingDerivedEvent(
   events: readonly TraceEventV1[],
   source: TraceEventV1,
   kind: TestDerivedKind
@@ -255,9 +264,79 @@ function matchingDerivedEvent(
     event.derivation?.name === DERIVATION_NAME &&
     event.derivation.version === DERIVATION_VERSION &&
     event.derivation.identity === expected.identity &&
-    hasExactSourceRelationship(event, source.id) &&
-    payloadHasDerivationId(event)
+    hasExactSourceRelationship(event, source.id)
   );
+}
+
+function classificationFromDerivedEvent(
+  event: TraceEventV1 | undefined
+): TestCommandClassification | undefined {
+  if (!event) return undefined;
+  try {
+    const payload = asObject(event.normalizedPayload);
+    const family = payload?.family;
+    const confidence = payload?.confidence;
+    if (
+      typeof family !== "string" ||
+      !TEST_FAMILIES.has(family as TestCommandClassification["family"]) ||
+      (confidence !== "high" && confidence !== "medium") ||
+      payload?.derivationId !== DERIVATION_ID ||
+      event.derivation?.confidence !== confidence
+    ) return undefined;
+    return {
+      family: family as TestCommandClassification["family"],
+      confidence,
+      derivationVersion: DERIVATION_ID
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function sameClassification(
+  left: TestCommandClassification,
+  right: TestCommandClassification
+): boolean {
+  return left.family === right.family &&
+    left.confidence === right.confidence &&
+    left.derivationVersion === right.derivationVersion;
+}
+
+function durableClassification(
+  commandEvent: TraceEventV1 | undefined,
+  resultEvent: TraceEventV1 | undefined
+): TestCommandClassification | undefined {
+  const command = classificationFromDerivedEvent(commandEvent);
+  const result = classificationFromDerivedEvent(resultEvent);
+  if (command && result && !sameClassification(command, result)) return undefined;
+  return command ?? result;
+}
+
+function hasExactFlatPayload(actualValue: unknown, expectedValue: unknown): boolean {
+  try {
+    const actual = asObject(actualValue);
+    const expected = asObject(expectedValue);
+    if (!actual || !expected) return false;
+    const actualKeys = Object.keys(actual).sort();
+    const expectedKeys = Object.keys(expected).sort();
+    return actualKeys.length === expectedKeys.length &&
+      actualKeys.every((key, index) =>
+        key === expectedKeys[index] && actual[key] === expected[key]
+      );
+  } catch {
+    return false;
+  }
+}
+
+function hasExpectedSemantics(
+  event: TraceEventV1 | undefined,
+  expected: TestDerivationDraft
+): event is TraceEventV1 {
+  return event !== undefined &&
+    event.source.provider === expected.source.provider &&
+    event.status === expected.status &&
+    event.derivation?.confidence === expected.derivation.confidence &&
+    hasExactFlatPayload(event.normalizedPayload, expected.normalizedPayload);
 }
 
 function numericExitCode(event: TraceEventV1): number | null {
@@ -300,9 +379,17 @@ function likelyTests(input: RunSummaryInput): LikelyTestsSummary {
   let unavailableTerminalCommands = 0;
 
   for (const source of sources) {
-    const commandEvent = matchingDerivedEvent(input.events, source, "test.command");
-    const resultEvent = matchingDerivedEvent(input.events, source, "test.result");
-    let classified = false;
+    const commandCandidate = structurallyMatchingDerivedEvent(
+      input.events,
+      source,
+      "test.command"
+    );
+    const resultCandidate = structurallyMatchingDerivedEvent(
+      input.events,
+      source,
+      "test.result"
+    );
+    let classification: TestCommandClassification | null | undefined;
 
     if (input.run.capturePolicy === "standard") {
       try {
@@ -311,11 +398,11 @@ function likelyTests(input: RunSummaryInput): LikelyTestsSummary {
           omittedTerminalCommands += 1;
           unavailableTerminalCommands += 1;
         } else if (evidence?.state === "available") {
-          classified = classifyTestCommand({
+          classification = classifyTestCommand({
             command: evidence.redactedCommand,
             exitCode: numericExitCode(source),
             eventStatus: source.status
-          }) !== null;
+          });
         } else {
           unavailableTerminalCommands += 1;
         }
@@ -327,12 +414,35 @@ function likelyTests(input: RunSummaryInput): LikelyTestsSummary {
       unavailableTerminalCommands += 1;
     }
 
-    if (!classified && commandEvent === undefined && resultEvent === undefined) continue;
+    if (classification === null) continue;
+    const expectedClassification = classification ??
+      durableClassification(commandCandidate, resultCandidate);
+    if (!expectedClassification) continue;
+
+    const expectedDrafts = buildTestDerivationDrafts({
+      runId: source.runId,
+      sourceEventId: source.id,
+      sourceProvider: input.run.provider,
+      eventStatus: source.status,
+      exitCode: numericExitCode(source),
+      classification: expectedClassification
+    });
+    const commandEvent = hasExpectedSemantics(commandCandidate, expectedDrafts[0])
+      ? commandCandidate
+      : undefined;
+    const resultEvent = hasExpectedSemantics(resultCandidate, expectedDrafts[1])
+      ? resultCandidate
+      : undefined;
+    if (
+      classification === undefined &&
+      commandEvent === undefined &&
+      resultEvent === undefined
+    ) continue;
 
     const derivedIds = [commandEvent?.id, resultEvent?.id]
       .filter((id): id is string => id !== undefined);
     const outcome = durableOutcome(resultEvent) ??
-      (input.run.capturePolicy === "standard" && classified
+      (input.run.capturePolicy === "standard" && classification
         ? sourceOutcome(source)
         : source.status === "failed" ? "failed" : "unknown");
     attempts.push({
@@ -405,12 +515,12 @@ export function summarizeRun(input: RunSummaryInput): RunSummary {
   const failedTerminalCommands = terminalCommands.filter(({ status }) => status === "failed");
   const nativeFileChanges = input.events.filter(terminalFileChange).sort(compareChronology);
   const validatedUntracked = input.validatedUntrackedFileCount;
-  const elapsed = input.run.endedAt === null
+  const elapsedDuration = input.run.endedAt === null
+    ? null
+    : input.run.endedAt - input.run.startedAt;
+  const elapsed = elapsedDuration === null || elapsedDuration < 0
     ? unavailableEvidence<number>()
-    : availableEvidence(
-        Math.max(0, input.run.endedAt - input.run.startedAt),
-        "recorder"
-      );
+    : availableEvidence(elapsedDuration, "recorder");
 
   return {
     terminalCommands: availableEvidence(

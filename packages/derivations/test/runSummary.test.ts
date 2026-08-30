@@ -592,8 +592,178 @@ describe("likely-test summaries", () => {
       });
   });
 
+  it.each([
+    {
+      forgedField: "family",
+      mutate: (derived: TraceEventV1): TraceEventV1 => ({
+        ...derived,
+        normalizedPayload: {
+          ...(derived.normalizedPayload as Record<string, unknown>),
+          family: "jest"
+        }
+      })
+    },
+    {
+      forgedField: "confidence",
+      mutate: (derived: TraceEventV1): TraceEventV1 => ({
+        ...derived,
+        normalizedPayload: {
+          ...(derived.normalizedPayload as Record<string, unknown>),
+          confidence: "medium"
+        }
+      })
+    },
+    {
+      forgedField: "status",
+      mutate: (derived: TraceEventV1): TraceEventV1 => ({
+        ...derived,
+        status: "completed"
+      })
+    },
+    {
+      forgedField: "provider",
+      mutate: (derived: TraceEventV1): TraceEventV1 => ({
+        ...derived,
+        source: { provider: "claude-code" }
+      })
+    }
+  ])("rejects test.command with forged $forgedField semantics", ({ mutate }) => {
+    const source = command({
+      id: "failed-test-source",
+      sequence: 1,
+      command: "pnpm test",
+      status: "failed",
+      exitCode: 7
+    });
+    const [commandDraft, resultDraft] = durableTestEvents(source, 7);
+
+    expect(summarizeRun(input({
+      events: [source, mutate(commandDraft), resultDraft]
+    })).likelyTests).toMatchObject({
+      state: "detected",
+      attempts: {
+        passed: 0,
+        failed: 1,
+        unknown: 0,
+        latest: "failed"
+      },
+      durability: "incomplete",
+      missingExpected: 1,
+      derivedEventIds: [resultDraft.id]
+    });
+  });
+
+  it.each([
+    {
+      forgedField: "family",
+      mutate: (derived: TraceEventV1): TraceEventV1 => ({
+        ...derived,
+        normalizedPayload: {
+          ...(derived.normalizedPayload as Record<string, unknown>),
+          family: "jest"
+        }
+      })
+    },
+    {
+      forgedField: "confidence",
+      mutate: (derived: TraceEventV1): TraceEventV1 => ({
+        ...derived,
+        normalizedPayload: {
+          ...(derived.normalizedPayload as Record<string, unknown>),
+          confidence: "medium"
+        }
+      })
+    },
+    {
+      forgedField: "outcome",
+      mutate: (derived: TraceEventV1): TraceEventV1 => ({
+        ...derived,
+        normalizedPayload: {
+          ...(derived.normalizedPayload as Record<string, unknown>),
+          outcome: "passed"
+        }
+      })
+    },
+    {
+      forgedField: "status",
+      mutate: (derived: TraceEventV1): TraceEventV1 => ({
+        ...derived,
+        status: "completed"
+      })
+    },
+    {
+      forgedField: "exitCode",
+      mutate: (derived: TraceEventV1): TraceEventV1 => ({
+        ...derived,
+        normalizedPayload: {
+          ...(derived.normalizedPayload as Record<string, unknown>),
+          exitCode: 0
+        }
+      })
+    },
+    {
+      forgedField: "provider",
+      mutate: (derived: TraceEventV1): TraceEventV1 => ({
+        ...derived,
+        source: { provider: "claude-code" }
+      })
+    }
+  ])("rejects test.result with forged $forgedField semantics", ({ mutate }) => {
+    const source = command({
+      id: "failed-test-source",
+      sequence: 1,
+      command: "pnpm test",
+      status: "failed",
+      exitCode: 7
+    });
+    const [commandDraft, resultDraft] = durableTestEvents(source, 7);
+
+    expect(summarizeRun(input({
+      events: [source, commandDraft, mutate(resultDraft)]
+    })).likelyTests).toMatchObject({
+      state: "detected",
+      attempts: {
+        passed: 0,
+        failed: 1,
+        unknown: 0,
+        latest: "failed"
+      },
+      durability: "incomplete",
+      missingExpected: 1,
+      derivedEventIds: [commandDraft.id]
+    });
+  });
+
+  it("validates derived source provider against the run provider", () => {
+    const source = {
+      ...command({
+        id: "provider-mismatch-source",
+        sequence: 1,
+        command: "pnpm test",
+        status: "failed",
+        exitCode: 7
+      }),
+      source: {
+        provider: "claude-code" as const,
+        eventType: "item.failed",
+        itemType: "command_execution",
+        itemId: "provider-mismatch-source"
+      }
+    };
+    const durable = durableTestEvents(source, 7);
+
+    expect(summarizeRun(input({ events: [source, ...durable] })).likelyTests)
+      .toMatchObject({
+        state: "detected",
+        attempts: { latest: "failed" },
+        durability: "incomplete",
+        missingExpected: 2,
+        derivedEventIds: []
+      });
+  });
+
   it("uses a valid durable detection under metadata-only without reading command content", () => {
-    const normalizedPayload = Object.defineProperty({}, "commandEvidence", {
+    const normalizedPayload = Object.defineProperty({ exitCode: 0 }, "commandEvidence", {
       enumerable: true,
       get(): never {
         throw new Error("metadata-only command evidence was inspected");
@@ -659,6 +829,40 @@ describe("human assessment projection", () => {
       updatedAt: STARTED_AT + 2_000,
       supportingEventIds: ["assessment-unreviewed"],
       supportingArtifactIds: ["assessment-note"]
+    });
+  });
+});
+
+describe("recorder elapsed-time evidence", () => {
+  it("keeps an invalid negative span unavailable while preserving a known zero span", () => {
+    const invalid = summarizeRun(input({
+      run: {
+        ...input().run,
+        startedAt: STARTED_AT + 10,
+        endedAt: STARTED_AT
+      }
+    }));
+    const zero = summarizeRun(input({
+      run: {
+        ...input().run,
+        startedAt: STARTED_AT,
+        endedAt: STARTED_AT
+      }
+    }));
+
+    expect(invalid.elapsedRecorderTimeMs).toEqual({
+      value: null,
+      availability: "unavailable",
+      provenance: null,
+      supportingEventIds: [],
+      supportingArtifactIds: []
+    });
+    expect(zero.elapsedRecorderTimeMs).toEqual({
+      value: 0,
+      availability: "available",
+      provenance: "recorder",
+      supportingEventIds: [],
+      supportingArtifactIds: []
     });
   });
 });
