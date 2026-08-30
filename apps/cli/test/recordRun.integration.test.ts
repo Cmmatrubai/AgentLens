@@ -495,6 +495,54 @@ describe("recordRun lifecycle", () => {
     });
   });
 
+  it("truncates when command evidence pushes the final durable normalized payload above 32 KiB", async () => {
+    const context = await fixture();
+    const commandText = `pnpm test ${"x".repeat(8 * 1024)}`;
+    const aggregatedOutput = "y".repeat(20 * 1024);
+    const originalNormalized = {
+      eventType: "item.completed",
+      itemType: "command_execution",
+      command: commandText,
+      aggregatedOutput,
+      exitCode: 23,
+      status: "failed"
+    };
+    const augmentedNormalized = {
+      ...originalNormalized,
+      commandEvidence: { state: "available", redactedCommand: commandText }
+    };
+    expect(Buffer.byteLength(JSON.stringify(originalNormalized), "utf8"))
+      .toBeLessThanOrEqual(32 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(augmentedNormalized), "utf8"))
+      .toBeGreaterThan(32 * 1024);
+    await installCommandFixture(context.root, {
+      command: commandText,
+      aggregatedOutput,
+      exitCode: 23,
+      status: "failed"
+    });
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const command = detail(context.dataRoot, result.runId).events
+      .find(({ kind }) => kind === "command");
+    const normalized = command?.normalizedPayload as Record<string, unknown> | undefined;
+
+    expect(normalized).toMatchObject({
+      truncated: true,
+      exitCode: 23,
+      commandEvidence: { state: "available", redactedCommand: commandText }
+    });
+    expect(normalized).not.toHaveProperty("aggregatedOutput");
+  });
+
   it("omits command evidence without retaining redactedCommand when the redacted UTF-8 value exceeds 16 KiB", async () => {
     const context = await fixture();
     await installCommandFixture(context.root, {

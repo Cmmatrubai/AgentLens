@@ -58,6 +58,22 @@ describe("durable command evidence", () => {
     });
   });
 
+  it("accepts a legacy standard command at exactly the 16 KiB UTF-8 boundary", () => {
+    const redactedCommand = "x".repeat(16 * 1024);
+
+    expect(parse(event({ command: redactedCommand }), "standard")).toEqual({
+      state: "available",
+      redactedCommand
+    });
+  });
+
+  it("omits a multibyte legacy standard command above the 16 KiB UTF-8 boundary", () => {
+    const evidence = parse(event({ command: "🙂".repeat(4_097) }), "standard");
+
+    expect(evidence).toEqual({ state: "omitted", reason: "capture-bound" });
+    expect(evidence).not.toHaveProperty("redactedCommand");
+  });
+
   it("treats a truncated legacy payload without command text as capture-bound", () => {
     expect(parse(event({ truncated: true }), "standard")).toEqual({
       state: "omitted",

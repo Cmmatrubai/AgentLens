@@ -164,8 +164,13 @@ export async function persistEventDraft(
       });
       if (normalized.storage !== "content") throw new Error("Standard normalized payload was omitted.");
       const commandEvidence = commandEvidenceFromRedacted(draft, normalized.redacted);
-      normalizedPayload = normalized.redactedBytes.byteLength <= INLINE_NORMALIZED_BYTES
-        ? withCommandEvidence(normalized.redacted, commandEvidence)
+      const augmentedNormalized = withCommandEvidence(normalized.redacted, commandEvidence);
+      const augmentedSerialized = JSON.stringify(augmentedNormalized);
+      if (augmentedSerialized === undefined) {
+        throw new Error("Redacted normalized payload must be JSON-serializable.");
+      }
+      normalizedPayload = Buffer.byteLength(augmentedSerialized, "utf8") <= INLINE_NORMALIZED_BYTES
+        ? augmentedNormalized
         : {
             ...structuralNormalized(draft),
             ...truncatedCommandFields(normalized.redacted, commandEvidence),

@@ -51,10 +51,7 @@ export function parseCommandEvidence(
     return explicitEvidence(normalized.commandEvidence);
   }
   if (typeof normalized.command === "string") {
-    return Object.freeze({
-      state: "available" as const,
-      redactedCommand: normalized.command
-    });
+    return available(normalized.command);
   }
   if (normalized.truncated === true) {
     return Object.freeze({ state: "omitted" as const, reason: "capture-bound" as const });
