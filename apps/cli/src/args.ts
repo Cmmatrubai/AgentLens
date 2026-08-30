@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { capturePolicies, type CapturePolicy } from "@agentlens/core";
+import type { AssessmentVerdict, TaskCompletion } from "@agentlens/storage";
 
 export interface RecordCommand {
   readonly name: "record";
@@ -25,9 +26,22 @@ export interface InspectCommand {
   readonly native: boolean;
 }
 
-export type AgentLensCommand = RecordCommand | RunsCommand | InspectCommand;
+export interface AssessCommand {
+  readonly name: "assess";
+  readonly runId: string;
+  readonly verdict: AssessmentVerdict;
+  readonly taskCompleted: TaskCompletion;
+  readonly note?: string;
+  readonly dataRoot: string;
+  readonly json: boolean;
+}
+
+export type AgentLensCommand = RecordCommand | RunsCommand | InspectCommand | AssessCommand;
 
 const defaultDataRoot = join(homedir(), ".agentlens");
+const assessmentVerdicts = ["unreviewed", "success", "partial", "failure"] as const;
+const taskCompletionValues = ["yes", "no", "uncertain"] as const;
+const maximumAssessmentNoteBytes = 16 * 1024;
 
 function requiredValue(argv: readonly string[], index: number, option: string): string {
   const value = argv[index + 1];
@@ -125,6 +139,76 @@ function inspectCommand(argv: readonly string[]): InspectCommand {
   return { name: "inspect", runId, dataRoot, json, native };
 }
 
+function assessCommand(argv: readonly string[]): AssessCommand {
+  const runId = argv[1];
+  if (runId === undefined || runId === "" || runId.startsWith("--")) {
+    throw new Error("assess requires a run ID.");
+  }
+
+  let verdict: AssessmentVerdict | undefined;
+  let taskCompleted: TaskCompletion = "uncertain";
+  let note: string | undefined;
+  let dataRoot = defaultDataRoot;
+  let json = false;
+  const seen = new Set<string>();
+  const claim = (option: string): void => {
+    if (seen.has(option)) throw new Error(`Duplicate assess option: ${option}.`);
+    seen.add(option);
+  };
+
+  for (let index = 2; index < argv.length; index += 1) {
+    const option = argv[index];
+    if (option === "--verdict") {
+      claim(option);
+      const value = requiredValue(argv, index, option);
+      if (!(assessmentVerdicts as readonly string[]).includes(value)) {
+        throw new Error(`Invalid assessment verdict: ${value}.`);
+      }
+      verdict = value as AssessmentVerdict;
+      index += 1;
+    } else if (option === "--task-completed") {
+      claim(option);
+      const value = requiredValue(argv, index, option);
+      if (!(taskCompletionValues as readonly string[]).includes(value)) {
+        throw new Error(`Invalid assessment task-completed value: ${value}.`);
+      }
+      taskCompleted = value as TaskCompletion;
+      index += 1;
+    } else if (option === "--note") {
+      claim(option);
+      note = requiredValue(argv, index, option);
+      index += 1;
+    } else if (option === "--data-root") {
+      claim(option);
+      dataRoot = requiredValue(argv, index, option);
+      index += 1;
+    } else if (option === "--json") {
+      claim(option);
+      json = true;
+    } else {
+      throw new Error(`Unknown option for assess: ${option ?? ""}.`);
+    }
+  }
+
+  if (verdict === undefined) throw new Error("assess requires --verdict.");
+  if (verdict === "unreviewed" && taskCompleted !== "uncertain") {
+    throw new Error("The unreviewed verdict requires task completion uncertain.");
+  }
+  if (note !== undefined && Buffer.byteLength(note, "utf8") > maximumAssessmentNoteBytes) {
+    throw new Error("Assessment note exceeds the 16 KiB UTF-8 limit.");
+  }
+
+  return {
+    name: "assess",
+    runId,
+    verdict,
+    taskCompleted,
+    ...(note === undefined ? {} : { note }),
+    dataRoot,
+    json
+  };
+}
+
 export function parseAgentLensArgs(argv: readonly string[]): AgentLensCommand {
   switch (argv[0]) {
     case "record":
@@ -133,7 +217,9 @@ export function parseAgentLensArgs(argv: readonly string[]): AgentLensCommand {
       return runsCommand(argv);
     case "inspect":
       return inspectCommand(argv);
+    case "assess":
+      return assessCommand(argv);
     default:
-      throw new Error("Usage: agentlens <record|runs|inspect> ...");
+      throw new Error("Usage: agentlens <record|runs|inspect|assess> ...");
   }
 }

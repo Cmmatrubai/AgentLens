@@ -58,4 +58,121 @@ describe("AgentLens argument parsing", () => {
     });
     expect(() => parseAgentLensArgs(["runs", "--future-option"])).toThrow(/unknown option/i);
   });
+
+  it.each(["unreviewed", "success", "partial", "failure"] as const)(
+    "parses the %s assessment verdict",
+    (verdict) => {
+      expect(parseAgentLensArgs(["assess", "run-123", "--verdict", verdict])).toEqual({
+        name: "assess",
+        runId: "run-123",
+        verdict,
+        taskCompleted: "uncertain",
+        dataRoot: expect.any(String),
+        json: false
+      });
+    }
+  );
+
+  it.each(["yes", "no", "uncertain"] as const)(
+    "parses the %s task-completion value",
+    (taskCompleted) => {
+      expect(parseAgentLensArgs([
+        "assess",
+        "run-123",
+        "--verdict",
+        "partial",
+        "--task-completed",
+        taskCompleted
+      ])).toMatchObject({ taskCompleted });
+    }
+  );
+
+  it("parses assessment note, data-root, and JSON options while preserving an empty note", () => {
+    expect(parseAgentLensArgs([
+      "assess",
+      "run-123",
+      "--verdict",
+      "success",
+      "--task-completed",
+      "yes",
+      "--note",
+      "reviewed note",
+      "--data-root",
+      "/tmp/assessment-data",
+      "--json"
+    ])).toEqual({
+      name: "assess",
+      runId: "run-123",
+      verdict: "success",
+      taskCompleted: "yes",
+      note: "reviewed note",
+      dataRoot: "/tmp/assessment-data",
+      json: true
+    });
+    expect(parseAgentLensArgs([
+      "assess", "run-123", "--verdict", "partial", "--note", ""
+    ])).toMatchObject({ note: "" });
+    expect(parseAgentLensArgs([
+      "assess", "run-123", "--verdict", "unreviewed", "--note", "review context"
+    ])).toMatchObject({
+      verdict: "unreviewed",
+      taskCompleted: "uncertain",
+      note: "review context"
+    });
+  });
+
+  it("enforces the assessment-note limit as UTF-8 bytes", () => {
+    const exact = "é".repeat(8 * 1024);
+    expect(Buffer.byteLength(exact, "utf8")).toBe(16 * 1024);
+    expect(parseAgentLensArgs([
+      "assess", "run-123", "--verdict", "partial", "--note", exact
+    ])).toMatchObject({ note: exact });
+    expect(() => parseAgentLensArgs([
+      "assess", "run-123", "--verdict", "partial", "--note", `${exact}a`
+    ])).toThrow(/16 KiB|16384|note.*large/i);
+  });
+
+  it.each([
+    [["assess"], /run ID/i],
+    [["assess", ""], /run ID/i],
+    [["assess", "run-123"], /requires.*verdict/i],
+    [["assess", "run-123", "--verdict"], /requires a value/i],
+    [["assess", "run-123", "--verdict", "unknown"], /invalid.*verdict/i],
+    [["assess", "run-123", "--verdict", "success", "--task-completed"], /requires a value/i],
+    [["assess", "run-123", "--verdict", "success", "--task-completed", "maybe"], /invalid.*task/i],
+    [["assess", "run-123", "--verdict", "success", "--note"], /requires a value/i],
+    [["assess", "run-123", "--verdict", "success", "--data-root"], /requires a value/i],
+    [["assess", "run-123", "--verdict", "success", "--future"], /unknown.*assess/i],
+    [["assess", "run-123", "--verdict", "success", "extra-run"], /unknown.*assess|positional/i],
+    [[
+      "assess", "run-123", "--verdict", "unreviewed", "--task-completed", "yes"
+    ], /unreviewed.*uncertain/i],
+    [[
+      "assess", "run-123", "--verdict", "unreviewed", "--task-completed", "no"
+    ], /unreviewed.*uncertain/i]
+  ] as const)("refuses an invalid assess invocation %#", (argv, message) => {
+    expect(() => parseAgentLensArgs(argv)).toThrow(message);
+  });
+
+  it.each([
+    ["verdict", [
+      "assess", "run-123", "--verdict", "success", "--verdict", "failure"
+    ]],
+    ["task-completed", [
+      "assess", "run-123", "--verdict", "success",
+      "--task-completed", "yes", "--task-completed", "uncertain"
+    ]],
+    ["note", [
+      "assess", "run-123", "--verdict", "success", "--note", "one", "--note", "two"
+    ]],
+    ["data-root", [
+      "assess", "run-123", "--verdict", "success",
+      "--data-root", "/tmp/one", "--data-root", "/tmp/two"
+    ]],
+    ["json", [
+      "assess", "run-123", "--verdict", "success", "--json", "--json"
+    ]]
+  ] as const)("rejects the duplicate --%s assessment option", (_option, argv) => {
+    expect(() => parseAgentLensArgs(argv)).toThrow(/duplicate/i);
+  });
 });

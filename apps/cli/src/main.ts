@@ -2,6 +2,7 @@
 
 import { pathToFileURL } from "node:url";
 import { parseAgentLensArgs } from "./args.js";
+import { runAssessCommand } from "./commands/assess.js";
 import { runInspectCommand } from "./commands/inspect.js";
 import { runRecordCommand } from "./commands/record.js";
 import { runRunsCommand } from "./commands/runs.js";
@@ -43,6 +44,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     if (command.name === "record") return await runRecordWithProcessSignals(command);
     if (command.name === "runs") {
       await runRunsCommand(command);
+      return 0;
+    }
+    if (command.name === "assess") {
+      await runAssessCommand(command);
       return 0;
     }
     await runInspectCommand(command);
