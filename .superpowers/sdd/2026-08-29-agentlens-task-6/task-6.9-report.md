@@ -114,6 +114,78 @@ remained zero). The unchanged focused process-runner suite then passed 5/5, and
 the fresh unchanged full suite above passed 644/644. No production change was
 made for that transient timing failure.
 
+### Post-review orphan-WAL and artifact-evidence fix round
+
+Fix-round base: `7655c0ccc7be87ca99e70d26f523af60f1376a9d`
+
+The fix round rechecked Codebase Memory project
+`AgentLens-task6-implementation`, generation `2026-08-30T20:34:08Z` (782 nodes /
+2436 edges, zero skipped or parse-partial files). The locator and all three
+artifact consumers were traced, production candidates returned
+`no_recorded_issue`, and the four excluded CLI tests were read directly.
+
+The untouched fix-round baseline was:
+
+```text
+pnpm test
+Test Files  36 passed (36)
+Tests       644 passed (644)
+Exit        0
+```
+
+The orphan-WAL RED was:
+
+```text
+pnpm vitest --run apps/cli/test/readOnlyDataRoot.test.ts apps/cli/test/readCommands.integration.test.ts -t 'WAL exists without|regular WAL without'
+Test Files  2 failed (2)
+Tests       4 failed | 40 skipped (44)
+Exit        1
+```
+
+With a regular `agentlens.sqlite-wal` but no main database, the locator returned
+`missing`, `runs` returned an empty list, and `inspect`/`assess` returned their
+missing-run/storage errors. The smallest production change retains the already
+no-follow-validated WAL existence result and raises the existing stable
+`ReadOnlyDatabaseError("wal_present")` after validating the SHM sidecar and
+before any SQLite open.
+
+The added artifact regressions establish the shared identity/length/digest
+boundary through native payload, reviewer-note, and untracked-metadata reads.
+They cover root and bucket symlinks; cross-run, kind, media, redaction, and
+length mismatches; complete/truncated behavior; invalid UTF-8 and JSON;
+alternate, colliding, and noncanonical paths; restrictive omissions; and the
+fact that `runs` never reads reviewer-note content. These behavior-preserving
+tests exposed no additional production defect. Two candidate test fixtures were
+corrected without production changes: `node:path.join` had normalized a planned
+alternate spelling, and SQLite's `redaction_state = 'redacted'` check correctly
+prevented an invalid row. Redaction rejection remains directly covered at the
+shared DTO boundary and through the untracked consumer.
+
+Fresh fix-round gates:
+
+```text
+pnpm vitest --run apps/cli/test/readOnlyDataRoot.test.ts apps/cli/test/readArtifact.test.ts apps/cli/test/projectRunSummary.test.ts apps/cli/test/readCommands.integration.test.ts
+Test Files  4 passed (4)
+Tests       99 passed (99)
+Exit        0
+
+pnpm vitest --run apps/cli/test
+Test Files  18 passed (18)
+Tests       302 passed (302)
+Exit        0
+
+pnpm test
+Test Files  36 passed (36)
+Tests       680 passed (680)
+Exit        0
+
+pnpm typecheck
+Exit        0
+
+git diff --check
+Exit        0
+```
+
 ## Implemented contract
 
 - `runs` and `inspect` use `locateReadOnlyDataRoot` plus

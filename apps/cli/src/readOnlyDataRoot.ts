@@ -2,6 +2,8 @@ import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import { ReadOnlyDatabaseError } from "@agentlens/storage";
+
 interface ReadOnlyDataRootPaths {
   readonly dataRoot: string;
   readonly databasePath: string;
@@ -77,8 +79,9 @@ export async function locateReadOnlyDataRoot(
     return { state: "missing", dataRoot, databasePath };
   }
   const databaseExists = await validatePath(databasePath, "database");
-  await validatePath(`${databasePath}-wal`, "WAL sidecar");
+  const walExists = await validatePath(`${databasePath}-wal`, "WAL sidecar");
   await validatePath(`${databasePath}-shm`, "SHM sidecar");
+  if (walExists) throw new ReadOnlyDatabaseError("wal_present");
   if (!databaseExists) {
     return { state: "missing", dataRoot, databasePath };
   }

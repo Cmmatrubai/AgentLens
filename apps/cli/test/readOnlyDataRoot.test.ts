@@ -53,6 +53,23 @@ describe("read-only data-root location", () => {
     });
   });
 
+  it("reports wal_present when a regular WAL exists without the main database", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-read-root-orphan-wal-"));
+    roots.push(root);
+    const dataRoot = join(root, "data");
+    const databasePath = join(dataRoot, "agentlens.sqlite");
+    const walPath = `${databasePath}-wal`;
+    await mkdir(dataRoot);
+    await writeFile(walPath, "ORPHAN_WAL_SENTINEL");
+
+    await expect(locate(dataRoot)).rejects.toMatchObject({
+      name: "ReadOnlyDatabaseError",
+      reason: "wal_present"
+    });
+    expect(await readFile(walPath, "utf8")).toBe("ORPHAN_WAL_SENTINEL");
+    await expect(readFile(databasePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("rejects final-component root and database symlinks without mutating targets", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentlens-read-root-symlink-"));
     roots.push(root);

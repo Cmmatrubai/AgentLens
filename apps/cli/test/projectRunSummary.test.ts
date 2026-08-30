@@ -76,7 +76,14 @@ async function untrackedArtifact(
   artifactRoot: string,
   value: unknown
 ): Promise<StoredArtifact> {
-  const bytes = Buffer.from(JSON.stringify(value), "utf8");
+  return untrackedArtifactBytes(artifactRoot, Buffer.from(JSON.stringify(value), "utf8"));
+}
+
+async function untrackedArtifactBytes(
+  artifactRoot: string,
+  bytes: Buffer,
+  overrides: Partial<StoredArtifact> = {}
+): Promise<StoredArtifact> {
   const id = createHash("sha256").update(bytes).digest("hex");
   const path = join(artifactRoot, id.slice(0, 2), id);
   await mkdir(join(artifactRoot, id.slice(0, 2)), { recursive: true });
@@ -92,7 +99,27 @@ async function untrackedArtifact(
     redactionState: "redacted",
     truncated: false,
     originalByteLength: bytes.byteLength,
-    createdAt: 1
+    createdAt: 1,
+    ...overrides
+  };
+}
+
+function gitEvidenceWithUntracked(artifactId: string): NonNullable<RunDetail["gitEvidence"]> {
+  return {
+    runId: "summary-run",
+    initialHead: "a",
+    finalHead: "a",
+    initialBranch: null,
+    finalBranch: null,
+    initialStatus: { state: "omitted", reason: "legacy-unspecified" },
+    finalStatus: { state: "omitted", reason: "legacy-unspecified" },
+    trackedFinalDiff: { state: "absent" },
+    diffCheck: { state: "omitted", reason: "legacy-unspecified" },
+    diffCheckPassed: true,
+    untrackedMetadata: { state: "artifact", artifactId },
+    headChanged: false,
+    branchChanged: false,
+    capturedAt: 1
   };
 }
 
@@ -314,5 +341,58 @@ describe("projectRunSummary", () => {
       repository(assessment("projected")),
       artifactRoot
     )).rejects.toThrow(/artifact validation failed \(digest\)/i);
+  });
+
+  it.each([
+    "cross-run",
+    "kind",
+    "media",
+    "redaction",
+    "length",
+    "truncated",
+    "invalid-utf8",
+    "invalid-json"
+  ] as const)("fails closed on %s tampering through the untracked-metadata consumer", async (tamper) => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-project-summary-"));
+    roots.push(root);
+    const artifactRoot = join(root, "artifacts", "sha256");
+    const valid = Buffer.from('[{"path":"one","type":"file","size":1}]', "utf8");
+    const bytes = tamper === "invalid-utf8"
+      ? Buffer.from([0xff, 0xfe, 0xfd])
+      : tamper === "invalid-json"
+        ? Buffer.from('[{"path":', "utf8")
+        : valid;
+    const overrides: Partial<StoredArtifact> = tamper === "cross-run"
+      ? { runId: "different-run" }
+      : tamper === "kind"
+        ? { kind: "native-payload" }
+        : tamper === "media"
+          ? { mediaType: "text/plain" }
+          : tamper === "redaction"
+            ? { redactionState: "unredacted" as never }
+            : tamper === "length"
+              ? { byteLength: bytes.byteLength - 1 }
+              : tamper === "truncated"
+                ? { truncated: true, originalByteLength: bytes.byteLength + 1 }
+                : {};
+    const artifact = await untrackedArtifactBytes(artifactRoot, bytes, overrides);
+    const input = detail({
+      artifacts: [artifact],
+      gitEvidence: gitEvidenceWithUntracked(artifact.id)
+    });
+
+    await expect(projectRunSummary(
+      input,
+      repository(assessment("projected")),
+      artifactRoot
+    )).rejects.toThrow(
+      tamper === "cross-run"
+        ? /untracked metadata artifact is unavailable/i
+        : tamper === "invalid-utf8"
+          ? /untracked metadata has invalid utf-8/i
+          : tamper === "invalid-json"
+            ? /untracked metadata is not valid json/i
+            : /artifact validation failed/i
+    );
   });
 });

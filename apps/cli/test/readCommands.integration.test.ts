@@ -9,6 +9,7 @@ import {
   readFile,
   readdir,
   readlink,
+  rename,
   rm,
   stat,
   symlink,
@@ -240,6 +241,41 @@ describe("runs and inspect", () => {
         expect(output.text()).toBe("");
       }
       expect(await snapshot(context.root)).toEqual(before);
+    }
+  );
+
+  it.each(["runs", "inspect", "assess"] as const)(
+    "%s fails closed on a regular WAL without a main database",
+    async (name) => {
+      const context = await fixture();
+      await mkdir(context.dataRoot, { mode: 0o755 });
+      await writeFile(join(context.dataRoot, "agentlens.sqlite-wal"), "ORPHAN_WAL_SENTINEL", {
+        mode: 0o666
+      });
+      const before = await snapshot(context.dataRoot);
+      const output = writer();
+      const read = name === "runs"
+        ? runRunsCommand(
+            { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+            { stdout: output.output }
+          )
+        : name === "inspect"
+          ? runInspectCommand(
+              { name: "inspect", runId: "missing-run", dataRoot: context.dataRoot, json: true, native: false },
+              { stdout: output.output }
+            )
+          : runAssessCommand({
+              name: "assess",
+              runId: "missing-run",
+              verdict: "unreviewed",
+              taskCompleted: "uncertain",
+              dataRoot: context.dataRoot,
+              json: true
+            }, { stdout: output.output });
+
+      await expect(read).rejects.toThrow(/wal_present/);
+      expect(output.text()).toBe("");
+      expect(await snapshot(context.dataRoot)).toEqual(before);
     }
   );
 
@@ -976,27 +1012,78 @@ describe("runs and inspect", () => {
     expect(output.text().length).toBeLessThan(100_000);
   });
 
-  it.each(["path", "symlink", "digest"] as const)(
+  it.each([
+    "path",
+    "alternate-path",
+    "colliding-path",
+    "root-symlink",
+    "bucket-symlink",
+    "symlink",
+    "digest",
+    "cross-run",
+    "kind",
+    "media",
+    "length"
+  ] as const)(
     "refuses %s tampering before expanding a native artifact",
     async (tamper) => {
       const { context, recorded, artifact } = await largeNativeFixture();
-      if (tamper === "path") {
+      if (tamper === "path" || tamper === "alternate-path" || tamper === "colliding-path") {
+        const artifactRoot = join(context.dataRoot, "artifacts", "sha256");
+        const path = tamper === "path"
+          ? "/etc/passwd"
+          : tamper === "alternate-path"
+            ? `${artifactRoot}/${artifact.id.slice(0, 2)}/../${artifact.id.slice(0, 2)}/${artifact.id}`
+            : join(artifactRoot, artifact.id.slice(0, 2), "0".repeat(64));
         await execFile("sqlite3", [
           join(context.dataRoot, "agentlens.sqlite"),
-          `UPDATE artifacts SET path = '/etc/passwd' WHERE run_id = '${recorded.runId}' AND id = '${artifact.id}';
+          `UPDATE artifacts SET path = '${path}' WHERE run_id = '${recorded.runId}' AND id = '${artifact.id}';
            PRAGMA journal_mode = DELETE;`
         ]);
+      } else if (tamper === "root-symlink" || tamper === "bucket-symlink") {
+        const artifactRoot = join(context.dataRoot, "artifacts", "sha256");
+        const original = tamper === "root-symlink"
+          ? artifactRoot
+          : join(artifactRoot, artifact.id.slice(0, 2));
+        const external = join(context.root, `external-${tamper}`);
+        await rename(original, external);
+        await symlink(external, original);
       } else if (tamper === "symlink") {
         const target = join(context.dataRoot, "outside-native.json");
         await writeFile(target, '{"type":"tampered"}', "utf8");
         await rm(artifact.path);
         await symlink(target, artifact.path);
-      } else {
+      } else if (tamper === "digest") {
         const bytes = await readFile(artifact.path);
         const index = bytes.indexOf(0x78);
         if (index < 0) throw new Error("native fixture lacks a mutable byte");
         bytes[index] = 0x79;
         await writeFile(artifact.path, bytes);
+      } else {
+        let mutation: string;
+        if (tamper === "cross-run") {
+          const second = await recordRun(
+            {
+              name: "record",
+              capture: "standard",
+              dataRoot: context.dataRoot,
+              childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+            },
+            { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+          );
+          mutation = `run_id = '${second.runId}'`;
+        } else {
+          mutation = tamper === "kind"
+            ? "kind = 'assessment-note'"
+            : tamper === "media"
+              ? "media_type = 'text/plain'"
+              : "byte_length = byte_length - 1";
+        }
+        await execFile("sqlite3", [
+          join(context.dataRoot, "agentlens.sqlite"),
+          `UPDATE artifacts SET ${mutation} WHERE run_id = '${recorded.runId}' AND id = '${artifact.id}';
+           PRAGMA journal_mode = DELETE;`
+        ]);
       }
 
       await expect(runInspectCommand({
@@ -1006,7 +1093,17 @@ describe("runs and inspect", () => {
         json: true,
         native: true
       }, { stdout: silentOutput })).rejects.toThrow(
-        tamper === "path" ? /canonical|metadata path/i : tamper === "symlink" ? /symbolic/i : /digest/i
+        tamper === "path" || tamper === "alternate-path" || tamper === "colliding-path"
+          ? /canonical|metadata path/i
+          : tamper === "root-symlink" || tamper === "bucket-symlink"
+            ? /canonical/i
+            : tamper === "symlink"
+            ? /symbolic/i
+            : tamper === "digest"
+              ? /digest/i
+              : tamper === "cross-run"
+                ? /native artifact .* unavailable/i
+              : /artifact validation failed/i
       );
     }
   );
@@ -1094,10 +1191,125 @@ describe("runs and inspect", () => {
     }
     await writeFile(notePath, "x".repeat(Buffer.byteLength(note)), "utf8");
 
+    const runsOutput = writer();
+    await expect(runRunsCommand(
+      { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+      { stdout: runsOutput.output }
+    )).resolves.toMatchObject({ runs: [expect.any(Object)] });
+    expect(runsOutput.text()).not.toContain(note);
+
     await expect(runInspectCommand(
       { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
       { stdout: silentOutput }
     )).rejects.toThrow(/artifact validation failed \(digest\)/i);
+  });
+
+  it.each([
+    "cross-run",
+    "kind",
+    "media",
+    "length",
+    "truncated",
+    "invalid-utf8"
+  ] as const)("fails closed on %s tampering through the reviewer-note consumer", async (tamper) => {
+    const context = await fixture();
+    const note = `reviewer-note-${tamper}-boundary-57283`;
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    await runAssessCommand({
+      name: "assess",
+      runId: recorded.runId,
+      verdict: "partial",
+      taskCompleted: "uncertain",
+      note,
+      dataRoot: context.dataRoot,
+      json: true
+    }, { stdout: silentOutput });
+    const databasePath = join(context.dataRoot, "agentlens.sqlite");
+    const database = openDatabase(databasePath);
+    let artifact: ReturnType<RunRepository["getRunDetail"]>["artifacts"][number];
+    try {
+      const detail = new RunRepository(database, {
+        artifactRoot: join(context.dataRoot, "artifacts", "sha256")
+      }).getRunDetail(recorded.runId);
+      const found = detail.artifacts.find(({ kind }) => kind === "assessment-note");
+      if (!found) throw new Error("missing reviewer note fixture");
+      artifact = found;
+    } finally {
+      database.close();
+    }
+
+    if (tamper === "invalid-utf8") {
+      const bytes = Buffer.from([0xff, 0xfe, 0xfd]);
+      const id = createHash("sha256").update(bytes).digest("hex");
+      const path = join(context.dataRoot, "artifacts", "sha256", id.slice(0, 2), id);
+      await mkdir(join(context.dataRoot, "artifacts", "sha256", id.slice(0, 2)), { recursive: true });
+      await writeFile(path, bytes);
+      await execFile("sqlite3", [databasePath, `
+        UPDATE artifacts SET
+          id = '${id}', path = '${path}', sha256 = '${id}',
+          byte_length = ${bytes.byteLength}, original_byte_length = ${bytes.byteLength}
+        WHERE id = '${artifact.id}';
+        UPDATE current_assessments SET note_artifact_id = '${id}'
+        WHERE run_id = '${recorded.runId}';
+        UPDATE event_artifact_bindings SET artifact_id = '${id}'
+        WHERE run_id = '${recorded.runId}' AND artifact_id = '${artifact.id}';
+        PRAGMA journal_mode = DELETE;
+      `]);
+    } else {
+      let mutation: string;
+      if (tamper === "cross-run") {
+        const second = await recordRun(
+          {
+            name: "record",
+            capture: "standard",
+            dataRoot: context.dataRoot,
+            childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+          },
+          { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+        );
+        mutation = `run_id = '${second.runId}'`;
+      } else {
+        mutation = tamper === "kind"
+          ? "kind = 'native-payload'"
+          : tamper === "media"
+            ? "media_type = 'application/json'"
+            : tamper === "length"
+              ? "byte_length = byte_length - 1"
+              : "truncated = 1, original_byte_length = byte_length + 1";
+      }
+      await execFile("sqlite3", [databasePath, `
+        UPDATE artifacts SET ${mutation} WHERE id = '${artifact.id}';
+        PRAGMA journal_mode = DELETE;
+      `]);
+    }
+
+    const before = await snapshot(context.dataRoot);
+    const runsOutput = writer();
+    await expect(runRunsCommand(
+      { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+      { stdout: runsOutput.output }
+    )).resolves.toMatchObject({ runs: expect.any(Array) });
+    expect(runsOutput.text()).not.toContain(note);
+
+    await expect(runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: silentOutput }
+    )).rejects.toThrow(
+      tamper === "cross-run"
+        ? /reviewer note artifact is unavailable/i
+        : tamper === "invalid-utf8"
+          ? /reviewer note artifact has invalid utf-8/i
+          : /artifact validation failed/i
+    );
+    expect(await snapshot(context.dataRoot)).toEqual(before);
   });
 
   it.each(["metadata-only", "strict"] as const)(
