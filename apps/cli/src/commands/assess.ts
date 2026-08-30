@@ -39,19 +39,44 @@ const assessmentVerdicts = new Set(["unreviewed", "success", "partial", "failure
 const taskCompletionValues = new Set(["yes", "no", "uncertain"]);
 const maximumAssessmentNoteBytes = 16 * 1024;
 
-function validateCommand(command: AssessCommand): void {
-  if (command.runId === "") throw new Error("assess requires a run ID.");
-  if (!assessmentVerdicts.has(command.verdict)) {
+function validateCommand(command: unknown): asserts command is AssessCommand {
+  if (typeof command !== "object" || command === null || Array.isArray(command)) {
+    throw new Error("Assessment command must be an object.");
+  }
+  const candidate = command as Record<string, unknown>;
+  if (candidate.name !== "assess") {
+    throw new Error("Assessment command name must be assess.");
+  }
+  if (typeof candidate.runId !== "string" || candidate.runId === "") {
+    throw new Error("Assessment run ID must be a non-empty string.");
+  }
+  if (typeof candidate.verdict !== "string") {
     throw new Error("Invalid assessment verdict.");
   }
-  if (!taskCompletionValues.has(command.taskCompleted)) {
+  if (typeof candidate.taskCompleted !== "string") {
     throw new Error("Invalid assessment task-completed value.");
   }
-  if (command.verdict === "unreviewed" && command.taskCompleted !== "uncertain") {
+  if (candidate.note !== undefined && typeof candidate.note !== "string") {
+    throw new Error("Assessment note must be a string when provided.");
+  }
+  if (typeof candidate.dataRoot !== "string" || candidate.dataRoot === "") {
+    throw new Error("Assessment data root must be a non-empty string.");
+  }
+  if (typeof candidate.json !== "boolean") {
+    throw new Error("Assessment json flag must be a boolean.");
+  }
+
+  if (!assessmentVerdicts.has(candidate.verdict)) {
+    throw new Error("Invalid assessment verdict.");
+  }
+  if (!taskCompletionValues.has(candidate.taskCompleted)) {
+    throw new Error("Invalid assessment task-completed value.");
+  }
+  if (candidate.verdict === "unreviewed" && candidate.taskCompleted !== "uncertain") {
     throw new Error("The unreviewed verdict requires task completion uncertain.");
   }
-  if (command.note !== undefined &&
-      Buffer.byteLength(command.note, "utf8") > maximumAssessmentNoteBytes) {
+  if (candidate.note !== undefined &&
+      Buffer.byteLength(candidate.note, "utf8") > maximumAssessmentNoteBytes) {
     throw new Error("Assessment note exceeds the 16 KiB UTF-8 limit.");
   }
 }

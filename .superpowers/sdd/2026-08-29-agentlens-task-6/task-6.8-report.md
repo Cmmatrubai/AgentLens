@@ -32,6 +32,31 @@ Focused GREEN:
 
 Result: exit 0; 3 test files passed; 50 tests passed.
 
+Round 1 review-fix RED for the exported direct-call boundary:
+
+    pnpm vitest --run apps/cli/test/assess.integration.test.ts
+
+Result: exit 1; 1 test file failed; 30 tests failed and 25 passed. The failures
+showed field-specific validation was missing, and the migration-003 snapshot for
+a `Buffer` note gained migration changes plus `secrets/redaction-hmac.key` before
+redaction failed.
+
+Round 1 direct-call GREEN:
+
+    pnpm vitest --run apps/cli/test/assess.integration.test.ts
+
+Result: exit 0; 1 test file passed; 56 tests passed. Twenty-one malformed runtime
+shapes are each exercised against both a missing root and a migration-003 root;
+every case rejects before the data-root locator is called and preserves the full
+filesystem snapshot. A runtime-valid missing-root control proves the locator spy
+observes a real lookup.
+
+Round 1 focused GREEN:
+
+    pnpm vitest --run apps/cli/test/args.test.ts apps/cli/test/assess.integration.test.ts apps/cli/test/readOnlyDataRoot.test.ts
+
+Result: exit 0; 3 test files passed; 93 tests passed.
+
 ## Verification evidence
 
 CLI suite:
@@ -58,14 +83,56 @@ Type checking:
 
 Result: exit 0.
 
+Initial whitespace/error-marker check:
+
+    git diff --check
+
+Result: exit 0.
+
+## Round 1 post-fix verification evidence
+
+CLI suite:
+
+    pnpm vitest --run apps/cli/test/*.test.ts
+
+Result: exit 0; 15 test files passed; 213 tests passed.
+
+Assessment/privacy/storage/artifact suite:
+
+    pnpm vitest --run apps/cli/test/assess.integration.test.ts apps/cli/test/privacy.integration.test.ts packages/core/test/artifactStore.test.ts packages/core/test/redaction.test.ts packages/storage/test/artifactMetadata.test.ts packages/storage/test/migrations.test.ts packages/storage/test/readOnlyDatabase.test.ts packages/storage/test/runRepository.test.ts
+
+Result: exit 0; 8 test files passed; 244 tests passed.
+
+Full suite:
+
+    pnpm test
+
+Result: exit 0; 33 test files passed; 591 tests passed.
+
+Type checking:
+
+    pnpm typecheck
+
+Result: exit 0.
+
 Whitespace/error-marker check:
 
     git diff --check
 
 Result: exit 0.
 
+Verification environment note: one over-parallelized final CLI run observed the
+unrelated crash-recovery timing test report `orphan_child_active` instead of
+`active`. The exact test then passed 1/1 in isolation, the CLI suite passed
+213/213 sequentially, and the subsequent full suite passed 591/591. No recovery
+code or test was changed.
+
 ## Review findings
 
+- The exported `runAssessCommand` boundary now runtime-validates the command
+  object and every `AssessCommand` field before note byte counting or data-root
+  lookup; erased TypeScript types cannot route malformed direct calls into the
+  writable phase.
 - Parser, enum, combination, duplicate-option, and UTF-8 byte-limit validation complete before data-root discovery.
 - Missing/symlinked/non-regular storage, WAL refusal, missing runs, and migration-003 validation use the non-mutating locator plus immutable/query-only SQLite before any writable setup.
 - The writable phase re-reads the run and its capture policy after reopening.
@@ -79,4 +146,6 @@ Result: exit 0.
 
 - No scope deviations.
 - The approved post-artifact database-failure boundary can leave an orphan content-addressed artifact file; tests confirm no database row references it.
-- The knowledge-graph generation predates the new/modified files, so all changed files were reviewed directly after the final coverage check; unchanged storage/core dependencies retained clean indexed coverage.
+- The graph reports the modified production path as metadata-changed and excludes
+  the integration test and `.superpowers` report by configuration, so all three
+  candidate paths were reviewed directly after the final coverage check.

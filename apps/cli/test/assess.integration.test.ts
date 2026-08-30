@@ -18,7 +18,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CapturePolicy } from "@agentlens/core";
 import { openDatabase, RunRepository } from "@agentlens/storage";
+import type { AssessCommand } from "../src/args.js";
+import { runAssessCommand } from "../src/commands/assess.js";
 import { main } from "../src/main.js";
+import * as readOnlyDataRoot from "../src/readOnlyDataRoot.js";
 
 interface RawStatement {
   get(...params: unknown[]): unknown;
@@ -45,6 +48,147 @@ interface Fixture {
   dataRoot: string;
   databasePath: string;
   runId: string;
+}
+
+interface MalformedDirectCommandCase {
+  readonly label: string;
+  readonly expectedError: RegExp;
+  readonly build: (base: Record<string, unknown>) => unknown;
+}
+
+function withoutField(base: Record<string, unknown>, field: string): Record<string, unknown> {
+  const copy = { ...base };
+  delete copy[field];
+  return copy;
+}
+
+const malformedDirectCommands: readonly MalformedDirectCommandCase[] = [
+  {
+    label: "an undefined command",
+    expectedError: /command.*object/i,
+    build: () => undefined
+  },
+  {
+    label: "a null command",
+    expectedError: /command.*object/i,
+    build: () => null
+  },
+  {
+    label: "a missing name",
+    expectedError: /command name.*assess/i,
+    build: (base) => withoutField(base, "name")
+  },
+  {
+    label: "an invalid name",
+    expectedError: /command name.*assess/i,
+    build: (base) => ({ ...base, name: "inspect" })
+  },
+  {
+    label: "an undefined run ID",
+    expectedError: /run ID.*non-empty string/i,
+    build: (base) => ({ ...base, runId: undefined })
+  },
+  {
+    label: "a non-string run ID",
+    expectedError: /run ID.*non-empty string/i,
+    build: (base) => ({ ...base, runId: Buffer.from("runtime-run-id") })
+  },
+  {
+    label: "an empty run ID",
+    expectedError: /run ID.*non-empty string/i,
+    build: (base) => ({ ...base, runId: "" })
+  },
+  {
+    label: "a missing verdict",
+    expectedError: /verdict/i,
+    build: (base) => withoutField(base, "verdict")
+  },
+  {
+    label: "a non-string verdict",
+    expectedError: /verdict/i,
+    build: (base) => ({ ...base, verdict: Buffer.from("success") })
+  },
+  {
+    label: "an unknown verdict",
+    expectedError: /verdict/i,
+    build: (base) => ({ ...base, verdict: "unknown" })
+  },
+  {
+    label: "missing task completion",
+    expectedError: /task-completed/i,
+    build: (base) => withoutField(base, "taskCompleted")
+  },
+  {
+    label: "non-string task completion",
+    expectedError: /task-completed/i,
+    build: (base) => ({ ...base, taskCompleted: Buffer.from("uncertain") })
+  },
+  {
+    label: "unknown task completion",
+    expectedError: /task-completed/i,
+    build: (base) => ({ ...base, taskCompleted: "maybe" })
+  },
+  {
+    label: "a Buffer note",
+    expectedError: /note.*string/i,
+    build: (base) => ({
+      ...base,
+      note: Buffer.from("Bearer DIRECT_CALL_BUFFER_NOTE_SENTINEL")
+    })
+  },
+  {
+    label: "a numeric note",
+    expectedError: /note.*string/i,
+    build: (base) => ({ ...base, note: 123 })
+  },
+  {
+    label: "a null note",
+    expectedError: /note.*string/i,
+    build: (base) => ({ ...base, note: null })
+  },
+  {
+    label: "a missing data root",
+    expectedError: /data root.*non-empty string/i,
+    build: (base) => withoutField(base, "dataRoot")
+  },
+  {
+    label: "a non-string data root",
+    expectedError: /data root.*non-empty string/i,
+    build: (base) => ({ ...base, dataRoot: Buffer.from("runtime-data-root") })
+  },
+  {
+    label: "an empty data root",
+    expectedError: /data root.*non-empty string/i,
+    build: (base) => ({ ...base, dataRoot: "" })
+  },
+  {
+    label: "a missing JSON flag",
+    expectedError: /json.*boolean/i,
+    build: (base) => withoutField(base, "json")
+  },
+  {
+    label: "a non-boolean JSON flag",
+    expectedError: /json.*boolean/i,
+    build: (base) => ({ ...base, json: "yes" })
+  }
+];
+
+function validDirectCommand(dataRoot: string, runId: string): Record<string, unknown> {
+  return {
+    name: "assess",
+    runId,
+    verdict: "partial",
+    taskCompleted: "uncertain",
+    note: "",
+    dataRoot,
+    json: false
+  };
+}
+
+async function directCall(command: unknown): Promise<unknown> {
+  return runAssessCommand(command as AssessCommand, {
+    stdout: { write: () => true }
+  });
 }
 
 async function fixture(
@@ -221,6 +365,58 @@ afterEach(async () => {
 });
 
 describe.sequential("assess command", () => {
+  it("observes data-root lookup for a runtime-valid direct command", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-cli-assess-direct-valid-"));
+    roots.push(root);
+    const dataRoot = join(root, "missing-data");
+    const locateSpy = vi.spyOn(readOnlyDataRoot, "locateReadOnlyDataRoot");
+
+    const error = await directCall(validDirectCommand(dataRoot, "missing-run"))
+      .then(() => null, (cause: unknown) => cause);
+
+    expect(locateSpy).toHaveBeenCalledOnce();
+    expect(locateSpy).toHaveBeenCalledWith(dataRoot);
+    expect(await snapshot(dataRoot)).toBeNull();
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/existing AgentLens data root/i);
+  });
+
+  it.each(malformedDirectCommands)(
+    "rejects $label before touching a missing root",
+    async ({ expectedError, build }) => {
+      const root = await mkdtemp(join(tmpdir(), "agentlens-cli-assess-direct-missing-"));
+      roots.push(root);
+      const dataRoot = join(root, "missing-data");
+      const command = build(validDirectCommand(dataRoot, "missing-run"));
+      const locateSpy = vi.spyOn(readOnlyDataRoot, "locateReadOnlyDataRoot");
+
+      const error = await directCall(command).then(() => null, (cause: unknown) => cause);
+
+      expect(locateSpy).not.toHaveBeenCalled();
+      expect(await snapshot(dataRoot)).toBeNull();
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(expectedError);
+    }
+  );
+
+  it.each(malformedDirectCommands)(
+    "rejects $label before changing a migration-003 root",
+    async ({ expectedError, build }) => {
+      const context = await fixture("standard");
+      downgradeToMigration003(context.databasePath);
+      const before = await snapshot(context.dataRoot);
+      const command = build(validDirectCommand(context.dataRoot, context.runId));
+      const locateSpy = vi.spyOn(readOnlyDataRoot, "locateReadOnlyDataRoot");
+
+      const error = await directCall(command).then(() => null, (cause: unknown) => cause);
+
+      expect(locateSpy).not.toHaveBeenCalled();
+      expect(await snapshot(context.dataRoot)).toEqual(before);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(expectedError);
+    }
+  );
+
   it("validates malformed arguments and the note byte bound before touching a missing root", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentlens-cli-assess-missing-"));
     roots.push(root);
