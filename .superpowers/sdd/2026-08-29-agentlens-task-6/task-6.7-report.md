@@ -51,12 +51,12 @@ Result: exit 0; 5 files and 106 tests passed.
 - The artifact file identity/path/realpath/symlink/length/digest validation formerly embedded in `commitArtifactMetadata` is now a shared private boundary. The opened file is validated by device, inode, length, and digest and its handle remains open through the SQLite transaction; this validates the opened bytes but does not preserve pathname identity through commit.
 - Assessment notes require same-run ownership, `assessment-note` kind, `text/plain; charset=utf-8`, and redacted state. New metadata and audits are inserted inside the assessment transaction.
 - Same-run content-addressed reuse revalidates the file and requires every stored metadata field and artifact audit to match. It does not duplicate artifact or audit rows, but each human action gets a distinct event-to-artifact binding.
-- One immediate transaction inserts/reuses artifact metadata and audits, allocates the event sequence, appends the human event and binding, and upserts the current projection. The upsert preserves the original `reviewed_at` while advancing `updated_at` and `current_event_id`.
+- One immediate transaction inserts/reuses artifact metadata and audits, allocates the event sequence, appends the human event and binding, and upserts the current projection. The upsert preserves the original `reviewed_at`, advances `current_event_id`, and keeps `updated_at` at the latest accepted event timestamp, which may equal the prior value for actions in the same millisecond.
 - No historical event, binding, artifact, audit, observed/derived/recorder evidence, Git evidence, run fact, or ownership row is updated or deleted.
 
 ## Required and adversarial coverage
 
-- First assessment/current row, default uncertain, default absent, fixed `reviewedAt`, advancing current event/update timestamp, repeated identical actions, immutable old human events/bindings, and logical immutability of observed/derived/recorder/Git evidence.
+- First assessment/current row, default uncertain, default absent, fixed `reviewedAt`, advancing current event with a nondecreasing update timestamp, repeated identical actions, immutable old human events/bindings, and logical immutability of observed/derived/recorder/Git evidence.
 - Explicit unreviewed rejection/acceptance rules and standard, metadata-only, and strict note states.
 - Provider-only source, null lifecycle/correlation columns, no relationships/native payload/derivation, content-free summary, and absence of reviewer-note bytes from SQLite/WAL/SHM and the event object.
 - Same-run artifact reuse, exact audit reuse, physical file revalidation, cross-run committed artifact ownership, cross-run event ownership, and transaction rollback with an allowed orphan file.
@@ -101,13 +101,13 @@ The reviewer cases were added before the fix.
 
     pnpm vitest --run packages/storage/test/runRepository.test.ts -t "human assessment" --reporter=dot
 
-RED result: exit 1; 16 of 44 selected tests failed, 28 passed, and 56 were skipped. The failures were exactly the two non-advancing timestamps, six capture-policy/note-state mismatches, and eight invalid artifact-length tuples. Four tuple-shape cases were accepted, two restrictive-policy artifacts reached the missing-file check instead of policy rejection, and the remaining cases failed with older nonspecific validation errors.
+RED result: exit 1; 16 of 44 selected tests failed, 28 passed, and 56 were skipped. The failures included the original two timestamp-boundary cases, six capture-policy/note-state mismatches, and eight invalid artifact-length tuples. Fix round 2 below corrects the original equal-timestamp interpretation. Four tuple-shape cases were accepted, two restrictive-policy artifacts reached the missing-file check instead of policy rejection, and the remaining cases failed with older nonspecific validation errors.
 
 After the smallest production change, the same command was GREEN: exit 0; 44 selected tests passed and 56 were skipped.
 
 ### Contract decisions
 
-- A subsequent assessment now loads the existing current row inside the immediate transaction and requires `receivedAt` to be strictly greater than `updated_at` before any artifact metadata, audit, event, binding, or current-row write. Earlier and equal timestamps roll back with the current event and first `reviewed_at` unchanged; a later timestamp advances `updated_at` and `current_event_id`.
+- A subsequent assessment loads the existing current row inside the immediate transaction and rejects only `receivedAt < updated_at` before any artifact metadata, audit, event, binding, or current-row write. Earlier timestamps roll back. Equal timestamps append a distinct action and advance `current_event_id` while leaving `updated_at` equal; later timestamps advance both. The first `reviewed_at` is preserved in every accepted case.
 - The shared completed-artifact boundary now requires non-negative integer `byteLength` and `originalByteLength`. An untruncated artifact requires equal lengths; a truncated artifact requires `originalByteLength` to be strictly greater. Valid truncated note artifacts remain supported, and physical file length and digest validation remains in place.
 - Capture-policy enforcement belongs at the storage mutation boundary as defense in depth. The frozen design assigns standard note content to redacted artifacts and restrictive note content to structured omission; Task 6.7 requires run and structured-field validation in the transaction, while Task 6.8 reads the run policy to choose the representation. Storage therefore accepts absent/artifact for `standard`, absent/matching omission for `metadata-only` and `strict`, and rejects mismatched omissions and all restrictive-policy artifacts. This is checked before artifact file access and rechecked against the transaction's run row.
 
@@ -132,3 +132,22 @@ Result: exit 0 (`tsc -b --pretty false`).
 ### Residual filesystem risk
 
 Holding the validated file descriptor open does not preserve pathname identity through the SQLite commit. A concurrent process running as the same owner can replace the artifact pathname after validation, so the persisted pathname may later resolve to different bytes. Owner-only directories plus canonical-path, symlink, device/inode, length, and digest checks reduce the exposure but do not make filesystem and SQLite updates atomic. This fix round intentionally does not claim or invent such atomicity.
+
+## Fix round 2: same-timestamp actions
+
+The frozen append-only rule treats every successful invocation as a distinct human action, and separate actions can share the same millisecond. The timestamp guard therefore prevents only regression; equality is accepted.
+
+### TDD evidence
+
+    pnpm vitest --run packages/storage/test/runRepository.test.ts -t "human assessment" --reporter=dot
+
+RED result: exit 1; 2 selected tests failed, 42 passed, and 56 were skipped. The equal-timestamp action was rejected by the old strict-advance guard, and the earlier-timestamp test exposed the old strict-advance error contract.
+
+After changing only the comparison and regression error, the same command was GREEN: exit 0; 44 selected tests passed and 56 were skipped. The equal-timestamp test proves two distinct `assessment.updated` events with sequences 0 and 1, an advanced `currentEventId`, preserved `reviewedAt`, and equal `updatedAt`.
+
+### Verification
+
+- Repository: 100/100 tests passed.
+- Storage: 127/127 tests passed across 5 files.
+- Full suite: 505/505 tests passed across 31 files.
+- Typecheck: exit 0 (`tsc -b --pretty false`).

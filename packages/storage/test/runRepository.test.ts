@@ -1049,45 +1049,75 @@ describe("append-only human assessment storage", () => {
     }
   });
 
-  it.each([
-    ["earlier", "2026-08-26T20:09:00.000Z"],
-    ["equal", "2026-08-26T20:10:00.000Z"]
-  ] as const)(
-    "rejects an %s assessment timestamp without changing any durable assessment state",
-    async (name, attemptedAt) => {
-      const { repository, databasePath, artifactRoot, close } = setup();
-      try {
-        const firstAt = "2026-08-26T20:10:00.000Z";
-        await repository.updateAssessment({
-          runId,
-          eventId: "assessment-timestamp-first",
-          receivedAt: firstAt,
-          verdict: "partial"
-        });
-        const before = repository.getCurrentAssessment(runId);
-        const note = completedAssessmentNote(artifactRoot, `rejected-${name}-timestamp-note`);
+  it("rejects an earlier assessment timestamp without changing any durable assessment state", async () => {
+    const { repository, databasePath, artifactRoot, close } = setup();
+    try {
+      const firstAt = "2026-08-26T20:10:00.000Z";
+      await repository.updateAssessment({
+        runId,
+        eventId: "assessment-timestamp-first",
+        receivedAt: firstAt,
+        verdict: "partial"
+      });
+      const before = repository.getCurrentAssessment(runId);
+      const note = completedAssessmentNote(artifactRoot, "rejected-earlier-timestamp-note");
 
-        await expect(repository.updateAssessment({
-          runId,
-          eventId: `assessment-timestamp-${name}`,
-          receivedAt: attemptedAt,
-          verdict: "failure",
-          taskCompleted: "no",
-          note: { state: "artifact", artifact: note }
-        })).rejects.toThrow(/timestamp.*strictly advance|strictly advance.*timestamp/i);
+      await expect(repository.updateAssessment({
+        runId,
+        eventId: "assessment-timestamp-earlier",
+        receivedAt: "2026-08-26T20:09:00.000Z",
+        verdict: "failure",
+        taskCompleted: "no",
+        note: { state: "artifact", artifact: note }
+      })).rejects.toThrow(/timestamp.*regress|regress.*timestamp/i);
 
-        expect(repository.getCurrentAssessment(runId)).toEqual(before);
-        expect(repository.getRunDetail(runId).events.map(({ id }) => id)).toEqual([
-          "assessment-timestamp-first"
-        ]);
-        expect(queryRows(databasePath, "SELECT * FROM artifacts")).toEqual([]);
-        expect(queryRows(databasePath, "SELECT * FROM redaction_audits")).toEqual([]);
-        expect(queryRows(databasePath, "SELECT * FROM event_artifact_bindings")).toEqual([]);
-      } finally {
-        close();
-      }
+      expect(repository.getCurrentAssessment(runId)).toEqual(before);
+      expect(repository.getRunDetail(runId).events.map(({ id }) => id)).toEqual([
+        "assessment-timestamp-first"
+      ]);
+      expect(queryRows(databasePath, "SELECT * FROM artifacts")).toEqual([]);
+      expect(queryRows(databasePath, "SELECT * FROM redaction_audits")).toEqual([]);
+      expect(queryRows(databasePath, "SELECT * FROM event_artifact_bindings")).toEqual([]);
+    } finally {
+      close();
     }
-  );
+  });
+
+  it("appends a distinct action at the same timestamp and advances only currentEventId", async () => {
+    const { repository, close } = setup();
+    try {
+      const sharedAt = "2026-08-26T20:10:00.000Z";
+      await repository.updateAssessment({
+        runId,
+        eventId: "assessment-equal-first",
+        receivedAt: sharedAt,
+        verdict: "partial"
+      });
+      const current = await repository.updateAssessment({
+        runId,
+        eventId: "assessment-equal-second",
+        receivedAt: sharedAt,
+        verdict: "success",
+        taskCompleted: "yes"
+      });
+
+      expect(current).toMatchObject({
+        currentEventId: "assessment-equal-second",
+        reviewedAt: Date.parse(sharedAt),
+        updatedAt: Date.parse(sharedAt)
+      });
+      expect(repository.getRunDetail(runId).events.map(({ id, sequence, receivedAt }) => ({
+        id,
+        sequence,
+        receivedAt
+      }))).toEqual([
+        { id: "assessment-equal-first", sequence: 0, receivedAt: sharedAt },
+        { id: "assessment-equal-second", sequence: 1, receivedAt: sharedAt }
+      ]);
+    } finally {
+      close();
+    }
+  });
 
   it("accepts a strictly later assessment timestamp while preserving the first reviewedAt", async () => {
     const { repository, close } = setup();

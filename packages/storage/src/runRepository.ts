@@ -1476,8 +1476,8 @@ export class RunRepository {
         const existingCurrent = this.#connection.prepare(`
           SELECT * FROM current_assessments WHERE run_id = ?
         `).get(input.runId) as CurrentAssessmentRow | undefined;
-        if (existingCurrent && validated.receivedAt <= existingCurrent.updated_at) {
-          throw new Error("Assessment timestamp must strictly advance the current assessment timestamp.");
+        if (existingCurrent && validated.receivedAt < existingCurrent.updated_at) {
+          throw new Error("Assessment timestamp cannot regress behind the current assessment timestamp.");
         }
         const eventOwner = this.#connection
           .prepare("SELECT run_id FROM events WHERE id = ?")
