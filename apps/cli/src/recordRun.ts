@@ -123,6 +123,34 @@ function advanceSequenceFromDerivedEvents(
   }
 }
 
+function rebaseSequenceFromDurableEvents(
+  repository: RunRepository,
+  state: RecordingState,
+  runId: string
+): void {
+  for (const event of repository.getRunDetail(runId).events) {
+    state.sequence = Math.max(state.sequence, event.sequence + 1);
+  }
+}
+
+function runDerivationWithSequenceRebase(
+  repository: RunRepository,
+  state: RecordingState,
+  runId: string,
+  derive: () => readonly TraceEventV1[]
+): void {
+  try {
+    advanceSequenceFromDerivedEvents(state, derive());
+  } catch (error) {
+    try {
+      rebaseSequenceFromDurableEvents(repository, state, runId);
+    } catch {
+      // The derivation persistence error remains primary when durable storage cannot be reread.
+    }
+    throw error;
+  }
+}
+
 const VERSION = "0.1.0";
 
 function iso(now: () => number): string {
@@ -545,9 +573,11 @@ export async function recordRun(
     committedArtifactIds
   };
   const catchUpTestDerivations = (): void => {
-    advanceSequenceFromDerivedEvents(
+    runDerivationWithSequenceRebase(
+      repository,
       state,
-      ensureRunTestDerivations({ repository, runId })
+      runId,
+      () => ensureRunTestDerivations({ repository, runId })
     );
   };
 
@@ -557,6 +587,8 @@ export async function recordRun(
   let interruptionEventId: string | undefined;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   let heartbeatFailure: Error | undefined;
+  let hasEagerDerivationFailure = false;
+  let eagerDerivationFailure: unknown;
   try {
     const redactedLabel = redactedOptionalText(command.label, command.capture, key, "label");
     repository.createRun({
@@ -666,11 +698,18 @@ export async function recordRun(
           if (persisted.provenance === "observed") {
             await dependencies.onObservedEventPersisted?.({ runId, eventId: persisted.id });
           }
-          if (isEligibleTerminalObservedCommand(persisted)) {
-            advanceSequenceFromDerivedEvents(
-              state,
-              deriveTerminalCommand({ repository, runId, sourceEventId: persisted.id })
-            );
+          if (isEligibleTerminalObservedCommand(persisted) && !hasEagerDerivationFailure) {
+            try {
+              runDerivationWithSequenceRebase(
+                repository,
+                state,
+                runId,
+                () => deriveTerminalCommand({ repository, runId, sourceEventId: persisted.id })
+              );
+            } catch (error) {
+              hasEagerDerivationFailure = true;
+              eagerDerivationFailure = error;
+            }
           }
           if (
             persisted.provenance === "observed" &&
@@ -742,6 +781,7 @@ export async function recordRun(
       }
     });
     await lineQueue;
+    if (hasEagerDerivationFailure) throw eagerDerivationFailure;
     if (heartbeatFailure) throw heartbeatFailure;
 
     if (childResult.explicitlyInterrupted) {

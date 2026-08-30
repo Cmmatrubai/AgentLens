@@ -811,6 +811,189 @@ describe("recordRun lifecycle", () => {
     )).toBe(false);
   });
 
+  it("rebases and contains an eager second-write derivation failure", async () => {
+    const context = await fixture();
+    const failureSentinel = "EAGER_DERIVATION_STORAGE_PRIVATE_SENTINEL";
+    const appendDerivedEvent = RunRepository.prototype.appendDerivedEvent;
+    let appendCalls = 0;
+    let terminalSourceBeforeFailure: string | undefined;
+    let partialCommandBeforeFailure: string | undefined;
+    let observedRunId: string | undefined;
+    vi.spyOn(RunRepository.prototype, "appendDerivedEvent")
+      .mockImplementation(function (this: RunRepository, input) {
+        appendCalls += 1;
+        if (appendCalls === 2) {
+          if (!observedRunId) throw new Error("Missing observed run ID before eager failure.");
+          partialCommandBeforeFailure = JSON.stringify(
+            detail(context.dataRoot, observedRunId).events.find(({ kind }) => kind === "test.command")
+          );
+          throw new Error(failureSentinel);
+        }
+        return appendDerivedEvent.call(this, input);
+      });
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: silentOutput,
+        onObservedEventPersisted: ({ runId, eventId }) => {
+          const source = detail(context.dataRoot, runId).events.find(({ id }) => id === eventId);
+          if (source?.source.eventType === "item.completed") {
+            observedRunId = runId;
+            terminalSourceBeforeFailure = JSON.stringify(source);
+          }
+        }
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const terminal = run.events.find(({ source }) =>
+      source.itemId === "test-command" && source.eventType === "item.completed"
+    );
+    const derived = run.events.filter(({ kind }) => kind.startsWith("test."));
+    const recorderFailure = run.events.find(({ kind, provenance }) =>
+      kind === "error" && provenance === "recorder"
+    );
+
+    expect(result.status).toBe("recorder_error");
+    expect(JSON.stringify(terminal)).toBe(terminalSourceBeforeFailure);
+    expect(derived.map(({ kind }) => kind)).toEqual(["test.command", "test.result"]);
+    expect(JSON.stringify(derived[0])).toBe(partialCommandBeforeFailure);
+    expect(derived[1]?.relationships).toEqual([
+      { type: "derived_from", eventId: terminal?.id }
+    ]);
+    expect(run.events.map(({ sequence }) => sequence)).toEqual(
+      Array.from({ length: run.events.length }, (_, sequence) => sequence)
+    );
+    expect(terminal?.sequence).toBeLessThan(derived[0]?.sequence ?? -1);
+    expect(derived[0]?.sequence).toBeLessThan(derived[1]?.sequence ?? -1);
+    expect(recorderFailure).toMatchObject({
+      status: "failed",
+      normalizedPayload: { recorderFailure: true, phase: "recording" }
+    });
+    expect(run.events.at(-1)).toMatchObject({
+      kind: "run.reconciled",
+      normalizedPayload: { status: "recorder_error", recorderFailure: true }
+    });
+
+    const database = openDatabase(join(context.dataRoot, "agentlens.sqlite"));
+    try {
+      const repository = new RunRepository(database, {
+        artifactRoot: join(context.dataRoot, "artifacts", "sha256")
+      });
+      const beforeRetry = repository.getRunDetail(result.runId).events;
+      const firstRetry = ensureTestDerivationsForRun({ repository, runId: result.runId });
+      const afterFirstRetry = repository.getRunDetail(result.runId).events;
+      const secondRetry = ensureTestDerivationsForRun({ repository, runId: result.runId });
+      expect(firstRetry).toEqual(derived);
+      expect(secondRetry).toEqual(firstRetry);
+      expect(afterFirstRetry).toEqual(beforeRetry);
+      expect(repository.getRunDetail(result.runId).events).toEqual(beforeRetry);
+    } finally {
+      database.close();
+    }
+    expect((await durableBytes(context.dataRoot)).includes(Buffer.from(failureSentinel))).toBe(false);
+  });
+
+  it("rebases and contains a finalization second-write derivation failure", async () => {
+    const context = await fixture();
+    const failureSentinel = "FINALIZATION_DERIVATION_STORAGE_PRIVATE_SENTINEL";
+    const appendDerivedEvent = RunRepository.prototype.appendDerivedEvent;
+    let appendCalls = 0;
+    let terminalSourceBeforeFailure: string | undefined;
+    let partialCommandBeforeFailure: string | undefined;
+    let observedRunId: string | undefined;
+    vi.spyOn(RunRepository.prototype, "appendDerivedEvent")
+      .mockImplementation(function (this: RunRepository, input) {
+        appendCalls += 1;
+        if (appendCalls === 2) {
+          if (!observedRunId) throw new Error("Missing observed run ID before finalization failure.");
+          partialCommandBeforeFailure = JSON.stringify(
+            detail(context.dataRoot, observedRunId).events.find(({ kind }) => kind === "test.command")
+          );
+          throw new Error(failureSentinel);
+        }
+        return appendDerivedEvent.call(this, input);
+      });
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: silentOutput,
+        derivePersistedTerminalCommand: () => [],
+        onObservedEventPersisted: ({ runId, eventId }) => {
+          const source = detail(context.dataRoot, runId).events.find(({ id }) => id === eventId);
+          if (source?.source.eventType === "item.completed") {
+            observedRunId = runId;
+            terminalSourceBeforeFailure = JSON.stringify(source);
+          }
+        }
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const terminal = run.events.find(({ source }) =>
+      source.itemId === "test-command" && source.eventType === "item.completed"
+    );
+    const derived = run.events.filter(({ kind }) => kind.startsWith("test."));
+    const recorderFailure = run.events.find(({ kind, provenance }) =>
+      kind === "error" && provenance === "recorder"
+    );
+
+    expect(result.status).toBe("recorder_error");
+    expect(JSON.stringify(terminal)).toBe(terminalSourceBeforeFailure);
+    expect(derived.map(({ kind }) => kind)).toEqual(["test.command", "test.result"]);
+    expect(JSON.stringify(derived[0])).toBe(partialCommandBeforeFailure);
+    expect(derived[1]?.relationships).toEqual([
+      { type: "derived_from", eventId: terminal?.id }
+    ]);
+    expect(run.events.map(({ sequence }) => sequence)).toEqual(
+      Array.from({ length: run.events.length }, (_, sequence) => sequence)
+    );
+    expect(terminal?.sequence).toBeLessThan(derived[0]?.sequence ?? -1);
+    expect(derived[0]?.sequence).toBeLessThan(derived[1]?.sequence ?? -1);
+    expect(recorderFailure).toMatchObject({
+      status: "failed",
+      normalizedPayload: { recorderFailure: true, phase: "recording" }
+    });
+    expect(run.events.at(-1)).toMatchObject({
+      kind: "run.reconciled",
+      normalizedPayload: { status: "recorder_error", recorderFailure: true }
+    });
+
+    const database = openDatabase(join(context.dataRoot, "agentlens.sqlite"));
+    try {
+      const repository = new RunRepository(database, {
+        artifactRoot: join(context.dataRoot, "artifacts", "sha256")
+      });
+      const beforeRetry = repository.getRunDetail(result.runId).events;
+      const firstRetry = ensureTestDerivationsForRun({ repository, runId: result.runId });
+      const afterFirstRetry = repository.getRunDetail(result.runId).events;
+      const secondRetry = ensureTestDerivationsForRun({ repository, runId: result.runId });
+      expect(firstRetry).toEqual(derived);
+      expect(secondRetry).toEqual(firstRetry);
+      expect(afterFirstRetry).toEqual(beforeRetry);
+      expect(repository.getRunDetail(result.runId).events).toEqual(beforeRetry);
+    } finally {
+      database.close();
+    }
+    expect((await durableBytes(context.dataRoot)).includes(Buffer.from(failureSentinel))).toBe(false);
+  });
+
   it("persists already-redacted command evidence for every observed command lifecycle event", async () => {
     const context = await fixture();
     const sentinel = "STANDARD_COMMAND_EVIDENCE_SENTINEL";
