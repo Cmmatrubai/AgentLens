@@ -262,6 +262,66 @@ git diff --check
 Exit        0
 ```
 
+### Third independent-review fix round
+
+Third fix-round base: `599a1f7b348c46cf0c5bf3562bbc444698937133`
+
+The controller added one permanent inaccessible-database regression and an
+explicit redaction-key assertion to the existing WAL/mode fixture. The exact
+targeted RED was reproduced before the production edit:
+
+```text
+pnpm vitest --run apps/cli/test/doctor.integration.test.ts -t 'inaccessible regular database|unreadable redaction key'
+Test Files  1 failed (1)
+Tests       1 failed | 1 passed | 73 skipped (75)
+Exit        1
+```
+
+The inaccessible exact regular database was still inspected through a
+handle-opening filesystem helper. Mode `000` therefore erased its existence
+metadata and collapsed `sensitive_paths`, `redaction_key`, and `sqlite` into a
+filesystem inspection failure. The database path now uses the same
+metadata-only type/owner/mode classification boundary as the exact sidecars;
+the existing immutable SQLite inspection remains solely responsible for
+database accessibility and maps its bounded raw failure to `open_failed`.
+This preserves database symlink/non-regular classification, mandatory WAL
+precedence, `key_missing` for a present database, and the no-content contract.
+
+The exact targeted rerun passed 2/2. Final fresh third-round gates were:
+
+```text
+pnpm vitest --run apps/cli/test/doctor.integration.test.ts
+Test Files  1 passed (1)
+Tests       75 passed (75)
+Exit        0
+
+pnpm vitest --run apps/cli/test/doctor.test.ts apps/cli/test/doctor.integration.test.ts apps/cli/test/args.test.ts
+Test Files  3 passed (3)
+Tests       137 passed (137)
+Exit        0
+
+pnpm vitest --run apps/cli/test/packagedBinary.integration.test.ts apps/cli/test/readOnlyDataRoot.test.ts packages/storage/test/readOnlyDatabase.test.ts
+Test Files  3 passed (3)
+Tests       23 passed (23)
+Exit        0
+
+pnpm vitest --run apps/cli/test
+Test Files  20 passed (20)
+Tests       405 passed (405)
+Exit        0
+
+pnpm test
+Test Files  38 passed (38)
+Tests       783 passed (783)
+Exit        0
+
+pnpm typecheck
+Exit        0
+
+git diff --check
+Exit        0
+```
+
 ## Implemented contract
 
 - `agentlens doctor [--data-root PATH] [--json]` is part of the public CLI
@@ -274,8 +334,11 @@ Exit        0
 - Overall status is the worst check status (`fail` before `warn` before `pass`).
   Exit status is one only for an overall failure and zero otherwise.
 - Filesystem diagnosis uses lstat plus no-follow opens and handle identity
-  checks. It examines type, ownership, mode, symlink boundaries, bounded tree
-  shape, and metadata only; it never reads secret or artifact payload bytes.
+  checks where handle access is part of the path contract. Exact database,
+  sidecar, key, and artifact-file classification retains lstat metadata without
+  opening payload bytes; immutable SQLite inspection owns database access. It
+  examines type, ownership, mode, symlink boundaries, and bounded tree shape;
+  it never reads secret or artifact payload bytes.
 - Requested-root containment checks ancestors parent-first and validates node
   type before ownership trust, including when uid lookup is unavailable. A
   differently-owned directory is a boundary only when not group/world writable;

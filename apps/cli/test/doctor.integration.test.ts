@@ -342,8 +342,43 @@ describe("doctor storage inspection", () => {
       status: "fail",
       metadata: { code: "wal_present" }
     });
+    if (relativePath === "secrets/redaction-hmac.key") {
+      expect(named(result, "redaction_key")).toMatchObject({
+        status: "pass",
+        metadata: { code: "ok" }
+      });
+    }
     expect(JSON.stringify(result)).not.toContain("WAL_PRECEDENCE_SENTINEL");
     expect(JSON.stringify(result)).not.toContain(sentinel);
+  });
+
+  it("keeps an inaccessible regular database visible to independent key and SQLite checks", async () => {
+    const context = await fixture();
+    await mkdir(context.dataRoot, { mode: 0o700 });
+    const databasePath = join(context.dataRoot, "agentlens.sqlite");
+    await writeFile(databasePath, "UNREADABLE_DATABASE_SENTINEL", { mode: 0o600 });
+    await chmod(databasePath, 0o000);
+
+    const result = await diagnoseDoctor(context.dataRoot, nonStorageDependencies({
+      databaseInspection: async () => {
+        throw new Error("RAW_DATABASE_OPEN_SENTINEL");
+      }
+    }));
+
+    expect(named(result, "sensitive_paths")).toMatchObject({
+      status: "pass",
+      metadata: { code: "ok" }
+    });
+    expect(named(result, "redaction_key")).toMatchObject({
+      status: "fail",
+      metadata: { code: "key_missing" }
+    });
+    expect(named(result, "sqlite")).toMatchObject({
+      status: "fail",
+      metadata: { code: "open_failed" }
+    });
+    expect(JSON.stringify(result)).not.toContain("UNREADABLE_DATABASE_SENTINEL");
+    expect(JSON.stringify(result)).not.toContain("RAW_DATABASE_OPEN_SENTINEL");
   });
 
   it.each([

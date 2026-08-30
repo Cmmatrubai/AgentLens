@@ -521,7 +521,7 @@ async function inspectStorageChecks(
     await Promise.all([
       pathInspectionOutcome(paths.secrets),
       pathInspectionOutcome(paths.artifacts),
-      pathInspectionOutcome(paths.database),
+      pathInspectionOutcome(paths.database, true),
       pathInspectionOutcome(paths.wal, true),
       pathInspectionOutcome(paths.shm, true)
     ]);
