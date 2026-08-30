@@ -351,6 +351,27 @@ describe("SQLite migrations", () => {
     }
   });
 
+  it("rejects a current assessment without a run identity", () => {
+    const path = temporaryDatabasePath();
+    const database = openDatabase(path);
+    database.close();
+    const connection = new Database(path);
+    connection.pragma("foreign_keys = ON");
+    try {
+      expect(() => connection.prepare(`
+        INSERT INTO current_assessments (
+          run_id, current_event_id, verdict, task_completion, note_state,
+          note_artifact_id, note_omission_reason, reviewed_at, updated_at
+        ) VALUES (
+          NULL, 'missing-event', 'unreviewed', 'uncertain', 'absent',
+          NULL, NULL, 1777777777900, 1777777777900
+        )
+      `).run()).toThrow(/not null/i);
+    } finally {
+      connection.close();
+    }
+  });
+
   it("reports future migration rows without rewriting or hiding them", () => {
     const path = temporaryDatabasePath();
     const database = openDatabase(path);

@@ -18,7 +18,7 @@ CREATE INDEX idx_derivation_identities_run_source
   ON derivation_identities(run_id, source_event_id);
 
 CREATE TABLE current_assessments (
-  run_id TEXT PRIMARY KEY REFERENCES runs(id),
+  run_id TEXT NOT NULL PRIMARY KEY REFERENCES runs(id),
   current_event_id TEXT NOT NULL,
   verdict TEXT NOT NULL CHECK (verdict IN ('unreviewed', 'success', 'partial', 'failure')),
   task_completion TEXT NOT NULL CHECK (task_completion IN ('yes', 'no', 'uncertain')),
