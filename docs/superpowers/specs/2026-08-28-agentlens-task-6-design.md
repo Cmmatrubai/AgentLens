@@ -120,6 +120,9 @@ semantics:
   safely checkpointed;
 - with no WAL path, SQLite is opened in read-only immutable mode and may read
   only the checkpointed main database;
+- the pinned `better-sqlite3` build's existing runtime URI hook is enabled
+  synchronously before the first AgentLens-owned native connection, and the
+  exact prior `SQLITE_USE_URI` environment value is restored immediately;
 - AgentLens does not copy, checkpoint, snapshot, delete, truncate, or repair the
   database or its sidecars;
 - successful immutable reads and WAL-present refusals must both preserve the
@@ -129,6 +132,9 @@ This preserves purity at the explicit product cost that `runs`, `inspect`,
 `assess` validation, and SQLite doctor checks may be unavailable while a WAL
 path is present. Writable recorder/maintenance flows remain responsible for
 normal SQLite checkpoint/close behavior; read commands never trigger it.
+If another in-process consumer initializes the native addon before AgentLens or
+a future dependency version removes the URI hook, immutable open fails clearly;
+AgentLens never falls back to ordinary read-only SQLite.
 
 The existing durable stale-run recovery service remains unchanged. Its automatic
 trigger moves to record startup after the existing non-Git/dirty-repository and

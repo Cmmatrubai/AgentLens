@@ -432,6 +432,14 @@ immutable read-only mode and fileMustExist, then set foreign_keys ON and
 query_only ON. Do not set journal mode, apply migrations, mkdir, chmod, create a
 database, copy files, checkpoint, snapshot, or clean sidecars.
 
+The pinned `better-sqlite3` build defaults SQLite URI filenames off but exposes
+its existing `SQLITE_USE_URI=1` initialization hook. Centralize all
+AgentLens-owned Database construction so the first native-addon load happens
+while that value is set, then synchronously restore the exact prior environment
+value. Cover restoration and ordinary writable-path behavior. If the addon was
+already initialized without URI support, immutable open must fail; do not fall
+back to an ordinary read-only connection.
+
 Make inspectConnection tolerate a missing schema_migrations table by reporting an empty migration list and provide quick_check and foreign_key_check results without writes.
 
 Retain the compatibility probe as regression evidence: ordinary readonly plus
