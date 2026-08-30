@@ -178,6 +178,12 @@ export interface RunRepositoryOptions {
   artifactRoot: string;
 }
 
+export interface StorageSchemaCapabilities {
+  readonly derivationIdentities: boolean;
+  readonly currentAssessments: boolean;
+  readonly eventArtifactBindings: boolean;
+}
+
 export interface RunDetail {
   run: RunRecord;
   ownership: RecorderOwnership | null;
@@ -749,9 +755,30 @@ function validateInterruption(event: TraceEventV1, run: RunRow): void {
   ) throw new Error("Explicit interruption supporting event semantics are invalid.");
 }
 
+function detectStorageSchemaCapabilities(
+  connection: Database.Database
+): StorageSchemaCapabilities {
+  const tables = new Set(connection.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name IN (
+        'derivation_identities',
+        'current_assessments',
+        'event_artifact_bindings'
+      )
+  `).pluck().all() as string[]);
+  return Object.freeze({
+    derivationIdentities: tables.has("derivation_identities"),
+    currentAssessments: tables.has("current_assessments"),
+    eventArtifactBindings: tables.has("event_artifact_bindings")
+  });
+}
+
 export class RunRepository {
   readonly #connection: Database.Database;
   readonly #artifactRoot: string;
+  readonly schemaCapabilities: StorageSchemaCapabilities;
 
   constructor(database: AgentLensDatabase, options: RunRepositoryOptions) {
     this.#connection = connectionFor(database);
@@ -759,6 +786,7 @@ export class RunRepository {
       throw new Error("RunRepository requires an absolute configured artifact root.");
     }
     this.#artifactRoot = resolve(options.artifactRoot);
+    this.schemaCapabilities = detectStorageSchemaCapabilities(this.#connection);
   }
 
   createRun(input: CreateRunInput, ownership: CreateRecorderOwnershipInput): RunRecord {

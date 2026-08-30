@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EventStatus, TraceEventV1 } from "@agentlens/core";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { openDatabase } from "../src/database.js";
+import { openDatabase, openDatabaseReadOnly } from "../src/database.js";
 import {
   RunRepository,
   type CreateRecorderOwnershipInput,
@@ -25,6 +26,50 @@ function setup(): { repository: RunRepository; close: () => void } {
   const repository = new RunRepository(database, { artifactRoot });
   repository.createRun(validRun(), validOwnership());
   return { repository, close: () => database.close() };
+}
+
+function setupMigration003(): { repository: RunRepository; close: () => void } {
+  const root = mkdtempSync(join(tmpdir(), "agentlens-storage-repository-v3-"));
+  temporaryRoots.push(root);
+  const artifactRoot = join(root, "artifacts", "sha256");
+  mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
+  const databasePath = join(root, "agentlens.sqlite");
+  const writable = new Database(databasePath);
+  writable.pragma("foreign_keys = ON");
+  for (const [version, filename] of [
+    [1, "001_initial.sql"],
+    [2, "002_storage_invariants.sql"],
+    [3, "003_recorder_ownership.sql"]
+  ] as const) {
+    writable.exec(readFileSync(new URL(`../migrations/${filename}`, import.meta.url), "utf8"));
+    writable.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)")
+      .run(version, version);
+  }
+  const run = validRun({ id: "legacy-run" });
+  writable.prepare(`
+    INSERT INTO runs (
+      id, schema_version, provider, integration_version, agent_version, status,
+      capture_policy, capture_policy_version, redaction_version, label, prompt_source,
+      repository_fingerprint, repository_display, started_at
+    ) VALUES (
+      @id, @schemaVersion, @provider, @integrationVersion, @agentVersion, 'starting',
+      @capturePolicy, @capturePolicyVersion, @redactionVersion, NULL, NULL,
+      @repositoryFingerprint, @repositoryDisplay, @startedAt
+    )
+  `).run(run);
+  writable.prepare(`
+    INSERT INTO run_ownership (
+      run_id, recorder_instance_id, recorder_pid, recorder_start_token,
+      heartbeat_at, condition, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 'active', ?)
+  `).run("legacy-run", "legacy-recorder", 303, "legacy-start-token", run.startedAt, run.startedAt);
+  writable.close();
+
+  const database = openDatabaseReadOnly(databasePath);
+  return {
+    repository: new RunRepository(database, { artifactRoot }),
+    close: () => database.close()
+  };
 }
 
 function validOwnership(
@@ -671,6 +716,44 @@ describe("append-only events and recovery", () => {
         relationships: [{ type: "correlates_with", eventId: "missing-event" }]
       }))).toThrow();
       expect(repository.getRunDetail(runId).events.map(({ id }) => id)).not.toContain("bad-link");
+    } finally {
+      close();
+    }
+  });
+});
+
+describe("storage schema capabilities", () => {
+  it("records every Task 6 table present in the current schema", () => {
+    const { repository, close } = setup();
+    try {
+      expect(repository.schemaCapabilities).toEqual({
+        derivationIdentities: true,
+        currentAssessments: true,
+        eventArtifactBindings: true
+      });
+    } finally {
+      close();
+    }
+  });
+
+  it("keeps Task 5-schema run reads on the legacy query shape", () => {
+    const { repository, close } = setupMigration003();
+    try {
+      expect(repository.schemaCapabilities).toEqual({
+        derivationIdentities: false,
+        currentAssessments: false,
+        eventArtifactBindings: false
+      });
+      expect(repository.listRuns()).toEqual([
+        expect.objectContaining({ id: "legacy-run", status: "starting" })
+      ]);
+      expect(repository.getRunDetail("legacy-run")).toMatchObject({
+        run: { id: "legacy-run", status: "starting" },
+        events: [],
+        artifacts: [],
+        redactionAudits: [],
+        gitEvidence: null
+      });
     } finally {
       close();
     }

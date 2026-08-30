@@ -4,8 +4,12 @@ import { join } from "node:path";
 import { expect, expectTypeOf, it } from "vitest";
 import {
   openDatabase,
+  openDatabaseReadOnly,
+  ReadOnlyDatabaseError,
   RunRepository,
-  type AgentLensDatabase
+  type AgentLensDatabase,
+  type DatabaseForeignKeyViolation,
+  type ReadOnlyDatabaseErrorReason
 } from "../src/index.js";
 
 it("does not expose a raw SQLite event-mutation handle from the public API", () => {
@@ -28,4 +32,20 @@ it("does not expose a raw SQLite event-mutation handle from the public API", () 
     database.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+it("exports the bounded read-only inspection API", () => {
+  expectTypeOf(openDatabaseReadOnly).toBeFunction();
+  expectTypeOf<ReadOnlyDatabaseErrorReason>()
+    .toEqualTypeOf<"wal_present" | "immutable_unavailable">();
+  expectTypeOf<DatabaseForeignKeyViolation>().toMatchTypeOf<{
+    table: string;
+    rowid: number | null;
+    parent: string;
+    fkid: number;
+  }>();
+
+  const error = new ReadOnlyDatabaseError("wal_present");
+  expect(error).toBeInstanceOf(Error);
+  expect(error.reason).toBe("wal_present");
 });
