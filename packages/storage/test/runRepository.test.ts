@@ -1,12 +1,23 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFile as execFileCallback } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import type { EventStatus, TraceEventV1 } from "@agentlens/core";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase, openDatabaseReadOnly } from "../src/database.js";
 import {
   RunRepository,
+  type AppendDerivedEventInput,
   type CreateRecorderOwnershipInput,
   type CreateRunInput,
   type GitEvidenceInput,
@@ -16,16 +27,44 @@ import {
 const temporaryRoots: string[] = [];
 const runId = "run-001";
 const receivedAt = "2026-08-26T20:00:00.000Z";
+const execFile = promisify(execFileCallback);
 
-function setup(): { repository: RunRepository; close: () => void } {
+const appendDerivedRaceScript = `
+  const { existsSync, writeFileSync } = await import("node:fs");
+  const storage = await import(process.env.AGENTLENS_RACE_STORAGE_MODULE);
+  const database = storage.openDatabase(process.env.AGENTLENS_RACE_DATABASE);
+  const repository = new storage.RunRepository(database, {
+    artifactRoot: process.env.AGENTLENS_RACE_ARTIFACT_ROOT
+  });
+  writeFileSync(process.env.AGENTLENS_RACE_READY, "ready");
+  try {
+    while (!existsSync(process.env.AGENTLENS_RACE_START)) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    const event = repository.appendDerivedEvent(
+      JSON.parse(process.env.AGENTLENS_RACE_INPUT)
+    );
+    process.stdout.write(JSON.stringify(event));
+  } finally {
+    database.close();
+  }
+`;
+
+function setup(): {
+  repository: RunRepository;
+  databasePath: string;
+  artifactRoot: string;
+  close: () => void;
+} {
   const root = mkdtempSync(join(tmpdir(), "agentlens-storage-repository-"));
   temporaryRoots.push(root);
   const artifactRoot = join(root, "artifacts", "sha256");
   mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
-  const database = openDatabase(join(root, "agentlens.sqlite"));
+  const databasePath = join(root, "agentlens.sqlite");
+  const database = openDatabase(databasePath);
   const repository = new RunRepository(database, { artifactRoot });
   repository.createRun(validRun(), validOwnership());
-  return { repository, close: () => database.close() };
+  return { repository, databasePath, artifactRoot, close: () => database.close() };
 }
 
 function setupMigration003(): { repository: RunRepository; close: () => void } {
@@ -139,6 +178,57 @@ function event(
     nativePayload: { storage: "inline", redacted: { status } },
     ...overrides
   };
+}
+
+function derivedInput(
+  kind: "test.command" | "test.result",
+  overrides: Partial<AppendDerivedEventInput> = {}
+): AppendDerivedEventInput {
+  const digest = kind === "test.command"
+    ? "2b7fa57722f5615e2528d7bcbebdcd6383149cd393f0128b37e0b6a1392636f3"
+    : "3bb5d4c9d15e7db172c2f88549334706cc45009f33106beaa13b60308be3ae7a";
+  const result = kind === "test.result";
+  return {
+    identity: `agentlens-derivation-sha256:${digest}`,
+    sourceEventId: "source-event",
+    eventId: `drv_${digest}`,
+    receivedAt: "2026-08-26T20:00:01.000Z",
+    kind,
+    status: "completed",
+    sourceProvider: "codex-exec",
+    summary: result
+      ? "Likely pytest test result: passed (high confidence)"
+      : "Likely pytest test command (high confidence)",
+    normalizedPayload: result
+      ? {
+          family: "pytest",
+          confidence: "high",
+          outcome: "passed",
+          exitCode: 0,
+          derivationId: "test-command/1"
+        }
+      : {
+          family: "pytest",
+          confidence: "high",
+          derivationId: "test-command/1"
+        },
+    derivation: {
+      name: "test-command",
+      version: "1",
+      identity: `agentlens-derivation-sha256:${digest}`,
+      confidence: "high"
+    },
+    ...overrides
+  };
+}
+
+async function waitForFiles(paths: readonly string[]): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (paths.every((path) => existsSync(path))) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for concurrent repository connections.");
 }
 
 afterEach(() => {
@@ -756,6 +846,165 @@ describe("storage schema capabilities", () => {
       });
     } finally {
       close();
+    }
+  });
+});
+
+describe("derived event identity storage", () => {
+  it("fills a split-write gap and makes every retry a no-op", () => {
+    const { repository, close } = setup();
+    try {
+      const source = repository.appendEvent(event("source-event", 0, "completed", {
+        normalizedPayload: {
+          commandEvidence: { state: "available", redactedCommand: "pytest -q" },
+          exitCode: 0
+        }
+      }));
+      const commandInput = derivedInput("test.command");
+      const resultInput = derivedInput("test.result");
+
+      const firstCommand = repository.appendDerivedEvent(commandInput);
+      expect(repository.appendDerivedEvent(commandInput)).toEqual(firstCommand);
+      expect(repository.getRunDetail(runId).events.map(({ kind }) => kind)).toEqual([
+        "command",
+        "test.command"
+      ]);
+
+      const firstResult = repository.appendDerivedEvent(resultInput);
+      expect(repository.appendDerivedEvent(commandInput)).toEqual(firstCommand);
+      expect(repository.appendDerivedEvent(resultInput)).toEqual(firstResult);
+
+      const events = repository.getRunDetail(runId).events;
+      expect(events.map(({ id, sequence }) => ({ id, sequence }))).toEqual([
+        { id: "source-event", sequence: 0 },
+        { id: commandInput.eventId, sequence: 1 },
+        { id: resultInput.eventId, sequence: 2 }
+      ]);
+      expect(events[0]).toEqual(source);
+      expect(events.slice(1).map(({ relationships }) => relationships)).toEqual([
+        [{ type: "derived_from", eventId: "source-event" }],
+        [{ type: "derived_from", eventId: "source-event" }]
+      ]);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects a repeated natural tuple whose deterministic payload changed", () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("source-event", 0, "completed"));
+      repository.appendDerivedEvent(derivedInput("test.command"));
+
+      expect(() => repository.appendDerivedEvent(derivedInput("test.command", {
+        summary: "Changed summary"
+      }))).toThrow(/existing derived event.*requested|does not match/i);
+      expect(() => repository.appendDerivedEvent(derivedInput("test.command", {
+        normalizedPayload: {
+          family: "pytest",
+          confidence: "high",
+          derivationId: "test-command/1",
+          copiedCommand: "pytest -q"
+        }
+      }))).toThrow(/existing derived event.*requested|does not match/i);
+      expect(repository.getRunDetail(runId).events).toHaveLength(2);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects a deterministic event already owned by a source in another run", () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("source-event", 0, "completed"));
+      const input = derivedInput("test.command");
+      repository.createRun(
+        validRun({ id: "run-other" }),
+        validOwnership({ recorderInstanceId: "recorder-instance-other" })
+      );
+      repository.appendEvent(event("other-source", 0, "completed", { runId: "run-other" }));
+
+      expect(() => repository.appendDerivedEvent({
+        ...input,
+        sourceEventId: "other-source"
+      })).toThrow(/same run|run ownership|another run/i);
+      expect(repository.getRunDetail("run-other").events.map(({ id }) => id)).toEqual([
+        "other-source"
+      ]);
+    } finally {
+      close();
+    }
+  });
+
+  it("converges two racing repository connections on the same durable winner", async () => {
+    const { repository, databasePath, artifactRoot, close } = setup();
+    try {
+      repository.appendEvent(event("source-event", 0, "completed"));
+      const input = derivedInput("test.command");
+      const raceRoot = dirname(databasePath);
+      const start = join(raceRoot, "race-start");
+      const ready = [join(raceRoot, "race-ready-1"), join(raceRoot, "race-ready-2")];
+      const storageModule = pathToFileURL(join(
+        process.cwd(),
+        "packages/storage/src/index.ts"
+      )).href;
+      const race = (readyPath: string) => execFile(
+        process.execPath,
+        ["--import", "tsx", "--input-type=module", "--eval", appendDerivedRaceScript],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            AGENTLENS_RACE_STORAGE_MODULE: storageModule,
+            AGENTLENS_RACE_DATABASE: databasePath,
+            AGENTLENS_RACE_ARTIFACT_ROOT: artifactRoot,
+            AGENTLENS_RACE_READY: readyPath,
+            AGENTLENS_RACE_START: start,
+            AGENTLENS_RACE_INPUT: JSON.stringify(input)
+          }
+        }
+      );
+      const racers = ready.map(race);
+      try {
+        await waitForFiles(ready);
+      } finally {
+        writeFileSync(start, "start");
+      }
+      const results = await Promise.all(racers);
+      const winners = results.map(({ stdout }) => JSON.parse(stdout) as TraceEventV1);
+
+      expect(winners[1]).toEqual(winners[0]);
+      expect(repository.getRunDetail(runId).events.filter(({ kind }) =>
+        kind === "test.command"
+      )).toEqual([winners[0]]);
+    } finally {
+      close();
+    }
+  });
+
+  it("rehydrates the exact durable identities after closing and reopening", () => {
+    const fixture = setup();
+    const commandInput = derivedInput("test.command");
+    const resultInput = derivedInput("test.result");
+    try {
+      fixture.repository.appendEvent(event("source-event", 0, "completed"));
+      fixture.repository.appendDerivedEvent(commandInput);
+      fixture.repository.appendDerivedEvent(resultInput);
+      fixture.close();
+
+      const reopenedDatabase = openDatabase(fixture.databasePath);
+      try {
+        const reopened = new RunRepository(reopenedDatabase, {
+          artifactRoot: fixture.artifactRoot
+        });
+        expect(reopened.getRunDetail(runId).events.slice(1).map((stored) =>
+          stored.derivation?.identity
+        )).toEqual([commandInput.identity, resultInput.identity]);
+      } finally {
+        reopenedDatabase.close();
+      }
+    } finally {
+      fixture.close();
     }
   });
 });

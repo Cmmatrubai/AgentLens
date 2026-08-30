@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
   traceEventV1Schema,
   type CapturePolicy,
@@ -178,6 +179,24 @@ export interface RunRepositoryOptions {
   artifactRoot: string;
 }
 
+export interface AppendDerivedEventInput {
+  readonly identity: string;
+  readonly sourceEventId: string;
+  readonly eventId: string;
+  readonly receivedAt: string;
+  readonly kind: "test.command" | "test.result";
+  readonly status: EventStatus;
+  readonly sourceProvider: NativeSourceV1["provider"];
+  readonly summary: string;
+  readonly normalizedPayload: unknown;
+  readonly derivation: {
+    readonly name: "test-command";
+    readonly version: "1";
+    readonly identity: string;
+    readonly confidence: "high" | "medium";
+  };
+}
+
 export interface StorageSchemaCapabilities {
   readonly derivationIdentities: boolean;
   readonly currentAssessments: boolean;
@@ -236,6 +255,7 @@ interface EventRow {
   derivation_name: string | null;
   derivation_version: string | null;
   derivation_confidence: "high" | "medium" | "low" | null;
+  derivation_identity?: string | null;
   source_provider: NativeSourceV1["provider"];
   session_id: string | null;
   thread_id: string | null;
@@ -245,6 +265,17 @@ interface EventRow {
   event_type: string | null;
   item_type: string | null;
   correlation_id: string | null;
+}
+
+interface DerivationIdentityRow {
+  run_id: string;
+  identity: string;
+  source_event_id: string;
+  derivation_name: string;
+  derivation_version: string;
+  derived_kind: "test.command" | "test.result";
+  derived_event_id: string;
+  created_at: number;
 }
 
 interface RunListRow extends RunRow {
@@ -343,6 +374,12 @@ function json(value: unknown): string {
   const serialized = JSON.stringify(value);
   if (serialized === undefined) throw new Error("Value is not JSON-serializable.");
   return serialized;
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && code.startsWith("SQLITE_CONSTRAINT");
 }
 
 function optionalProperty<T extends object, K extends string, V>(
@@ -1035,6 +1072,69 @@ export class RunRepository {
     return event;
   }
 
+  appendDerivedEvent(input: AppendDerivedEventInput): TraceEventV1 {
+    if (!this.schemaCapabilities.derivationIdentities) {
+      throw new Error("Task 6 derivation identity storage is unavailable.");
+    }
+    this.validateDerivedEventInput(input);
+
+    const append = this.#connection.transaction(() => {
+      const sourceOwner = this.sourceEventOwner(input.sourceEventId);
+      if (!sourceOwner) {
+        throw new Error(`Derived source event ${input.sourceEventId} does not exist.`);
+      }
+      if (sourceOwner.provider !== input.sourceProvider) {
+        throw new Error("Derived event source provider must match the run provider.");
+      }
+      this.validateDerivedIdentityForSource(sourceOwner.runId, input);
+
+      const existing = this.resolveExistingDerivedEvent(sourceOwner.runId, input);
+      if (existing) return existing;
+
+      const eventOwner = this.#connection
+        .prepare("SELECT run_id FROM events WHERE id = ?")
+        .get(input.eventId) as { run_id: string } | undefined;
+      if (eventOwner && eventOwner.run_id !== sourceOwner.runId) {
+        throw new Error("Deterministic derived event ID is already owned by another run.");
+      }
+      if (eventOwner) {
+        throw new Error("Deterministic derived event exists without its identity binding.");
+      }
+
+      const event = this.derivedEvent(input, sourceOwner.runId, this.nextSequence(sourceOwner.runId));
+      this.validateEventRelationships(event);
+      this.insertEvent(event, []);
+      this.#connection.prepare(`
+        INSERT INTO derivation_identities (
+          run_id, identity, source_event_id, derivation_name, derivation_version,
+          derived_kind, derived_event_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        sourceOwner.runId,
+        input.identity,
+        input.sourceEventId,
+        input.derivation.name,
+        input.derivation.version,
+        input.kind,
+        input.eventId,
+        epochMilliseconds(input.receivedAt)
+      );
+      return event;
+    });
+
+    try {
+      return append.immediate();
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) throw error;
+      const sourceOwner = this.sourceEventOwner(input.sourceEventId);
+      const winner = sourceOwner
+        ? this.resolveExistingDerivedEvent(sourceOwner.runId, input)
+        : undefined;
+      if (winner) return winner;
+      throw error;
+    }
+  }
+
   async commitArtifactMetadata(
     input: CompletedArtifact,
     audits: readonly RedactionAudit[] = [],
@@ -1522,16 +1622,32 @@ export class RunRepository {
   }
 
   private readEvents(runId: string): TraceEventV1[] {
-    const rows = this.#connection.prepare(`
-      SELECT events.*, event_sources.provider AS source_provider,
-        event_sources.session_id, event_sources.thread_id, event_sources.turn_id,
-        event_sources.item_id, event_sources.tool_id, event_sources.event_type,
-        event_sources.item_type, event_sources.correlation_id
-      FROM events
-      JOIN event_sources ON event_sources.event_id = events.id
-      WHERE events.run_id = ?
-      ORDER BY events.sequence, events.id
-    `).all(runId) as EventRow[];
+    const eventQuery = this.schemaCapabilities.derivationIdentities
+      ? `
+          SELECT events.*, event_sources.provider AS source_provider,
+            event_sources.session_id, event_sources.thread_id, event_sources.turn_id,
+            event_sources.item_id, event_sources.tool_id, event_sources.event_type,
+            event_sources.item_type, event_sources.correlation_id,
+            derivation_identities.identity AS derivation_identity
+          FROM events
+          JOIN event_sources ON event_sources.event_id = events.id
+          LEFT JOIN derivation_identities
+            ON derivation_identities.run_id = events.run_id
+            AND derivation_identities.derived_event_id = events.id
+          WHERE events.run_id = ?
+          ORDER BY events.sequence, events.id
+        `
+      : `
+          SELECT events.*, event_sources.provider AS source_provider,
+            event_sources.session_id, event_sources.thread_id, event_sources.turn_id,
+            event_sources.item_id, event_sources.tool_id, event_sources.event_type,
+            event_sources.item_type, event_sources.correlation_id
+          FROM events
+          JOIN event_sources ON event_sources.event_id = events.id
+          WHERE events.run_id = ?
+          ORDER BY events.sequence, events.id
+        `;
+    const rows = this.#connection.prepare(eventQuery).all(runId) as EventRow[];
     const relationshipRows = this.#connection.prepare(`
       SELECT relationships.event_id, relationships.relationship_type,
         relationships.related_event_id
@@ -1589,11 +1705,135 @@ export class RunRepository {
           name: row.derivation_name,
           version: row.derivation_version,
           sourceEventIds,
-          ...(row.derivation_confidence ? { confidence: row.derivation_confidence } : {})
+          ...(row.derivation_confidence ? { confidence: row.derivation_confidence } : {}),
+          ...(row.derivation_identity ? { identity: row.derivation_identity } : {})
         };
       }
       return traceEventV1Schema.parse(value);
     });
+  }
+
+  private validateDerivedEventInput(input: AppendDerivedEventInput): void {
+    const match = /^agentlens-derivation-sha256:([0-9a-f]{64})$/.exec(input.identity);
+    if (!match || input.eventId !== `drv_${match[1]}`) {
+      throw new Error("Derived event ID must match its full SHA-256 derivation identity.");
+    }
+    if (
+      input.derivation.name !== "test-command" ||
+      input.derivation.version !== "1" ||
+      input.derivation.identity !== input.identity
+    ) {
+      throw new Error("Derived event identity metadata is inconsistent.");
+    }
+  }
+
+  private sourceEventOwner(
+    sourceEventId: string
+  ): Readonly<{ runId: string; provider: NativeSourceV1["provider"] }> | undefined {
+    const row = this.#connection.prepare(`
+      SELECT events.run_id, runs.provider
+      FROM events
+      JOIN runs ON runs.id = events.run_id
+      WHERE events.id = ?
+    `).get(sourceEventId) as {
+      run_id: string;
+      provider: NativeSourceV1["provider"];
+    } | undefined;
+    return row ? { runId: row.run_id, provider: row.provider } : undefined;
+  }
+
+  private validateDerivedIdentityForSource(
+    runId: string,
+    input: AppendDerivedEventInput
+  ): void {
+    const digest = createHash("sha256");
+    for (const value of [
+      runId,
+      input.sourceEventId,
+      input.derivation.name,
+      input.derivation.version,
+      input.kind
+    ]) {
+      const bytes = Buffer.from(value, "utf8");
+      digest.update(`${bytes.byteLength}:`, "utf8");
+      digest.update(bytes);
+    }
+    const expected = `agentlens-derivation-sha256:${digest.digest("hex")}`;
+    if (input.identity !== expected) {
+      throw new Error("Derived event identity does not match its same run source tuple.");
+    }
+  }
+
+  private derivedEvent(
+    input: AppendDerivedEventInput,
+    runId: string,
+    sequence: number
+  ): TraceEventV1 {
+    return traceEventV1Schema.parse({
+      id: input.eventId,
+      runId,
+      sequence,
+      receivedAt: input.receivedAt,
+      kind: input.kind,
+      status: input.status,
+      provenance: "derived",
+      source: { provider: input.sourceProvider },
+      relationships: [{ type: "derived_from", eventId: input.sourceEventId }],
+      summary: input.summary,
+      normalizedPayload: input.normalizedPayload,
+      derivation: {
+        name: input.derivation.name,
+        version: input.derivation.version,
+        sourceEventIds: [input.sourceEventId],
+        confidence: input.derivation.confidence,
+        identity: input.identity
+      }
+    });
+  }
+
+  private resolveExistingDerivedEvent(
+    runId: string,
+    input: AppendDerivedEventInput
+  ): TraceEventV1 | undefined {
+    const byIdentity = this.#connection.prepare(`
+      SELECT * FROM derivation_identities
+      WHERE run_id = ? AND identity = ?
+    `).get(runId, input.identity) as DerivationIdentityRow | undefined;
+    const byTuple = this.#connection.prepare(`
+      SELECT * FROM derivation_identities
+      WHERE run_id = ? AND source_event_id = ?
+        AND derivation_name = ? AND derivation_version = ? AND derived_kind = ?
+    `).get(
+      runId,
+      input.sourceEventId,
+      input.derivation.name,
+      input.derivation.version,
+      input.kind
+    ) as DerivationIdentityRow | undefined;
+
+    if (byIdentity && byTuple && byIdentity.derived_event_id !== byTuple.derived_event_id) {
+      throw new Error("Durable derivation identity keys resolve to different events.");
+    }
+    const binding = byIdentity ?? byTuple;
+    if (!binding) return undefined;
+    if (
+      binding.run_id !== runId ||
+      binding.identity !== input.identity ||
+      binding.source_event_id !== input.sourceEventId ||
+      binding.derivation_name !== input.derivation.name ||
+      binding.derivation_version !== input.derivation.version ||
+      binding.derived_kind !== input.kind ||
+      binding.derived_event_id !== input.eventId
+    ) {
+      throw new Error("Existing derived identity does not match the requested deterministic tuple.");
+    }
+
+    const stored = this.requireEventInRun(runId, binding.derived_event_id);
+    const requested = this.derivedEvent(input, runId, stored.sequence);
+    if (!isDeepStrictEqual(stored, requested)) {
+      throw new Error("Existing derived event does not match the requested deterministic event.");
+    }
+    return stored;
   }
 
   private nextSequence(runId: string): number {
