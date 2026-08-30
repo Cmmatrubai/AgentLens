@@ -701,6 +701,24 @@ function validateAssessmentInput(
   });
 }
 
+function validateAssessmentNoteCapturePolicy(
+  capturePolicy: CapturePolicy,
+  note: AssessmentNoteRef
+): void {
+  if (capturePolicy === "standard") {
+    if (note.state === "omitted") {
+      throw new Error("The standard capture policy does not allow policy-omitted assessment notes.");
+    }
+    return;
+  }
+  if (note.state === "artifact") {
+    throw new Error(`The ${capturePolicy} capture policy does not allow assessment note artifacts.`);
+  }
+  if (note.state === "omitted" && note.reason !== capturePolicy) {
+    throw new Error(`Assessment note omission must match the ${capturePolicy} capture policy.`);
+  }
+}
+
 function assessmentNoteProjection(note: AssessmentNoteRef): AssessmentNoteProjection {
   if (note.state === "artifact") {
     return Object.freeze({ state: "artifact", artifactId: note.artifact.id });
@@ -1338,6 +1356,18 @@ export class RunRepository {
   }
 
   private async openValidatedArtifact(input: CompletedArtifact): Promise<FileHandle> {
+    if (
+      typeof input.truncated !== "boolean" ||
+      !Number.isInteger(input.byteLength) ||
+      input.byteLength < 0 ||
+      !Number.isInteger(input.originalByteLength) ||
+      input.originalByteLength < 0 ||
+      (input.truncated
+        ? input.originalByteLength <= input.byteLength
+        : input.originalByteLength !== input.byteLength)
+    ) {
+      throw new Error("Completed artifact length metadata is invalid.");
+    }
     if (!isAbsolute(input.path) || basename(input.path) !== input.id || input.id !== input.sha256) {
       throw new Error("Completed artifact path, ID, and SHA-256 identity do not match.");
     }
@@ -1427,6 +1457,7 @@ export class RunRepository {
       throw new Error("Task 6 assessment storage is unavailable.");
     }
     const initialRun = this.requireRunRow(input.runId);
+    validateAssessmentNoteCapturePolicy(initialRun.capture_policy, validated.note);
     if (validated.note.state === "artifact") {
       this.validateAssessmentNoteArtifact(input.runId, validated.note.artifact);
     }
@@ -1440,6 +1471,13 @@ export class RunRepository {
         const run = this.requireRunRow(input.runId);
         if (run.provider !== initialRun.provider) {
           throw new Error("Assessment run provider changed before persistence.");
+        }
+        validateAssessmentNoteCapturePolicy(run.capture_policy, validated.note);
+        const existingCurrent = this.#connection.prepare(`
+          SELECT * FROM current_assessments WHERE run_id = ?
+        `).get(input.runId) as CurrentAssessmentRow | undefined;
+        if (existingCurrent && validated.receivedAt <= existingCurrent.updated_at) {
+          throw new Error("Assessment timestamp must strictly advance the current assessment timestamp.");
         }
         const eventOwner = this.#connection
           .prepare("SELECT run_id FROM events WHERE id = ?")
@@ -1540,10 +1578,6 @@ export class RunRepository {
     }
     if (artifact.redactionState !== "redacted") {
       throw new Error("Assessment note artifact must be redacted.");
-    }
-    if (typeof artifact.truncated !== "boolean" ||
-        !Number.isInteger(artifact.originalByteLength) || artifact.originalByteLength < 0) {
-      throw new Error("Assessment note artifact truncation metadata is invalid.");
     }
   }
 

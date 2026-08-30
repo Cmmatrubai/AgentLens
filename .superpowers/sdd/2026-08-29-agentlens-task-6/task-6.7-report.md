@@ -48,7 +48,7 @@ Result: exit 0; 5 files and 106 tests passed.
 - `getCurrentAssessment(runId)` first validates the run, then returns an immutable projected `unreviewed`/`uncertain`/absent value when migration 004 or a current row is absent. It never queries missing Task 6 tables.
 - `updateAssessment(input, noteAudits)` validates structured fields before mutation. Omitted task completion becomes `uncertain`; omitted note becomes `absent`; explicit `unreviewed` accepts only `uncertain` task completion.
 - Each call creates a fresh `assessment.updated` event supplied by the caller's event ID and timestamp. The event is completed/human, has provider-only source, no relationships, no native payload or derivation, a content-free summary, and only structured verdict/task/note reference data.
-- The artifact file identity/path/realpath/symlink/length/digest validation formerly embedded in `commitArtifactMetadata` is now a shared private boundary. The file handle remains open through the SQLite transaction, preserving the existing identity check against path replacement.
+- The artifact file identity/path/realpath/symlink/length/digest validation formerly embedded in `commitArtifactMetadata` is now a shared private boundary. The opened file is validated by device, inode, length, and digest and its handle remains open through the SQLite transaction; this validates the opened bytes but does not preserve pathname identity through commit.
 - Assessment notes require same-run ownership, `assessment-note` kind, `text/plain; charset=utf-8`, and redacted state. New metadata and audits are inserted inside the assessment transaction.
 - Same-run content-addressed reuse revalidates the file and requires every stored metadata field and artifact audit to match. It does not duplicate artifact or audit rows, but each human action gets a distinct event-to-artifact binding.
 - One immediate transaction inserts/reuses artifact metadata and audits, allocates the event sequence, appends the human event and binding, and upserts the current projection. The upsert preserves the original `reviewed_at` while advancing `updated_at` and `current_event_id`.
@@ -92,3 +92,43 @@ Manual diff/scope/privacy review found no mutable historical evidence, note text
 - Artifact file creation and SQLite cannot be atomic together. As frozen, a completed note file can remain orphaned when the database transaction fails; no SQLite row references it.
 - Note redaction, the 16 KiB pre-write bound, and CLI validation-before-write orchestration remain intentionally deferred to Task 6.8.
 - Independent review was not dispatched because the assignment explicitly prohibited subagents; the controller retains the independent acceptance review.
+
+## Fix round 1: assessment evidence invariants
+
+### TDD evidence
+
+The reviewer cases were added before the fix.
+
+    pnpm vitest --run packages/storage/test/runRepository.test.ts -t "human assessment" --reporter=dot
+
+RED result: exit 1; 16 of 44 selected tests failed, 28 passed, and 56 were skipped. The failures were exactly the two non-advancing timestamps, six capture-policy/note-state mismatches, and eight invalid artifact-length tuples. Four tuple-shape cases were accepted, two restrictive-policy artifacts reached the missing-file check instead of policy rejection, and the remaining cases failed with older nonspecific validation errors.
+
+After the smallest production change, the same command was GREEN: exit 0; 44 selected tests passed and 56 were skipped.
+
+### Contract decisions
+
+- A subsequent assessment now loads the existing current row inside the immediate transaction and requires `receivedAt` to be strictly greater than `updated_at` before any artifact metadata, audit, event, binding, or current-row write. Earlier and equal timestamps roll back with the current event and first `reviewed_at` unchanged; a later timestamp advances `updated_at` and `current_event_id`.
+- The shared completed-artifact boundary now requires non-negative integer `byteLength` and `originalByteLength`. An untruncated artifact requires equal lengths; a truncated artifact requires `originalByteLength` to be strictly greater. Valid truncated note artifacts remain supported, and physical file length and digest validation remains in place.
+- Capture-policy enforcement belongs at the storage mutation boundary as defense in depth. The frozen design assigns standard note content to redacted artifacts and restrictive note content to structured omission; Task 6.7 requires run and structured-field validation in the transaction, while Task 6.8 reads the run policy to choose the representation. Storage therefore accepts absent/artifact for `standard`, absent/matching omission for `metadata-only` and `strict`, and rejects mismatched omissions and all restrictive-policy artifacts. This is checked before artifact file access and rechecked against the transaction's run row.
+
+### Verification
+
+    pnpm vitest --run packages/storage/test/runRepository.test.ts
+
+Result: exit 0; 1 file and 100 tests passed.
+
+    pnpm vitest --run packages/storage/test
+
+Result: exit 0; 5 files and 127 tests passed.
+
+    pnpm test
+
+Result: exit 0; 31 files and 505 tests passed.
+
+    pnpm typecheck
+
+Result: exit 0 (`tsc -b --pretty false`).
+
+### Residual filesystem risk
+
+Holding the validated file descriptor open does not preserve pathname identity through the SQLite commit. A concurrent process running as the same owner can replace the artifact pathname after validation, so the persisted pathname may later resolve to different bytes. Owner-only directories plus canonical-path, symlink, device/inode, length, and digest checks reduce the exposure but do not make filesystem and SQLite updates atomic. This fix round intentionally does not claim or invent such atomicity.
