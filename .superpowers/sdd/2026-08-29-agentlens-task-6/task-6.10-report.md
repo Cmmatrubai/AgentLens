@@ -191,6 +191,77 @@ git diff --check
 Exit        0
 ```
 
+### Second independent-review fix round
+
+Second fix-round base: `7b29521d12d139aba4566285213606cbcc056b72`
+
+After correcting a test-only missing import, the controller added eight more
+permanent regressions. The untouched production candidate reproduced the
+authoritative RED exactly:
+
+```text
+pnpm vitest --run apps/cli/test/doctor.integration.test.ts
+Test Files  1 failed (1)
+Tests       8 failed | 65 passed (73)
+Exit        1
+```
+
+The failures established three shared defects: a sibling key/SHM access failure
+could still mask an exact regular WAL; ancestor ownership was trusted before
+node type/security and uid-unavailable traversal followed a parent symlink; and
+Codex cleanup still settled on direct-child close, missed nonzero-exit groups,
+and waited on inherited pipes from a self-detached descendant.
+
+The storage fix records independent path-inspection outcomes and gives exact WAL
+type/presence its mandatory SQLite precedence. Key, WAL, SHM, and artifact-file
+checks are metadata-only, so owner-only mode `000` does not invent a content or
+readability requirement. Ancestor validation now checks type before trust,
+anchors uid-unavailable traversal to observed ancestor ownership, rejects a
+differently-owned writable directory, and permits a platform alias only when
+the alias and containing directory have the same different owner, the container
+is not group/world writable, and the target is a directory.
+
+Codex cleanup now starts when the leader exits or a forced result occurs, keeps
+TERM-to-KILL group escalation alive after leader close, applies cleanup to
+nonzero and other terminal results, and destroys the parent-owned stdin/stdout/
+stderr handles before forced settlement. A self-detached process is outside the
+owned group; doctor bounds its own return without claiming that escaped process
+was reclaimed.
+
+The first focused attempt after the shared fixes exposed four unit failures from
+macOS `/tmp` being a secured root-owned directory alias. Those failures drove
+the explicit secured-alias rule above. The added writable-directory fixture also
+required an explicit `chmod(0770)` because the process umask removed its group
+write bit. Final fresh second-round gates were:
+
+```text
+pnpm vitest --run apps/cli/test/doctor.test.ts apps/cli/test/doctor.integration.test.ts apps/cli/test/args.test.ts
+Test Files  3 passed (3)
+Tests       136 passed (136)
+Exit        0
+
+pnpm vitest --run apps/cli/test/packagedBinary.integration.test.ts apps/cli/test/readOnlyDataRoot.test.ts packages/storage/test/readOnlyDatabase.test.ts
+Test Files  3 passed (3)
+Tests       23 passed (23)
+Exit        0
+
+pnpm vitest --run apps/cli/test
+Test Files  20 passed (20)
+Tests       404 passed (404)
+Exit        0
+
+pnpm test
+Test Files  38 passed (38)
+Tests       782 passed (782)
+Exit        0
+
+pnpm typecheck
+Exit        0
+
+git diff --check
+Exit        0
+```
+
 ## Implemented contract
 
 - `agentlens doctor [--data-root PATH] [--json]` is part of the public CLI
@@ -205,24 +276,27 @@ Exit        0
 - Filesystem diagnosis uses lstat plus no-follow opens and handle identity
   checks. It examines type, ownership, mode, symlink boundaries, bounded tree
   shape, and metadata only; it never reads secret or artifact payload bytes.
-- On supported POSIX, requested-root containment checks the same-owner ancestor
-  chain parent-first and rejects symlink/non-directory substitution before
-  storage inspection. The first differently owned ancestor is the trusted
-  platform boundary, preserving valid system aliases such as macOS `/var`.
+- Requested-root containment checks ancestors parent-first and validates node
+  type before ownership trust, including when uid lookup is unavailable. A
+  differently-owned directory is a boundary only when not group/world writable;
+  a differently-owned alias additionally requires the same securely containing
+  owner and a directory target, preserving macOS `/tmp` and `/var` without
+  trusting arbitrary symlinks.
 - Sensitive path traversal is bounded to 10,000 entries by default and reports
   stable classifications/counts without leaking secret values, artifact
   content, external symlink targets, or untrusted OS error text.
 - SQLite diagnosis uses the existing immutable read-only opener. It validates
   migration continuity, expected tables/indexes/foreign keys, `query_only`,
   foreign-key violations, quick/integrity checks, and fail-closed WAL handling,
-  including orphan WALs. Corrupt and inaccessible databases receive stable
-  classifications.
+  including orphan WALs. Per-path inspection outcomes prevent sibling failures
+  from masking WAL presence or collapsing unrelated checks. Corrupt and
+  inaccessible databases receive stable classifications.
 - The Codex probe spawns exactly `codex --version` without a shell, closes stdin,
   bounds stdout and stderr to 8 KiB, applies a three-second timeout, terminates
-  and awaits the owned process group on POSIX (or direct child fallback), and
-  accepts only a bounded semantic-version token from fatal UTF-8 decoding.
-  Missing, nonzero, invalid, overflow, timeout, and other spawn failures remain
-  distinct stable results.
+  and bounds owned process-group cleanup on POSIX (or direct-child fallback),
+  closes parent-owned pipes for forced settlement, and accepts only a bounded
+  semantic-version token from fatal UTF-8 decoding. Missing, nonzero, invalid,
+  overflow, timeout, and other spawn failures remain distinct stable results.
 - Process-group support is a local platform capability check. Loopback binds
   only `127.0.0.1` on an ephemeral port and always closes the listener.
 - Production probes are dependency-injectable and the pure diagnosis coordinator
@@ -248,15 +322,19 @@ Storage schemas, migrations, repositories, derivations, adapters, read-only
 - Filesystem observations are point-in-time. The accepted same-owner pathname
   replacement residual remains; no claim is made that validation across
   multiple path operations is globally atomic.
-- Ancestors beyond the first differently owned component are a trusted platform
-  boundary. When POSIX uid inspection is unavailable, doctor checks the final
-  root node but cannot truthfully establish ancestor ownership and retains the
-  existing `platform_unsupported` warnings.
+- Ancestors beyond a securely contained, differently-owned directory/alias are
+  a trusted platform boundary. With uid lookup unavailable, metadata ownership
+  transitions still bound traversal and node type fails closed, while storage
+  ownership/mode status retains the existing `platform_unsupported` warnings.
 - WAL handling intentionally fails closed. Doctor does not checkpoint, remove,
   or infer that a present WAL is stale.
 - Owned descendant cleanup uses POSIX process groups. Non-POSIX hosts retain the
   direct-child fallback and the separate `process_groups` limitation warning;
   doctor does not claim process-tree support there.
+- A descendant that creates a new POSIX session/process group escapes the owned
+  group and cannot be guaranteed reclaimable without stronger OS isolation.
+  Doctor closes its own pipe handles and returns the forced timeout/overflow
+  within the bound, without claiming the escaped process was terminated.
 - Capability probes report the state observed during the command and do not
   promise future process-group, executable, filesystem, or port availability.
 - No storage/SQLite repair, migration, or durable mutation is attempted.

@@ -63,6 +63,9 @@ interface ExistingPath {
 }
 
 type InspectedPath = ExistingPath | Readonly<{ exists: false }>;
+type PathInspectionOutcome =
+  | Readonly<{ ok: true; path: InspectedPath }>
+  | Readonly<{ ok: false }>;
 
 const summaries = Object.freeze({
   data_root: Object.freeze({
@@ -231,23 +234,73 @@ async function inspectPath(path: string): Promise<InspectedPath> {
   return metadata;
 }
 
+async function pathInspectionOutcome(
+  path: string,
+  metadataOnly = false
+): Promise<PathInspectionOutcome> {
+  try {
+    return Object.freeze({
+      ok: true,
+      path: await (metadataOnly ? inspectPathMetadata(path) : inspectPath(path))
+    });
+  } catch {
+    return Object.freeze({ ok: false });
+  }
+}
+
+async function isTrustedAncestorAlias(
+  path: string,
+  alias: ExistingPath,
+  expectedOwner: number
+): Promise<boolean> {
+  if (alias.uid === expectedOwner) return false;
+  const parent = await inspectPathMetadata(dirname(path));
+  if (
+    !parent.exists ||
+    parent.kind !== "directory" ||
+    parent.uid !== alias.uid ||
+    parent.uid === expectedOwner ||
+    (parent.mode & 0o022) !== 0
+  ) return false;
+
+  try {
+    const handle = await open(path, fileConstants.O_RDONLY | fileConstants.O_DIRECTORY);
+    try {
+      return (await handle.stat()).isDirectory();
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  } catch {
+    return false;
+  }
+}
+
 async function requestedRootBoundary(
   dataRoot: string,
   uid: number | null
 ): Promise<"root_symlink" | "root_invalid" | null> {
-  if (uid !== null) {
-    let current = dirname(dataRoot);
-    while (true) {
-      const inspected = await inspectPathMetadata(current);
-      if (inspected.exists) {
-        if (inspected.uid !== uid) break;
-        if (inspected.kind === "symlink") return "root_symlink";
-        if (inspected.kind !== "directory") return "root_invalid";
+  let expectedOwner = uid;
+  let current = dirname(dataRoot);
+  while (true) {
+    const inspected = await inspectPathMetadata(current);
+    if (inspected.exists) {
+      if (inspected.kind === "symlink") {
+        if (
+          expectedOwner !== null &&
+          await isTrustedAncestorAlias(current, inspected, expectedOwner)
+        ) break;
+        return "root_symlink";
       }
-      const parent = dirname(current);
-      if (parent === current) break;
-      current = parent;
+      if (inspected.kind !== "directory") return "root_invalid";
+      if (expectedOwner === null) expectedOwner = inspected.uid;
+      else if (inspected.uid !== expectedOwner) {
+        if ((inspected.mode & 0o022) !== 0) return "root_invalid";
+        break;
+      }
     }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
   }
   const root = await inspectPathMetadata(dataRoot);
   return root.exists && root.kind === "symlink" ? "root_symlink" : null;
@@ -312,7 +365,7 @@ async function walkSensitiveTree(
       counters.entries += 1;
       if (counters.entries > limit) return "inspection_limit";
       const childPath = join(root, entry.name);
-      const child = await inspectPath(childPath);
+      const child = await inspectPathMetadata(childPath);
       if (!child.exists) throw new StableInspectionError("path_identity_changed");
       if (child.kind === "directory") {
         counters.directories += 1;
@@ -464,59 +517,82 @@ async function inspectStorageChecks(
     shm: join(dataRoot, "agentlens.sqlite-shm")
   };
   const missingPath: InspectedPath = Object.freeze({ exists: false });
-  let inspected: Record<keyof typeof paths, InspectedPath>;
-  try {
-    const [secrets, artifacts, database, wal, shm] = await Promise.all([
-      inspectPath(paths.secrets),
-      inspectPath(paths.artifacts),
-      inspectPath(paths.database),
-      inspectPathMetadata(paths.wal),
-      inspectPath(paths.shm)
+  const [secretsOutcome, artifactsOutcome, databaseOutcome, walOutcome, shmOutcome] =
+    await Promise.all([
+      pathInspectionOutcome(paths.secrets),
+      pathInspectionOutcome(paths.artifacts),
+      pathInspectionOutcome(paths.database),
+      pathInspectionOutcome(paths.wal, true),
+      pathInspectionOutcome(paths.shm, true)
     ]);
-    const key = secrets.exists && secrets.kind === "directory"
-      ? await inspectPath(paths.key)
-      : missingPath;
-    const [temporaryArtifacts, finalArtifacts] = artifacts.exists &&
-        artifacts.kind === "directory"
+  const secrets = secretsOutcome.ok ? secretsOutcome.path : missingPath;
+  const artifacts = artifactsOutcome.ok ? artifactsOutcome.path : missingPath;
+  const database = databaseOutcome.ok ? databaseOutcome.path : missingPath;
+  const wal = walOutcome.ok ? walOutcome.path : missingPath;
+  const shm = shmOutcome.ok ? shmOutcome.path : missingPath;
+  const keyOutcome = secretsOutcome.ok && secrets.exists && secrets.kind === "directory"
+    ? await pathInspectionOutcome(paths.key, true)
+    : secretsOutcome.ok
+      ? Object.freeze({ ok: true as const, path: missingPath })
+      : Object.freeze({ ok: false as const });
+  const [temporaryArtifactsOutcome, finalArtifactsOutcome] =
+    artifactsOutcome.ok && artifacts.exists && artifacts.kind === "directory"
       ? await Promise.all([
-          inspectPath(paths.temporaryArtifacts),
-          inspectPath(paths.finalArtifacts)
+          pathInspectionOutcome(paths.temporaryArtifacts),
+          pathInspectionOutcome(paths.finalArtifacts)
         ])
-      : [missingPath, missingPath];
-    inspected = {
-      secrets,
-      key,
-      artifacts,
-      temporaryArtifacts,
-      finalArtifacts,
-      database,
-      wal,
-      shm
-    };
-  } catch {
-    return [
-      dataRootCheck,
-      doctorCheck("sensitive_paths", "fail", "path_inspection_failed"),
-      doctorCheck("redaction_key", "fail", "path_inspection_failed"),
-      doctorCheck("sqlite", "fail", "path_inspection_failed")
-    ];
-  }
+      : artifactsOutcome.ok
+        ? [
+            Object.freeze({ ok: true as const, path: missingPath }),
+            Object.freeze({ ok: true as const, path: missingPath })
+          ]
+        : [Object.freeze({ ok: false as const }), Object.freeze({ ok: false as const })];
+  const key = keyOutcome.ok ? keyOutcome.path : missingPath;
+  const temporaryArtifacts = temporaryArtifactsOutcome.ok
+    ? temporaryArtifactsOutcome.path
+    : missingPath;
+  const finalArtifacts = finalArtifactsOutcome.ok ? finalArtifactsOutcome.path : missingPath;
+  const inspected = {
+    secrets,
+    key,
+    artifacts,
+    temporaryArtifacts,
+    finalArtifacts,
+    database,
+    wal,
+    shm
+  };
+  const outcomes = {
+    secrets: secretsOutcome,
+    key: keyOutcome,
+    artifacts: artifactsOutcome,
+    temporaryArtifacts: temporaryArtifactsOutcome,
+    finalArtifacts: finalArtifactsOutcome,
+    database: databaseOutcome,
+    wal: walOutcome,
+    shm: shmOutcome
+  };
 
-  const initialized = Object.values(inspected).some(({ exists }) => exists);
+  const initialized = Object.values(inspected).some(({ exists }) => exists) ||
+    Object.values(outcomes).some((outcome) => !outcome.ok);
   const counters = { directories: 0, files: 0, entries: 0 };
   let sensitiveFailure: string | null = rootPermission;
   if (!sensitiveFailure) {
-    const expectedPaths: readonly [InspectedPath, "directory" | "file", boolean][] = [
-      [inspected.secrets, "directory", false],
-      [inspected.key, "file", true],
-      [inspected.artifacts, "directory", false],
-      [inspected.temporaryArtifacts, "directory", false],
-      [inspected.finalArtifacts, "directory", false],
-      [inspected.database, "file", false],
-      [inspected.wal, "file", false],
-      [inspected.shm, "file", false]
+    const expectedPaths: readonly [PathInspectionOutcome, InspectedPath, "directory" | "file", boolean][] = [
+      [outcomes.secrets, inspected.secrets, "directory", false],
+      [outcomes.key, inspected.key, "file", true],
+      [outcomes.artifacts, inspected.artifacts, "directory", false],
+      [outcomes.temporaryArtifacts, inspected.temporaryArtifacts, "directory", false],
+      [outcomes.finalArtifacts, inspected.finalArtifacts, "directory", false],
+      [outcomes.database, inspected.database, "file", false],
+      [outcomes.wal, inspected.wal, "file", false],
+      [outcomes.shm, inspected.shm, "file", false]
     ];
-    for (const [candidate, expected, ownerOnly] of expectedPaths) {
+    for (const [outcome, candidate, expected, ownerOnly] of expectedPaths) {
+      if (!outcome.ok) {
+        sensitiveFailure = "path_inspection_failed";
+        break;
+      }
       const structure = structuralCode(candidate, expected);
       if (structure) {
         sensitiveFailure = structure;
@@ -564,9 +640,12 @@ async function inspectStorageChecks(
       : doctorCheck("sensitive_paths", "pass", "ok", sensitiveMetadata);
 
   let keyCheck: DoctorCheck;
-  const key = inspected.key;
-  if (inspected.secrets.exists && inspected.secrets.kind !== "directory") {
+  if (!secretsOutcome.ok) {
     keyCheck = doctorCheck("redaction_key", "fail", "key_parent_invalid");
+  } else if (inspected.secrets.exists && inspected.secrets.kind !== "directory") {
+    keyCheck = doctorCheck("redaction_key", "fail", "key_parent_invalid");
+  } else if (!keyOutcome.ok) {
+    keyCheck = doctorCheck("redaction_key", "fail", "path_inspection_failed");
   } else if (!key.exists) {
     keyCheck = inspected.database.exists
       ? doctorCheck("redaction_key", "fail", "key_missing")
@@ -586,15 +665,16 @@ async function inspectStorageChecks(
   }
 
   let sqliteCheck: DoctorCheck;
-  const wal = inspected.wal;
-  const shm = inspected.shm;
-  const database = inspected.database;
-  if (wal.exists && wal.kind === "symlink") {
+  if (!walOutcome.ok) {
+    sqliteCheck = doctorCheck("sqlite", "fail", "path_inspection_failed");
+  } else if (wal.exists && wal.kind === "symlink") {
     sqliteCheck = doctorCheck("sqlite", "fail", "sidecar_symlink");
   } else if (wal.exists && wal.kind !== "file") {
     sqliteCheck = doctorCheck("sqlite", "fail", "sidecar_non_regular");
   } else if (wal.exists) {
     sqliteCheck = doctorCheck("sqlite", "fail", "wal_present");
+  } else if (!shmOutcome.ok || !databaseOutcome.ok) {
+    sqliteCheck = doctorCheck("sqlite", "fail", "path_inspection_failed");
   } else if (shm.exists && shm.kind === "symlink") {
     sqliteCheck = doctorCheck("sqlite", "fail", "sidecar_symlink");
   } else if (shm.exists && shm.kind !== "file") {
@@ -646,6 +726,10 @@ function semanticVersion(stdout: Buffer): string | null {
   return null;
 }
 
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolveWait) => setTimeout(resolveWait, milliseconds));
+}
+
 async function systemCodexVersion(environment?: NodeJS.ProcessEnv): Promise<CodexVersionProbe> {
   return await new Promise<CodexVersionProbe>((resolveProbe) => {
     const usesProcessGroup = process.platform !== "win32";
@@ -661,12 +745,23 @@ async function systemCodexVersion(environment?: NodeJS.ProcessEnv): Promise<Code
     const stdout: Buffer[] = [];
     let forcedState: "timeout" | "overflow" | undefined;
     let spawnError: unknown;
-    let killTimer: NodeJS.Timeout | undefined;
+    let settled = false;
+    let destroyPipesRequested = false;
+    let cleanup: Promise<void> | undefined;
 
     const childIsOpen = (): boolean =>
       child.pid !== undefined && child.exitCode === null && child.signalCode === null;
-    const signalOwnedProcesses = (signal: NodeJS.Signals): void => {
-      if (usesProcessGroup && child.pid !== undefined) {
+    const ownedProcessGroupExists = (): boolean => {
+      if (!usesProcessGroup || child.pid === undefined) return false;
+      try {
+        process.kill(-child.pid, 0);
+        return true;
+      } catch (error) {
+        return errnoCode(error) !== "ESRCH";
+      }
+    };
+    const signalOwnedProcessGroup = (signal: NodeJS.Signals): void => {
+      if (usesProcessGroup && child.pid !== undefined && ownedProcessGroupExists()) {
         try {
           process.kill(-child.pid, signal);
           return;
@@ -676,52 +771,77 @@ async function systemCodexVersion(environment?: NodeJS.ProcessEnv): Promise<Code
       }
       if (childIsOpen()) child.kill(signal);
     };
-    const terminate = (): void => {
-      signalOwnedProcesses("SIGTERM");
-      killTimer ??= setTimeout(() => {
-        signalOwnedProcesses("SIGKILL");
-      }, 250);
+    const destroyOwnedPipes = (): void => {
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
     };
-    const timeout = setTimeout(() => {
-      forcedState ??= "timeout";
-      terminate();
-    }, codexTimeoutMs);
+    const beginCleanup = (destroyPipes: boolean): Promise<void> => {
+      destroyPipesRequested ||= destroyPipes;
+      cleanup ??= (async () => {
+        if (usesProcessGroup && child.pid !== undefined) {
+          if (ownedProcessGroupExists()) {
+            signalOwnedProcessGroup("SIGTERM");
+            await wait(250);
+            if (ownedProcessGroupExists()) signalOwnedProcessGroup("SIGKILL");
+            const confirmationDeadline = Date.now() + 250;
+            while (ownedProcessGroupExists() && Date.now() < confirmationDeadline) {
+              await wait(10);
+            }
+          }
+        } else if (childIsOpen()) {
+          child.kill("SIGTERM");
+          await wait(250);
+          if (childIsOpen()) child.kill("SIGKILL");
+        }
+        if (destroyPipesRequested) destroyOwnedPipes();
+      })();
+      return cleanup.then(() => {
+        if (destroyPipesRequested) destroyOwnedPipes();
+      });
+    };
+    const settle = (probe: CodexVersionProbe): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolveProbe(probe);
+    };
+    const force = (state: "timeout" | "overflow"): void => {
+      forcedState ??= state;
+      void beginCleanup(true).then(() => {
+        settle({ state: forcedState!, signal: signalNumber(child.signalCode) });
+      });
+    };
+    const timeout = setTimeout(() => force("timeout"), codexTimeoutMs);
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdoutBytes += chunk.byteLength;
       if (stdoutBytes <= codexOutputLimit) stdout.push(Buffer.from(chunk));
-      else {
-        forcedState ??= "overflow";
-        terminate();
-      }
+      else force("overflow");
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderrBytes += chunk.byteLength;
-      if (stderrBytes > codexOutputLimit) {
-        forcedState ??= "overflow";
-        terminate();
-      }
+      if (stderrBytes > codexOutputLimit) force("overflow");
     });
     child.once("error", (error) => { spawnError = error; });
+    child.once("exit", () => {
+      if (usesProcessGroup) void beginCleanup(false);
+    });
     child.once("close", (exitCode, signal) => {
       clearTimeout(timeout);
-      if (killTimer) clearTimeout(killTimer);
-      if (forcedState) {
-        resolveProbe({ state: forcedState, signal: signalNumber(signal) });
-        return;
-      }
+      if (forcedState) return;
+      let probe: CodexVersionProbe;
       if (spawnError) {
-        resolveProbe(
-          errnoCode(spawnError) === "ENOENT" ? { state: "missing" } : { state: "spawn_failed" }
-        );
-        return;
+        probe = errnoCode(spawnError) === "ENOENT"
+          ? { state: "missing" }
+          : { state: "spawn_failed" };
+      } else if (exitCode !== 0) {
+        probe = { state: "nonzero", exitCode, signal: signalNumber(signal) };
+      } else {
+        const version = semanticVersion(Buffer.concat(stdout));
+        probe = version === null ? { state: "invalid" } : { state: "available", version };
       }
-      if (exitCode !== 0) {
-        resolveProbe({ state: "nonzero", exitCode, signal: signalNumber(signal) });
-        return;
-      }
-      const version = semanticVersion(Buffer.concat(stdout));
-      resolveProbe(version === null ? { state: "invalid" } : { state: "available", version });
+      void beginCleanup(false).then(() => settle(probe));
     });
   });
 }
