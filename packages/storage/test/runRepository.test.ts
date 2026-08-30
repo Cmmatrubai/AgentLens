@@ -1,17 +1,20 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
+  unlinkSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { EventStatus, TraceEventV1 } from "@agentlens/core";
+import type { CompletedArtifact, EventStatus, TraceEventV1 } from "@agentlens/core";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase, openDatabaseReadOnly } from "../src/database.js";
@@ -73,7 +76,15 @@ function setupMigration003(): { repository: RunRepository; close: () => void } {
   const artifactRoot = join(root, "artifacts", "sha256");
   mkdirSync(artifactRoot, { recursive: true, mode: 0o700 });
   const databasePath = join(root, "agentlens.sqlite");
-  const writable = new Database(databasePath);
+  const priorSqliteUri = process.env.SQLITE_USE_URI;
+  process.env.SQLITE_USE_URI = "1";
+  let writable: Database.Database;
+  try {
+    writable = new Database(databasePath);
+  } finally {
+    if (priorSqliteUri === undefined) delete process.env.SQLITE_USE_URI;
+    else process.env.SQLITE_USE_URI = priorSqliteUri;
+  }
   writable.pragma("foreign_keys = ON");
   for (const [version, filename] of [
     [1, "001_initial.sql"],
@@ -220,6 +231,51 @@ function derivedInput(
     },
     ...overrides
   };
+}
+
+function completedAssessmentNote(
+  artifactRoot: string,
+  content: string,
+  overrides: Partial<CompletedArtifact> = {}
+): CompletedArtifact {
+  const bytes = Buffer.from(content, "utf8");
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const path = join(artifactRoot, sha256.slice(0, 2), sha256);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, bytes, { mode: 0o600 });
+  return {
+    id: sha256,
+    runId,
+    kind: "assessment-note",
+    mediaType: "text/plain; charset=utf-8",
+    path,
+    sha256,
+    byteLength: bytes.byteLength,
+    redactionState: "redacted",
+    truncated: false,
+    originalByteLength: bytes.byteLength,
+    ...overrides
+  };
+}
+
+function queryRows(
+  databasePath: string,
+  sql: string,
+  ...parameters: readonly unknown[]
+): unknown[] {
+  const database = new Database(databasePath, { readonly: true });
+  try {
+    return database.prepare(sql).all(...parameters);
+  } finally {
+    database.close();
+  }
+}
+
+function sqliteContains(databasePath: string, value: string): boolean {
+  const needle = Buffer.from(value, "utf8");
+  return [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]
+    .filter(existsSync)
+    .some((path) => readFileSync(path).includes(needle));
 }
 
 async function waitForFiles(paths: readonly string[]): Promise<void> {
@@ -848,6 +904,546 @@ describe("storage schema capabilities", () => {
       close();
     }
   });
+});
+
+describe("append-only human assessment storage", () => {
+  it("projects a Task 5-schema run as unreviewed without querying Task 6 tables", () => {
+    const { repository, close } = setupMigration003();
+    try {
+      expect(repository.getCurrentAssessment("legacy-run")).toEqual({
+        runId: "legacy-run",
+        verdict: "unreviewed",
+        taskCompleted: "uncertain",
+        note: { state: "absent" },
+        state: "projected",
+        provenance: null,
+        currentEventId: null,
+        reviewedAt: null,
+        updatedAt: null
+      });
+    } finally {
+      close();
+    }
+  });
+
+  it("creates the first explicit assessment with default uncertain and absent fields", async () => {
+    const { repository, databasePath, close } = setup();
+    try {
+      const assessedAt = "2026-08-26T20:10:00.000Z";
+      const current = await repository.updateAssessment({
+        runId,
+        eventId: "assessment-first",
+        receivedAt: assessedAt,
+        verdict: "success"
+      });
+
+      expect(current).toEqual({
+        runId,
+        verdict: "success",
+        taskCompleted: "uncertain",
+        note: { state: "absent" },
+        state: "explicit",
+        provenance: "human",
+        currentEventId: "assessment-first",
+        reviewedAt: Date.parse(assessedAt),
+        updatedAt: Date.parse(assessedAt)
+      });
+      expect(repository.getCurrentAssessment(runId)).toEqual(current);
+
+      const [assessmentEvent] = repository.getRunDetail(runId).events;
+      expect(assessmentEvent).toEqual({
+        id: "assessment-first",
+        runId,
+        sequence: 0,
+        receivedAt: assessedAt,
+        kind: "assessment.updated",
+        status: "completed",
+        provenance: "human",
+        source: { provider: "codex-exec" },
+        relationships: [],
+        summary: "Human assessment updated",
+        normalizedPayload: {
+          verdict: "success",
+          taskCompleted: "uncertain",
+          note: { state: "absent" }
+        }
+      });
+      expect(queryRows(databasePath, "SELECT * FROM current_assessments")).toHaveLength(1);
+      expect(queryRows(databasePath, "SELECT * FROM event_artifact_bindings")).toEqual([]);
+      expect(queryRows(databasePath, `
+        SELECT session_id, thread_id, turn_id, item_id, tool_id, event_type,
+          item_type, correlation_id
+        FROM event_sources WHERE event_id = ?
+      `, "assessment-first")).toEqual([{
+        session_id: null,
+        thread_id: null,
+        turn_id: null,
+        item_id: null,
+        tool_id: null,
+        event_type: null,
+        item_type: null,
+        correlation_id: null
+      }]);
+    } finally {
+      close();
+    }
+  });
+
+  it("preserves reviewedAt while advancing append-only history and replacing omitted note with absent", async () => {
+    const { repository, databasePath, artifactRoot, close } = setup();
+    try {
+      const note = completedAssessmentNote(artifactRoot, "first durable reviewer note");
+      const firstAt = "2026-08-26T20:10:00.000Z";
+      const secondAt = "2026-08-26T20:11:00.000Z";
+      const thirdAt = "2026-08-26T20:12:00.000Z";
+      await repository.updateAssessment({
+        runId,
+        eventId: "assessment-with-note",
+        receivedAt: firstAt,
+        verdict: "partial",
+        taskCompleted: "no",
+        note: { state: "artifact", artifact: note }
+      });
+      await repository.updateAssessment({
+        runId,
+        eventId: "assessment-without-note",
+        receivedAt: secondAt,
+        verdict: "success",
+        taskCompleted: "yes"
+      });
+      const current = await repository.updateAssessment({
+        runId,
+        eventId: "assessment-identical-repeat",
+        receivedAt: thirdAt,
+        verdict: "success",
+        taskCompleted: "yes"
+      });
+
+      expect(current).toMatchObject({
+        currentEventId: "assessment-identical-repeat",
+        verdict: "success",
+        taskCompleted: "yes",
+        note: { state: "absent" },
+        reviewedAt: Date.parse(firstAt),
+        updatedAt: Date.parse(thirdAt)
+      });
+      expect(repository.getRunDetail(runId).events.map(({ id }) => id)).toEqual([
+        "assessment-with-note",
+        "assessment-without-note",
+        "assessment-identical-repeat"
+      ]);
+      expect(queryRows(databasePath, `
+        SELECT event_id, artifact_id, role, created_at
+        FROM event_artifact_bindings ORDER BY event_id
+      `)).toEqual([{
+        event_id: "assessment-with-note",
+        artifact_id: note.id,
+        role: "assessment_note",
+        created_at: Date.parse(firstAt)
+      }]);
+      expect(queryRows(databasePath, `
+        SELECT id, run_id, sha256 FROM artifacts WHERE id = ?
+      `, note.id)).toEqual([{ id: note.id, run_id: runId, sha256: note.sha256 }]);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects yes/no for explicit unreviewed but accepts uncertain with a content-free note reference", async () => {
+    const { repository, databasePath, artifactRoot, close } = setup();
+    try {
+      for (const taskCompleted of ["yes", "no"] as const) {
+        await expect(repository.updateAssessment({
+          runId,
+          eventId: `invalid-unreviewed-${taskCompleted}`,
+          receivedAt,
+          verdict: "unreviewed",
+          taskCompleted
+        })).rejects.toThrow(/unreviewed.*uncertain|uncertain.*unreviewed/i);
+      }
+      expect(repository.getCurrentAssessment(runId).state).toBe("projected");
+
+      const rawNote = "review-note-sentinel-7ee5197b";
+      const note = completedAssessmentNote(artifactRoot, rawNote);
+      const current = await repository.updateAssessment({
+        runId,
+        eventId: "explicit-unreviewed",
+        receivedAt,
+        verdict: "unreviewed",
+        taskCompleted: "uncertain",
+        note: { state: "artifact", artifact: note }
+      });
+
+      expect(current).toMatchObject({
+        state: "explicit",
+        verdict: "unreviewed",
+        taskCompleted: "uncertain",
+        note: { state: "artifact", artifactId: note.id }
+      });
+      const stored = repository.getRunDetail(runId).events[0];
+      expect(stored).toMatchObject({
+        source: { provider: "codex-exec" },
+        relationships: [],
+        summary: "Human assessment updated",
+        normalizedPayload: {
+          verdict: "unreviewed",
+          taskCompleted: "uncertain",
+          note: { state: "artifact", artifactId: note.id }
+        }
+      });
+      expect(stored).not.toHaveProperty("nativePayload");
+      expect(stored).not.toHaveProperty("sourceOccurredAt");
+      expect(stored).not.toHaveProperty("derivation");
+      expect(JSON.stringify(stored)).not.toContain(rawNote);
+      expect(sqliteContains(databasePath, rawNote)).toBe(false);
+    } finally {
+      close();
+    }
+  });
+
+  it.each(["metadata-only", "strict"] as const)(
+    "stores %s note omission without an artifact or binding",
+    async (reason) => {
+      const { repository, databasePath, close } = setup();
+      try {
+        const current = await repository.updateAssessment({
+          runId,
+          eventId: `assessment-${reason}`,
+          receivedAt,
+          verdict: "failure",
+          taskCompleted: "no",
+          note: { state: "omitted", reason }
+        });
+        expect(current.note).toEqual({ state: "omitted", reason });
+        expect(repository.getRunDetail(runId).events[0]?.normalizedPayload).toEqual({
+          verdict: "failure",
+          taskCompleted: "no",
+          note: { state: "omitted", reason }
+        });
+        expect(queryRows(databasePath, "SELECT * FROM artifacts")).toEqual([]);
+        expect(queryRows(databasePath, "SELECT * FROM redaction_audits")).toEqual([]);
+        expect(queryRows(databasePath, "SELECT * FROM event_artifact_bindings")).toEqual([]);
+      } finally {
+        close();
+      }
+    }
+  );
+
+  it("leaves observed, derived, recorder, Git, run, and ownership evidence logically unchanged", async () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("source-event", 0, "completed"));
+      repository.appendDerivedEvent(derivedInput("test.command"));
+      repository.appendEvent(event("recorder-event", 2, "failed", {
+        kind: "error",
+        provenance: "recorder",
+        source: { provider: "codex-exec", correlationId: runId },
+        normalizedPayload: { recorderFailure: true }
+      }));
+      repository.saveGitEvidence(runId, {
+        initialHead: "a".repeat(40),
+        finalHead: "b".repeat(40),
+        initialBranch: "main",
+        finalBranch: "feature",
+        initialStatus: { state: "omitted", reason: "metadata-only" },
+        finalStatus: { state: "omitted", reason: "metadata-only" },
+        trackedFinalDiff: { state: "absent" },
+        diffCheck: { state: "omitted", reason: "metadata-only" },
+        diffCheckPassed: false,
+        untrackedMetadata: { state: "absent" },
+        headChanged: true,
+        branchChanged: true,
+        capturedAt: 1_777_777_778_000
+      });
+      const before = repository.getRunDetail(runId);
+
+      await repository.updateAssessment({
+        runId,
+        eventId: "assessment-after-evidence",
+        receivedAt: "2026-08-26T20:13:00.000Z",
+        verdict: "partial",
+        taskCompleted: "uncertain"
+      });
+      const after = repository.getRunDetail(runId);
+
+      expect(after.run).toEqual(before.run);
+      expect(after.ownership).toEqual(before.ownership);
+      expect(after.gitEvidence).toEqual(before.gitEvidence);
+      expect(after.events.filter(({ provenance }) => provenance !== "human")).toEqual(before.events);
+      expect(after.events.filter(({ provenance }) => provenance === "human")).toHaveLength(1);
+    } finally {
+      close();
+    }
+  });
+
+  it("validates and reuses one same-run content-addressed note while appending distinct actions", async () => {
+    const { repository, databasePath, artifactRoot, close } = setup();
+    try {
+      const note = completedAssessmentNote(artifactRoot, "same redacted note");
+      const audits = [{ reason: "assignment-secret", count: 2 }];
+      await repository.updateAssessment({
+        runId,
+        eventId: "assessment-reuse-one",
+        receivedAt: "2026-08-26T20:14:00.000Z",
+        verdict: "partial",
+        note: { state: "artifact", artifact: note }
+      }, audits);
+      await repository.updateAssessment({
+        runId,
+        eventId: "assessment-reuse-two",
+        receivedAt: "2026-08-26T20:15:00.000Z",
+        verdict: "partial",
+        note: { state: "artifact", artifact: note }
+      }, audits);
+
+      expect(queryRows(databasePath, "SELECT id FROM artifacts WHERE id = ?", note.id)).toHaveLength(1);
+      expect(queryRows(databasePath, `
+        SELECT reason, count FROM redaction_audits WHERE artifact_id = ? ORDER BY id
+      `, note.id)).toEqual([{ reason: "assignment-secret", count: 2 }]);
+      expect(queryRows(databasePath, `
+        SELECT event_id, artifact_id FROM event_artifact_bindings ORDER BY created_at
+      `)).toEqual([
+        { event_id: "assessment-reuse-one", artifact_id: note.id },
+        { event_id: "assessment-reuse-two", artifact_id: note.id }
+      ]);
+      expect(repository.getRunDetail(runId).events.filter(({ kind }) =>
+        kind === "assessment.updated"
+      )).toHaveLength(2);
+
+      unlinkSync(note.path);
+      const beforeFailedReuse = repository.getCurrentAssessment(runId);
+      await expect(repository.updateAssessment({
+        runId,
+        eventId: "assessment-reuse-missing-file",
+        receivedAt: "2026-08-26T20:16:00.000Z",
+        verdict: "partial",
+        note: { state: "artifact", artifact: note }
+      }, audits)).rejects.toThrow(/not available|missing/i);
+      expect(repository.getCurrentAssessment(runId)).toEqual(beforeFailedReuse);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects cross-run artifact ownership and event identity without partial writes", async () => {
+    const { repository, artifactRoot, close } = setup();
+    try {
+      repository.createRun(
+        validRun({ id: "run-other" }),
+        validOwnership({ recorderInstanceId: "recorder-instance-other" })
+      );
+      const crossRunNote = completedAssessmentNote(artifactRoot, "other run note", {
+        runId: "run-other"
+      });
+      await repository.commitArtifactMetadata(crossRunNote);
+      await expect(repository.updateAssessment({
+        runId,
+        eventId: "assessment-cross-run-artifact",
+        receivedAt,
+        verdict: "failure",
+        note: { state: "artifact", artifact: { ...crossRunNote, runId } }
+      })).rejects.toThrow(/same run|run ownership|belong|owned/i);
+
+      repository.appendEvent(event("event-owned-by-other-run", 0, "completed", {
+        runId: "run-other"
+      }));
+      await expect(repository.updateAssessment({
+        runId,
+        eventId: "event-owned-by-other-run",
+        receivedAt,
+        verdict: "failure"
+      })).rejects.toThrow(/another run|owned|unique|constraint/i);
+      expect(repository.getCurrentAssessment(runId).state).toBe("projected");
+      expect(repository.getRunDetail(runId).events).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it("rolls back artifact metadata, audits, event, binding, and projection on transaction failure", async () => {
+    const { repository, databasePath, artifactRoot, close } = setup();
+    try {
+      await repository.updateAssessment({
+        runId,
+        eventId: "assessment-before-failure",
+        receivedAt: "2026-08-26T20:17:00.000Z",
+        verdict: "partial"
+      });
+      const before = repository.getCurrentAssessment(runId);
+      const note = completedAssessmentNote(artifactRoot, "orphan file after database rollback");
+      const triggerDatabase = new Database(databasePath);
+      try {
+        triggerDatabase.exec(`
+          CREATE TRIGGER fail_assessment_insert
+          BEFORE INSERT ON current_assessments
+          BEGIN SELECT RAISE(ABORT, 'forced assessment failure'); END;
+          CREATE TRIGGER fail_assessment_update
+          BEFORE UPDATE ON current_assessments
+          BEGIN SELECT RAISE(ABORT, 'forced assessment failure'); END;
+        `);
+      } finally {
+        triggerDatabase.close();
+      }
+
+      await expect(repository.updateAssessment({
+        runId,
+        eventId: "assessment-rolled-back",
+        receivedAt: "2026-08-26T20:18:00.000Z",
+        verdict: "failure",
+        taskCompleted: "no",
+        note: { state: "artifact", artifact: note }
+      }, [{ reason: "assignment-secret", count: 1 }])).rejects.toThrow(/forced assessment failure/i);
+
+      expect(existsSync(note.path)).toBe(true);
+      expect(repository.getCurrentAssessment(runId)).toEqual(before);
+      expect(repository.getRunDetail(runId).events.map(({ id }) => id)).toEqual([
+        "assessment-before-failure"
+      ]);
+      expect(queryRows(databasePath, "SELECT id FROM artifacts WHERE id = ?", note.id)).toEqual([]);
+      expect(queryRows(databasePath, "SELECT * FROM redaction_audits")).toEqual([]);
+      expect(queryRows(databasePath, "SELECT * FROM event_artifact_bindings")).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it("rejects malformed enums, timestamps, and note tuples before mutation", async () => {
+    const { repository, artifactRoot, close } = setup();
+    try {
+      const artifact = completedAssessmentNote(artifactRoot, "tuple fixture");
+      const malformed = [
+        { verdict: "maybe" },
+        { verdict: "success", taskCompleted: "maybe" },
+        { verdict: "success", receivedAt: "not-a-timestamp" }
+      ] as const;
+      for (const [index, candidate] of malformed.entries()) {
+        await expect(repository.updateAssessment({
+          runId,
+          eventId: `malformed-structured-${index}`,
+          receivedAt,
+          ...candidate
+        } as never)).rejects.toThrow();
+      }
+      const invalidNotes = [
+        { state: "absent", artifact },
+        { state: "artifact" },
+        { state: "omitted", reason: "standard" },
+        { state: "omitted", reason: "strict", artifact },
+        { state: "absent", rawNote: "must-not-be-accepted" }
+      ];
+      for (const [index, note] of invalidNotes.entries()) {
+        await expect(repository.updateAssessment({
+          runId,
+          eventId: `malformed-note-${index}`,
+          receivedAt,
+          verdict: "success",
+          note
+        } as never)).rejects.toThrow(/note|state|tuple|artifact|reason/i);
+      }
+      expect(repository.getCurrentAssessment(runId).state).toBe("projected");
+      expect(repository.getRunDetail(runId).events).toEqual([]);
+    } finally {
+      close();
+    }
+  });
+
+  it.each([
+    {
+      name: "non-canonical path",
+      mutate: (artifact: CompletedArtifact, artifactRoot: string) => {
+        const path = join(dirname(artifactRoot), "noncanonical", artifact.id);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "artifact path fixture");
+        return { ...artifact, path };
+      }
+    },
+    {
+      name: "missing file",
+      mutate: (artifact: CompletedArtifact) => {
+        unlinkSync(artifact.path);
+        return artifact;
+      }
+    },
+    {
+      name: "symbolic link",
+      mutate: (artifact: CompletedArtifact, artifactRoot: string) => {
+        const target = join(dirname(artifactRoot), "symlink-target");
+        writeFileSync(target, "artifact path fixture");
+        unlinkSync(artifact.path);
+        symlinkSync(target, artifact.path);
+        return artifact;
+      }
+    },
+    {
+      name: "digest mismatch",
+      mutate: (artifact: CompletedArtifact) => {
+        writeFileSync(artifact.path, "tampered-digest");
+        return artifact;
+      }
+    },
+    {
+      name: "byte-length mismatch",
+      mutate: (artifact: CompletedArtifact) => ({
+        ...artifact,
+        byteLength: artifact.byteLength + 1
+      })
+    },
+    {
+      name: "artifact kind mismatch",
+      mutate: (artifact: CompletedArtifact) => ({ ...artifact, kind: "native-payload" })
+    },
+    {
+      name: "artifact media mismatch",
+      mutate: (artifact: CompletedArtifact) => ({ ...artifact, mediaType: "application/json" })
+    },
+    {
+      name: "artifact redaction mismatch",
+      mutate: (artifact: CompletedArtifact) => ({
+        ...artifact,
+        redactionState: "unredacted"
+      } as unknown as CompletedArtifact)
+    }
+  ])("rejects an assessment note with $name", async ({ mutate }) => {
+    const { repository, artifactRoot, close } = setup();
+    try {
+      const artifact = mutate(
+        completedAssessmentNote(artifactRoot, "artifact path fixture"),
+        artifactRoot
+      );
+      await expect(repository.updateAssessment({
+        runId,
+        eventId: "assessment-invalid-artifact",
+        receivedAt,
+        verdict: "partial",
+        note: { state: "artifact", artifact }
+      })).rejects.toThrow(/artifact|path|symbolic|length|digest|media|redaction|available/i);
+      expect(repository.getCurrentAssessment(runId).state).toBe("projected");
+    } finally {
+      close();
+    }
+  });
+
+  it.each([0, -1, 1.5, Number.NaN])(
+    "rejects invalid note audit count %s without partial persistence",
+    async (count) => {
+      const { repository, databasePath, artifactRoot, close } = setup();
+      try {
+        const note = completedAssessmentNote(artifactRoot, `audit-count-${String(count)}`);
+        await expect(repository.updateAssessment({
+          runId,
+          eventId: `assessment-invalid-audit-${String(count)}`,
+          receivedAt,
+          verdict: "partial",
+          note: { state: "artifact", artifact: note }
+        }, [{ reason: "fixture", count }])).rejects.toThrow(/positive integer/i);
+        expect(repository.getCurrentAssessment(runId).state).toBe("projected");
+        expect(queryRows(databasePath, "SELECT * FROM artifacts")).toEqual([]);
+        expect(queryRows(databasePath, "SELECT * FROM redaction_audits")).toEqual([]);
+      } finally {
+        close();
+      }
+    }
+  );
 });
 
 describe("derived event identity storage", () => {

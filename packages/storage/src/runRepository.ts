@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -203,6 +203,61 @@ export interface StorageSchemaCapabilities {
   readonly eventArtifactBindings: boolean;
 }
 
+export type AssessmentVerdict =
+  | "unreviewed"
+  | "success"
+  | "partial"
+  | "failure";
+
+export type TaskCompletion = "yes" | "no" | "uncertain";
+
+export type AssessmentNoteRef =
+  | Readonly<{ state: "absent" }>
+  | Readonly<{ state: "artifact"; artifact: CompletedArtifact }>
+  | Readonly<{ state: "omitted"; reason: EvidenceOmissionReason }>;
+
+export type AssessmentNoteProjection =
+  | Readonly<{ state: "absent" }>
+  | Readonly<{ state: "artifact"; artifactId: string }>
+  | Readonly<{ state: "omitted"; reason: EvidenceOmissionReason }>;
+
+export interface UpdateAssessmentInput {
+  readonly runId: string;
+  readonly eventId: string;
+  readonly receivedAt: string;
+  readonly verdict: AssessmentVerdict;
+  readonly taskCompleted?: TaskCompletion;
+  readonly note?: AssessmentNoteRef;
+}
+
+export interface ProjectedCurrentAssessment {
+  readonly runId: string;
+  readonly verdict: "unreviewed";
+  readonly taskCompleted: "uncertain";
+  readonly note: Readonly<{ state: "absent" }>;
+  readonly state: "projected";
+  readonly provenance: null;
+  readonly currentEventId: null;
+  readonly reviewedAt: null;
+  readonly updatedAt: null;
+}
+
+export interface ExplicitCurrentAssessment {
+  readonly runId: string;
+  readonly verdict: AssessmentVerdict;
+  readonly taskCompleted: TaskCompletion;
+  readonly note: AssessmentNoteProjection;
+  readonly state: "explicit";
+  readonly provenance: "human";
+  readonly currentEventId: string;
+  readonly reviewedAt: number;
+  readonly updatedAt: number;
+}
+
+export type CurrentAssessment =
+  | ProjectedCurrentAssessment
+  | ExplicitCurrentAssessment;
+
 export interface RunDetail {
   run: RunRecord;
   ownership: RecorderOwnership | null;
@@ -276,6 +331,18 @@ interface DerivationIdentityRow {
   derived_kind: "test.command" | "test.result";
   derived_event_id: string;
   created_at: number;
+}
+
+interface CurrentAssessmentRow {
+  run_id: string;
+  current_event_id: string;
+  verdict: AssessmentVerdict;
+  task_completion: TaskCompletion;
+  note_state: AssessmentNoteProjection["state"];
+  note_artifact_id: string | null;
+  note_omission_reason: EvidenceOmissionReason | null;
+  reviewed_at: number;
+  updated_at: number;
 }
 
 interface RunListRow extends RunRow {
@@ -566,6 +633,120 @@ function evidenceColumns(value: RequiredGitEvidenceRef | OptionalGitEvidenceRef)
   if (value.state === "artifact") return [value.state, value.artifactId, null];
   if (value.state === "omitted") return [value.state, null, value.reason];
   return [value.state, null, null];
+}
+
+function hasExactKeys(value: object, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length &&
+    actual.every((key, index) => key === [...expected].sort()[index]);
+}
+
+function validateAssessmentNote(value: unknown): asserts value is AssessmentNoteRef {
+  if (typeof value !== "object" || value === null || !("state" in value)) {
+    throw new Error("Assessment note requires an explicit note state tuple.");
+  }
+  const candidate = value as { state?: unknown; artifact?: unknown; reason?: unknown };
+  if (candidate.state === "absent" && hasExactKeys(value, ["state"])) return;
+  if (
+    candidate.state === "artifact" &&
+    hasExactKeys(value, ["artifact", "state"]) &&
+    typeof candidate.artifact === "object" &&
+    candidate.artifact !== null
+  ) return;
+  if (
+    candidate.state === "omitted" &&
+    hasExactKeys(value, ["reason", "state"]) &&
+    (candidate.reason === "metadata-only" || candidate.reason === "strict")
+  ) return;
+  throw new Error("Assessment note state tuple is invalid.");
+}
+
+function validateAssessmentInput(
+  input: UpdateAssessmentInput,
+  audits: readonly RedactionAudit[]
+): Readonly<{
+  taskCompleted: TaskCompletion;
+  note: AssessmentNoteRef;
+  receivedAt: number;
+}> {
+  if (!input || typeof input !== "object") throw new Error("Assessment input is required.");
+  if (typeof input.runId !== "string" || input.runId.length === 0) {
+    throw new Error("Assessment run ID must not be empty.");
+  }
+  if (typeof input.eventId !== "string" || input.eventId.length === 0) {
+    throw new Error("Assessment event ID must not be empty.");
+  }
+  if (!(input.verdict === "unreviewed" || input.verdict === "success" ||
+      input.verdict === "partial" || input.verdict === "failure")) {
+    throw new Error("Assessment verdict is invalid.");
+  }
+  const taskCompleted = input.taskCompleted ?? "uncertain";
+  if (!(taskCompleted === "yes" || taskCompleted === "no" || taskCompleted === "uncertain")) {
+    throw new Error("Assessment task completion is invalid.");
+  }
+  if (input.verdict === "unreviewed" && taskCompleted !== "uncertain") {
+    throw new Error("An explicit unreviewed assessment requires uncertain task completion.");
+  }
+  const note: AssessmentNoteRef = input.note ?? Object.freeze({ state: "absent" });
+  validateAssessmentNote(note);
+  for (const audit of audits) {
+    if (!Number.isInteger(audit.count) || audit.count <= 0) {
+      throw new Error("Redaction audit counts must be positive integers.");
+    }
+  }
+  return Object.freeze({
+    taskCompleted,
+    note,
+    receivedAt: epochMilliseconds(input.receivedAt)
+  });
+}
+
+function assessmentNoteProjection(note: AssessmentNoteRef): AssessmentNoteProjection {
+  if (note.state === "artifact") {
+    return Object.freeze({ state: "artifact", artifactId: note.artifact.id });
+  }
+  return Object.freeze({ ...note });
+}
+
+function projectedAssessment(runId: string): ProjectedCurrentAssessment {
+  return Object.freeze({
+    runId,
+    verdict: "unreviewed",
+    taskCompleted: "uncertain",
+    note: Object.freeze({ state: "absent" }),
+    state: "projected",
+    provenance: null,
+    currentEventId: null,
+    reviewedAt: null,
+    updatedAt: null
+  });
+}
+
+function currentAssessmentFromRow(row: CurrentAssessmentRow): ExplicitCurrentAssessment {
+  let note: AssessmentNoteProjection;
+  if (row.note_state === "absent" && row.note_artifact_id === null &&
+      row.note_omission_reason === null) {
+    note = Object.freeze({ state: "absent" });
+  } else if (row.note_state === "artifact" && row.note_artifact_id !== null &&
+      row.note_omission_reason === null) {
+    note = Object.freeze({ state: "artifact", artifactId: row.note_artifact_id });
+  } else if (row.note_state === "omitted" && row.note_artifact_id === null &&
+      (row.note_omission_reason === "metadata-only" || row.note_omission_reason === "strict")) {
+    note = Object.freeze({ state: "omitted", reason: row.note_omission_reason });
+  } else {
+    throw new Error("Stored current assessment note state is inconsistent.");
+  }
+  return Object.freeze({
+    runId: row.run_id,
+    verdict: row.verdict,
+    taskCompleted: row.task_completion,
+    note,
+    state: "explicit",
+    provenance: "human",
+    currentEventId: row.current_event_id,
+    reviewedAt: row.reviewed_at,
+    updatedAt: row.updated_at
+  });
 }
 
 function reconcileFacts(
@@ -1140,6 +1321,23 @@ export class RunRepository {
     audits: readonly RedactionAudit[] = [],
     createdAt = Date.now()
   ): Promise<StoredArtifact> {
+    for (const audit of audits) {
+      if (!Number.isInteger(audit.count) || audit.count <= 0) {
+        throw new Error("Redaction audit counts must be positive integers.");
+      }
+    }
+    const handle = await this.openValidatedArtifact(input);
+    try {
+      this.#connection.transaction(() => {
+        this.insertArtifactMetadata(input, audits, createdAt);
+      })();
+      return { ...input, createdAt };
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async openValidatedArtifact(input: CompletedArtifact): Promise<FileHandle> {
     if (!isAbsolute(input.path) || basename(input.path) !== input.id || input.id !== input.sha256) {
       throw new Error("Completed artifact path, ID, and SHA-256 identity do not match.");
     }
@@ -1152,7 +1350,7 @@ export class RunRepository {
       throw new Error("Completed artifact is outside the canonical content-addressed artifact layout.");
     }
 
-    let handle;
+    let handle: FileHandle;
     let pathDevice: number | undefined;
     let pathInode: number | undefined;
     try {
@@ -1185,23 +1383,211 @@ export class RunRepository {
       }
       const digest = createHash("sha256").update(bytes).digest("hex");
       if (digest !== input.sha256) throw new Error("Completed artifact digest does not match metadata.");
-
-      this.#connection.transaction(() => {
-        this.#connection.prepare(`
-          INSERT INTO artifacts (
-            id, run_id, kind, media_type, path, sha256, byte_length, redaction_state,
-            truncated, original_byte_length, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          input.id, input.runId, input.kind, input.mediaType, input.path, input.sha256,
-          input.byteLength, input.redactionState, input.truncated ? 1 : 0,
-          input.originalByteLength, createdAt
-        );
-        this.insertAudits(input.runId, null, input.id, audits, createdAt);
-      })();
-      return { ...input, createdAt };
-    } finally {
+      return handle;
+    } catch (error) {
       await handle.close();
+      throw error;
+    }
+  }
+
+  private insertArtifactMetadata(
+    input: CompletedArtifact,
+    audits: readonly RedactionAudit[],
+    createdAt: number
+  ): void {
+    this.#connection.prepare(`
+      INSERT INTO artifacts (
+        id, run_id, kind, media_type, path, sha256, byte_length, redaction_state,
+        truncated, original_byte_length, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.id, input.runId, input.kind, input.mediaType, input.path, input.sha256,
+      input.byteLength, input.redactionState, input.truncated ? 1 : 0,
+      input.originalByteLength, createdAt
+    );
+    this.insertAudits(input.runId, null, input.id, audits, createdAt);
+  }
+
+  getCurrentAssessment(runId: string): CurrentAssessment {
+    this.requireRunRow(runId);
+    if (!this.schemaCapabilities.currentAssessments) return projectedAssessment(runId);
+    const row = this.#connection.prepare(`
+      SELECT * FROM current_assessments WHERE run_id = ?
+    `).get(runId) as CurrentAssessmentRow | undefined;
+    return row ? currentAssessmentFromRow(row) : projectedAssessment(runId);
+  }
+
+  async updateAssessment(
+    input: UpdateAssessmentInput,
+    noteAudits: readonly RedactionAudit[] = []
+  ): Promise<ExplicitCurrentAssessment> {
+    const validated = validateAssessmentInput(input, noteAudits);
+    if (!this.schemaCapabilities.currentAssessments ||
+        !this.schemaCapabilities.eventArtifactBindings) {
+      throw new Error("Task 6 assessment storage is unavailable.");
+    }
+    const initialRun = this.requireRunRow(input.runId);
+    if (validated.note.state === "artifact") {
+      this.validateAssessmentNoteArtifact(input.runId, validated.note.artifact);
+    }
+    const noteProjection = assessmentNoteProjection(validated.note);
+    const artifactHandle = validated.note.state === "artifact"
+      ? await this.openValidatedArtifact(validated.note.artifact)
+      : null;
+
+    try {
+      return this.#connection.transaction(() => {
+        const run = this.requireRunRow(input.runId);
+        if (run.provider !== initialRun.provider) {
+          throw new Error("Assessment run provider changed before persistence.");
+        }
+        const eventOwner = this.#connection
+          .prepare("SELECT run_id FROM events WHERE id = ?")
+          .get(input.eventId) as { run_id: string } | undefined;
+        if (eventOwner) {
+          if (eventOwner.run_id !== input.runId) {
+            throw new Error("Assessment event ID is already owned by another run.");
+          }
+          throw new Error("Assessment event ID already exists in this run.");
+        }
+
+        if (validated.note.state === "artifact") {
+          this.insertOrReuseAssessmentArtifact(
+            validated.note.artifact,
+            noteAudits,
+            validated.receivedAt
+          );
+        }
+
+        const event = traceEventV1Schema.parse({
+          id: input.eventId,
+          runId: input.runId,
+          sequence: this.nextSequence(input.runId),
+          receivedAt: input.receivedAt,
+          kind: "assessment.updated",
+          status: "completed",
+          provenance: "human",
+          source: { provider: run.provider },
+          relationships: [],
+          summary: "Human assessment updated",
+          normalizedPayload: {
+            verdict: input.verdict,
+            taskCompleted: validated.taskCompleted,
+            note: noteProjection
+          }
+        });
+        this.validateEventRelationships(event);
+        this.insertEvent(event, []);
+
+        if (noteProjection.state === "artifact") {
+          this.#connection.prepare(`
+            INSERT INTO event_artifact_bindings (
+              event_id, run_id, artifact_id, role, created_at
+            ) VALUES (?, ?, ?, 'assessment_note', ?)
+          `).run(event.id, event.runId, noteProjection.artifactId, validated.receivedAt);
+        }
+
+        const noteArtifactId = noteProjection.state === "artifact"
+          ? noteProjection.artifactId
+          : null;
+        const noteOmissionReason = noteProjection.state === "omitted"
+          ? noteProjection.reason
+          : null;
+        this.#connection.prepare(`
+          INSERT INTO current_assessments (
+            run_id, current_event_id, verdict, task_completion, note_state,
+            note_artifact_id, note_omission_reason, reviewed_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(run_id) DO UPDATE SET
+            current_event_id = excluded.current_event_id,
+            verdict = excluded.verdict,
+            task_completion = excluded.task_completion,
+            note_state = excluded.note_state,
+            note_artifact_id = excluded.note_artifact_id,
+            note_omission_reason = excluded.note_omission_reason,
+            reviewed_at = current_assessments.reviewed_at,
+            updated_at = excluded.updated_at
+        `).run(
+          input.runId,
+          event.id,
+          input.verdict,
+          validated.taskCompleted,
+          noteProjection.state,
+          noteArtifactId,
+          noteOmissionReason,
+          validated.receivedAt,
+          validated.receivedAt
+        );
+        const current = this.#connection.prepare(`
+          SELECT * FROM current_assessments WHERE run_id = ?
+        `).get(input.runId) as CurrentAssessmentRow;
+        return currentAssessmentFromRow(current);
+      }).immediate();
+    } finally {
+      if (artifactHandle) await artifactHandle.close();
+    }
+  }
+
+  private validateAssessmentNoteArtifact(runId: string, artifact: CompletedArtifact): void {
+    if (artifact.runId !== runId) {
+      throw new Error("Assessment note artifact must belong to the same run.");
+    }
+    if (artifact.kind !== "assessment-note") {
+      throw new Error("Assessment note artifact kind must be assessment-note.");
+    }
+    if (artifact.mediaType !== "text/plain; charset=utf-8") {
+      throw new Error("Assessment note artifact media type must be UTF-8 plain text.");
+    }
+    if (artifact.redactionState !== "redacted") {
+      throw new Error("Assessment note artifact must be redacted.");
+    }
+    if (typeof artifact.truncated !== "boolean" ||
+        !Number.isInteger(artifact.originalByteLength) || artifact.originalByteLength < 0) {
+      throw new Error("Assessment note artifact truncation metadata is invalid.");
+    }
+  }
+
+  private insertOrReuseAssessmentArtifact(
+    input: CompletedArtifact,
+    audits: readonly RedactionAudit[],
+    createdAt: number
+  ): void {
+    const existing = this.#connection.prepare("SELECT * FROM artifacts WHERE id = ?")
+      .get(input.id) as ArtifactRow | undefined;
+    if (!existing) {
+      this.insertArtifactMetadata(input, audits, createdAt);
+      return;
+    }
+    if (existing.run_id !== input.runId) {
+      throw new Error("Assessment note artifact is already owned by another run.");
+    }
+    if (
+      existing.id !== input.id ||
+      existing.kind !== input.kind ||
+      existing.media_type !== input.mediaType ||
+      existing.path !== input.path ||
+      existing.sha256 !== input.sha256 ||
+      existing.byte_length !== input.byteLength ||
+      existing.redaction_state !== input.redactionState ||
+      (existing.truncated === 1) !== input.truncated ||
+      existing.original_byte_length !== input.originalByteLength
+    ) {
+      throw new Error("Existing assessment note artifact metadata does not match the completed artifact.");
+    }
+    const storedAudits = this.#connection.prepare(`
+      SELECT event_id, artifact_id, reason, count
+      FROM redaction_audits
+      WHERE artifact_id = ?
+      ORDER BY id
+    `).all(input.id) as AuditRow[];
+    const requestedAudits: AuditRow[] = audits.map((audit) => ({
+      event_id: null,
+      artifact_id: input.id,
+      reason: audit.reason,
+      count: audit.count
+    }));
+    if (!isDeepStrictEqual(storedAudits, requestedAudits)) {
+      throw new Error("Existing assessment note artifact audits do not match the completed artifact.");
     }
   }
 
