@@ -263,6 +263,9 @@ describe("durable crash ownership recovery", () => {
       expect(recovered.events.filter(({ kind }) => kind === "recorder.ownership_lost")).toHaveLength(1);
       expect(recovered.events.filter(({ kind }) => kind === "recorder.recovery")).toHaveLength(1);
       expect(recovered.events.filter(({ kind }) => kind === "run.reconciled")).toHaveLength(1);
+      expect(recovered.events.filter(({ kind }) =>
+        kind === "test.command" || kind === "test.result"
+      )).toEqual([]);
       expect(recovered.events.some(({ kind }) => kind === "recorder.process_exit")).toBe(false);
       expect(recovered.events.some(({ kind, provenance }) =>
         provenance === "observed" && kind === "turn.completed"

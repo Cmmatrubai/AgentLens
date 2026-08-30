@@ -25,6 +25,10 @@ import {
 import type { RecordCommand } from "./args.js";
 import { ownerOnlyDatabaseFiles, prepareDataRoot } from "./dataRoot.js";
 import {
+  derivePersistedTerminalCommand,
+  ensureTestDerivationsForRun
+} from "./deriveTests.js";
+import {
   captureGitAfter,
   captureGitBefore,
   decodeGitPath,
@@ -66,6 +70,11 @@ export interface RecordRunDependencies {
   readonly onRunIdPrinted?: (runId: string) => void | Promise<void>;
   readonly onFinalGitPersisted?: () => void | Promise<void>;
   readonly onRecoveryAppended?: () => void | Promise<void>;
+  readonly onObservedEventPersisted?: (
+    observation: Readonly<{ runId: string; eventId: string }>
+  ) => void | Promise<void>;
+  readonly derivePersistedTerminalCommand?: typeof derivePersistedTerminalCommand;
+  readonly ensureTestDerivationsForRun?: typeof ensureTestDerivationsForRun;
 }
 
 export interface RecordResult {
@@ -89,6 +98,29 @@ export interface GitPersistenceContext {
   readonly artifactStore: ArtifactStore;
   readonly repository: RunRepository;
   readonly committedArtifactIds: Set<string>;
+}
+
+function isEligibleTerminalObservedCommand(event: TraceEventV1): boolean {
+  if (
+    event.provenance !== "observed" ||
+    event.kind !== "command" ||
+    (event.status !== "completed" && event.status !== "failed")
+  ) return false;
+  if (event.source.itemType !== undefined && event.source.itemType !== "command_execution") {
+    return false;
+  }
+  return event.source.eventType === undefined ||
+    event.source.eventType === "item.completed" ||
+    event.source.eventType === "item.failed";
+}
+
+function advanceSequenceFromDerivedEvents(
+  state: RecordingState,
+  derivedEvents: readonly TraceEventV1[]
+): void {
+  for (const event of derivedEvents) {
+    state.sequence = Math.max(state.sequence, event.sequence + 1);
+  }
 }
 
 const VERSION = "0.1.0";
@@ -478,6 +510,10 @@ export async function recordRun(
   const env = dependencies.env ?? process.env;
   const now = dependencies.now ?? Date.now;
   const nextId = dependencies.nextId ?? randomUUID;
+  const deriveTerminalCommand =
+    dependencies.derivePersistedTerminalCommand ?? derivePersistedTerminalCommand;
+  const ensureRunTestDerivations =
+    dependencies.ensureTestDerivationsForRun ?? ensureTestDerivationsForRun;
   const processIdentityInspector =
     dependencies.processIdentityInspector ?? systemProcessIdentityInspector;
   const recorderPid = dependencies.recorderPid ?? process.pid;
@@ -507,6 +543,12 @@ export async function recordRun(
     artifactStore,
     repository,
     committedArtifactIds
+  };
+  const catchUpTestDerivations = (): void => {
+    advanceSequenceFromDerivedEvents(
+      state,
+      ensureRunTestDerivations({ repository, runId })
+    );
   };
 
   let initialStatus: RequiredGitEvidenceRef | undefined;
@@ -593,6 +635,7 @@ export async function recordRun(
       interruptionEventId = interruption.id;
       const after = await captureGitAfter(before);
       await persistFinalGit(before, after, initialStatus, gitContext, repository, state, nextId, iso(now), now());
+      catchUpTestDerivations();
       const run = repository.reconcileRun(runId, {
         eventId: nextId(),
         receivedAt: iso(now),
@@ -620,6 +663,15 @@ export async function recordRun(
             nextSequence: () => state.sequence++,
             receivedAt: () => receivedAtIso
           });
+          if (persisted.provenance === "observed") {
+            await dependencies.onObservedEventPersisted?.({ runId, eventId: persisted.id });
+          }
+          if (isEligibleTerminalObservedCommand(persisted)) {
+            advanceSequenceFromDerivedEvents(
+              state,
+              deriveTerminalCommand({ repository, runId, sourceEventId: persisted.id })
+            );
+          }
           if (
             persisted.provenance === "observed" &&
             (persisted.kind === "turn.completed" || persisted.kind === "turn.failed")
@@ -731,6 +783,7 @@ export async function recordRun(
     if (dependencies.signal?.aborted && interruptionEventId === undefined) {
       interruptionEventId = appendInterruption(repository, state, runId, iso(now), nextId).id;
     }
+    catchUpTestDerivations();
     const run = repository.reconcileRun(runId, {
       eventId: nextId(),
       receivedAt: iso(now),
@@ -755,6 +808,11 @@ export async function recordRun(
         ).id;
         if (dependencies.signal?.aborted && interruptionEventId === undefined) {
           interruptionEventId = appendInterruption(repository, state, runId, iso(now), nextId).id;
+        }
+        try {
+          catchUpTestDerivations();
+        } catch {
+          // The process-group failure remains the primary fact when derivation storage is unusable.
         }
       } catch (persistenceError) {
         throw new AggregateError(
@@ -794,6 +852,11 @@ export async function recordRun(
           // The recorder-failure event still permits terminal reconciliation when final Git
           // evidence cannot be recovered (for example, if the child removed repository state).
         }
+      }
+      try {
+        catchUpTestDerivations();
+      } catch {
+        // The original recorder failure remains primary when derivation storage is unusable.
       }
       if (markedRunning) {
         await appendRecoveriesForOpenEvents(

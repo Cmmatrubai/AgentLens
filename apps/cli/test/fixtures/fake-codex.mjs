@@ -21,14 +21,14 @@ const started = (id, type = "command_execution") => emit({
   turn_id: "fixture-turn",
   item: { id, type, command: "fixture command", status: "in_progress" }
 });
-const completed = (id, status = "completed", exitCode = 0) => emit({
+const completed = (id, status = "completed", exitCode = 0, command = "fixture command") => emit({
   type: "item.completed",
   thread_id: "fixture-thread",
   turn_id: "fixture-turn",
   item: {
     id,
     type: "command_execution",
-    command: "fixture command",
+    command,
     aggregated_output: "fixture output",
     exit_code: exitCode,
     status
@@ -59,6 +59,11 @@ switch (mode) {
     completed("command-failed", "failed", 1);
     started("command-recovery");
     completed("command-recovery", "completed", 0);
+    terminal();
+    break;
+  case "test-command":
+    started("test-command");
+    completed("test-command", "completed", 0, "pnpm test");
     terminal();
     break;
   case "open-item":

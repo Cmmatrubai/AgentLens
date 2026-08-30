@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { createRequire } from "node:module";
 import {
   chmod,
   copyFile,
@@ -16,12 +17,29 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Readable } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { TraceEventV1 } from "@agentlens/core";
+import * as derivations from "@agentlens/derivations";
 import { openDatabase, RunRepository } from "@agentlens/storage";
+import {
+  derivePersistedTerminalCommand,
+  ensureTestDerivationsForRun
+} from "../src/deriveTests.js";
 import { recordRun } from "../src/recordRun.js";
 
 const execFile = promisify(execFileCallback);
+const requireFromStorage = createRequire(
+  fileURLToPath(new URL("../../../packages/storage/package.json", import.meta.url))
+);
+const SqliteDatabase = requireFromStorage("better-sqlite3") as new (
+  filename: string,
+  options: { readonly: boolean; fileMustExist: boolean }
+) => {
+  pragma(source: string): unknown;
+  prepare(source: string): { get(...params: unknown[]): unknown };
+  close(): void;
+};
 const fakeCodex = fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url));
 const roots: string[] = [];
 const processGroups: number[] = [];
@@ -129,6 +147,46 @@ function detail(dataRoot: string, runId: string) {
   }
 }
 
+function appendOnlyTestCommand(
+  repository: RunRepository,
+  runId: string,
+  sourceEventId: string
+): TraceEventV1 {
+  const source = repository.getRunDetail(runId).events.find(({ id }) => id === sourceEventId);
+  if (!source || (source.status !== "completed" && source.status !== "failed")) {
+    throw new Error("Split-derivation fixture requires a durable terminal source event.");
+  }
+  const command = derivations.buildTestDerivationDrafts({
+    runId,
+    sourceEventId,
+    sourceProvider: source.source.provider,
+    eventStatus: source.status,
+    exitCode: 0,
+    classification: {
+      family: "pnpm",
+      confidence: "high",
+      derivationVersion: "test-command/1"
+    }
+  })[0];
+  return repository.appendDerivedEvent({
+    identity: command.derivation.identity,
+    sourceEventId,
+    eventId: command.id,
+    receivedAt: source.receivedAt,
+    kind: command.kind,
+    status: command.status,
+    sourceProvider: command.source.provider,
+    summary: command.summary,
+    normalizedPayload: command.normalizedPayload,
+    derivation: {
+      name: command.derivation.name,
+      version: command.derivation.version,
+      identity: command.derivation.identity,
+      confidence: command.derivation.confidence
+    }
+  });
+}
+
 async function durableBytes(root: string): Promise<Buffer> {
   const entries = await readdir(root, { recursive: true, withFileTypes: true });
   const files = entries.filter((entry) => entry.isFile());
@@ -152,6 +210,7 @@ async function waitForOpenCommand(dataRoot: string, runId: () => string | undefi
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const processGroupId of processGroups.splice(0)) {
     try { process.kill(-processGroupId, "SIGKILL"); } catch { /* expected after recorder cleanup */ }
   }
@@ -423,6 +482,333 @@ describe("recordRun lifecycle", () => {
     ]);
     expect(commands.every(({ provenance }) => provenance === "observed")).toBe(true);
     expect(run.run).toMatchObject({ providerTerminalKind: "completed", exitCode: 0 });
+  });
+
+  it("derives test evidence only after the terminal observed command is durable", async () => {
+    const context = await fixture();
+    let terminalPersistedSnapshot: Readonly<{
+      source: Readonly<{
+        id: string;
+        kind: string;
+        status: string;
+        provenance: string;
+        eventType: string | null;
+      }>;
+      derivedCount: number;
+    }> | undefined;
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: silentOutput,
+        onObservedEventPersisted: ({ runId, eventId }) => {
+          const connection = new SqliteDatabase(join(context.dataRoot, "agentlens.sqlite"), {
+            readonly: true,
+            fileMustExist: true
+          });
+          try {
+            connection.pragma("query_only = ON");
+            const source = connection.prepare(`
+              SELECT
+                events.id,
+                events.kind,
+                events.status,
+                events.provenance,
+                event_sources.event_type AS eventType
+              FROM events
+              JOIN event_sources ON event_sources.event_id = events.id
+              WHERE events.run_id = ? AND events.id = ?
+            `).get(runId, eventId) as {
+              id: string;
+              kind: string;
+              status: string;
+              provenance: string;
+              eventType: string | null;
+            } | undefined;
+            if (source?.eventType !== "item.completed") return;
+            const derivedCount = connection.prepare(`
+              SELECT COUNT(*) AS count
+              FROM events
+              WHERE run_id = ? AND kind IN ('test.command', 'test.result')
+            `).get(runId) as { count: number };
+            terminalPersistedSnapshot = Object.freeze({ source, derivedCount: derivedCount.count });
+          } finally {
+            connection.close();
+          }
+        }
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const started = run.events.find(({ source }) =>
+      source.itemId === "test-command" && source.eventType === "item.started"
+    );
+    const terminal = run.events.find(({ source }) =>
+      source.itemId === "test-command" && source.eventType === "item.completed"
+    );
+    const trajectory = run.events.filter(({ id, relationships }) =>
+      id === terminal?.id || relationships.some(({ type, eventId }) =>
+        type === "derived_from" && eventId === terminal?.id
+      )
+    );
+
+    expect(terminalPersistedSnapshot).toEqual({
+      source: {
+        id: terminal?.id,
+        kind: "command",
+        status: "completed",
+        provenance: "observed",
+        eventType: "item.completed"
+      },
+      derivedCount: 0
+    });
+    expect(trajectory.map(({ kind }) => kind)).toEqual([
+      "command",
+      "test.command",
+      "test.result"
+    ]);
+    expect(started).toMatchObject({
+      kind: "command",
+      status: "in_progress",
+      provenance: "observed",
+      source: { eventType: "item.started", itemId: "test-command" },
+      relationships: []
+    });
+    expect(run.events.filter(({ relationships }) => relationships.some(({ eventId }) =>
+      eventId === started?.id
+    ))).toEqual([]);
+    expect(new Set(run.events.map(({ sequence }) => sequence)).size).toBe(run.events.length);
+  });
+
+  it("finalization fills a complete eager-derivation gap and remains idempotent", async () => {
+    const context = await fixture();
+    let eagerCalls = 0;
+    let finalizationCalls = 0;
+    let derivationCounts: readonly number[] = [];
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: silentOutput,
+        derivePersistedTerminalCommand: () => {
+          eagerCalls += 1;
+          return [];
+        },
+        ensureTestDerivationsForRun: (input) => {
+          finalizationCalls += 1;
+          const count = () => input.repository.getRunDetail(input.runId).events.filter(({ kind }) =>
+            kind === "test.command" || kind === "test.result"
+          ).length;
+          const before = count();
+          const first = ensureTestDerivationsForRun(input);
+          const afterFirst = count();
+          const repeated = ensureTestDerivationsForRun(input);
+          derivationCounts = [before, afterFirst, count()];
+          expect(repeated).toEqual(first);
+          return repeated;
+        }
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+
+    expect(eagerCalls).toBe(1);
+    expect(finalizationCalls).toBe(1);
+    expect(derivationCounts).toEqual([0, 2, 2]);
+    expect(run.events.filter(({ kind }) => kind.startsWith("test.")).map(({ kind }) => kind))
+      .toEqual(["test.command", "test.result"]);
+    expect(run.events.at(-1)?.kind).toBe("run.reconciled");
+  });
+
+  it("finalization fills only the missing result after a split eager write", async () => {
+    const context = await fixture();
+    let eagerCommandId: string | undefined;
+    let kindsAcrossFinalization: readonly (readonly string[])[] = [];
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: silentOutput,
+        derivePersistedTerminalCommand: (input) => {
+          const command = appendOnlyTestCommand(
+            input.repository,
+            input.runId,
+            input.sourceEventId
+          );
+          eagerCommandId = command.id;
+          return [command];
+        },
+        ensureTestDerivationsForRun: (input) => {
+          const kinds = () => input.repository.getRunDetail(input.runId).events
+            .filter(({ kind }) => kind.startsWith("test."))
+            .map(({ kind }) => kind);
+          const before = kinds();
+          const first = ensureTestDerivationsForRun(input);
+          const afterFirst = kinds();
+          const repeated = ensureTestDerivationsForRun(input);
+          kindsAcrossFinalization = [before, afterFirst, kinds()];
+          expect(repeated).toEqual(first);
+          return repeated;
+        }
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const derived = run.events.filter(({ kind }) => kind.startsWith("test."));
+
+    expect(kindsAcrossFinalization).toEqual([
+      ["test.command"],
+      ["test.command", "test.result"],
+      ["test.command", "test.result"]
+    ]);
+    expect(derived.map(({ kind }) => kind)).toEqual(["test.command", "test.result"]);
+    expect(derived[0]?.id).toBe(eagerCommandId);
+  });
+
+  it.each([
+    { name: "malformed quoting", command: "pnpm test '\"" },
+    { name: "unknown command", command: "echo pytest" }
+  ])("contains $name without losing the terminal source", async ({ command }) => {
+    const context = await fixture();
+    await installCommandFixture(context.root, { command });
+    let eagerCalls = 0;
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: silentOutput,
+        derivePersistedTerminalCommand: (input) => {
+          eagerCalls += 1;
+          return derivePersistedTerminalCommand(input);
+        }
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const source = run.events.find(({ source: eventSource }) =>
+      eventSource.itemId === "bounded-command" && eventSource.eventType === "item.completed"
+    );
+
+    expect(result.status).toBe("completed");
+    expect(eagerCalls).toBe(1);
+    expect(source).toMatchObject({
+      kind: "command",
+      status: "completed",
+      provenance: "observed"
+    });
+    expect(run.events.filter(({ kind }) => kind.startsWith("test."))).toEqual([]);
+    expect(run.events.filter(({ kind }) => kind === "error")).toEqual([]);
+  });
+
+  it("contains classifier exceptions per durable source and leaves a retryable gap", async () => {
+    const context = await fixture();
+    const classifierSentinel = "CLASSIFIER_PRIVATE_SENTINEL";
+    const classifier = vi.spyOn(derivations, "classifyTestCommand")
+      .mockImplementation(() => { throw new Error(classifierSentinel); });
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const source = run.events.find(({ source: eventSource }) =>
+      eventSource.itemId === "test-command" && eventSource.eventType === "item.completed"
+    );
+
+    expect(result.status).toBe("completed");
+    expect(classifier).toHaveBeenCalled();
+    expect(source).toMatchObject({
+      kind: "command",
+      status: "completed",
+      provenance: "observed"
+    });
+    expect(run.events.filter(({ kind }) => kind.startsWith("test."))).toEqual([]);
+    expect(run.events.filter(({ kind }) => kind === "error")).toEqual([]);
+    expect((await durableBytes(context.dataRoot)).includes(Buffer.from(classifierSentinel))).toBe(false);
+  });
+
+  it("routes a derived-event storage failure through recorder-error reconciliation without source mutation", async () => {
+    const context = await fixture();
+    const appendDerivedEvent = RunRepository.prototype.appendDerivedEvent;
+    const storageFailure = vi.spyOn(RunRepository.prototype, "appendDerivedEvent")
+      .mockImplementationOnce(() => { throw new Error("DERIVATION_STORAGE_PRIVATE_SENTINEL"); })
+      .mockImplementation(appendDerivedEvent);
+    let terminalSourceBeforeFailure: string | undefined;
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: silentOutput,
+        derivePersistedTerminalCommand: () => [],
+        onObservedEventPersisted: ({ runId, eventId }) => {
+          const source = detail(context.dataRoot, runId).events.find(({ id }) => id === eventId);
+          if (source?.source.eventType === "item.completed") {
+            terminalSourceBeforeFailure = JSON.stringify(source);
+          }
+        }
+      }
+    );
+    const run = detail(context.dataRoot, result.runId);
+    const terminal = run.events.find(({ source }) =>
+      source.itemId === "test-command" && source.eventType === "item.completed"
+    );
+    const recorderFailure = run.events.find(({ kind, provenance }) =>
+      kind === "error" && provenance === "recorder"
+    );
+
+    expect(storageFailure).toHaveBeenCalled();
+    expect(result.status).toBe("recorder_error");
+    expect(JSON.stringify(terminal)).toBe(terminalSourceBeforeFailure);
+    expect(recorderFailure).toMatchObject({
+      status: "failed",
+      normalizedPayload: { recorderFailure: true, phase: "recording" }
+    });
+    expect(run.events.at(-1)).toMatchObject({
+      kind: "run.reconciled",
+      normalizedPayload: { status: "recorder_error", recorderFailure: true }
+    });
+    expect((await durableBytes(context.dataRoot)).includes(
+      Buffer.from("DERIVATION_STORAGE_PRIVATE_SENTINEL")
+    )).toBe(false);
   });
 
   it("persists already-redacted command evidence for every observed command lifecycle event", async () => {
