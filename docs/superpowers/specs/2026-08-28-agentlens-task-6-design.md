@@ -4,6 +4,9 @@ Status: frozen for implementation
 
 Date: 2026-08-28
 
+Approved amendment: 2026-08-30 — fail closed when WAL state prevents an
+immutable filesystem read
+
 Branch: codex/agentlens-task-6
 
 Starting point: main at fb44a133c9db9ca77b9c6b456d1db12b1d5e1c16
@@ -98,10 +101,34 @@ Task 6 therefore makes both commands fully non-mutating:
 - they do not apply migrations;
 - they do not append recovery, derivation, or human events;
 - they do not change run lifecycle state;
-- they use a dedicated read-only database-open path;
+- they use a dedicated immutable database-open path after a fail-closed WAL
+  preflight;
 - their SQLite/WAL access creates, deletes, chmods, or changes no filesystem
   entry;
 - they may diagnose likely-stale ownership in the returned read model.
+
+Implementation proved that SQLite's ordinary `readonly` plus `query_only`
+connection is not filesystem-immutable: it can create `-wal`/`-shm` sidecars
+for a closed database and change shared-memory bytes for a live WAL. The
+approved Task 6 contract therefore fails closed instead of weakening pure-read
+semantics:
+
+- the database path must be an existing regular file and every existing
+  database sidecar must pass the existing no-follow containment checks;
+- if the `-wal` path exists at all, the read is refused with the stable reason
+  `wal_present`; AgentLens does not guess whether that WAL is active, empty, or
+  safely checkpointed;
+- with no WAL path, SQLite is opened in read-only immutable mode and may read
+  only the checkpointed main database;
+- AgentLens does not copy, checkpoint, snapshot, delete, truncate, or repair the
+  database or its sidecars;
+- successful immutable reads and WAL-present refusals must both preserve the
+  complete data-root filesystem snapshot exactly.
+
+This preserves purity at the explicit product cost that `runs`, `inspect`,
+`assess` validation, and SQLite doctor checks may be unavailable while a WAL
+path is present. Writable recorder/maintenance flows remain responsible for
+normal SQLite checkpoint/close behavior; read commands never trigger it.
 
 The existing durable stale-run recovery service remains unchanged. Its automatic
 trigger moves to record startup after the existing non-Git/dirty-repository and
@@ -562,8 +589,9 @@ HMAC key:
 SQLite:
 
 - a missing database in an otherwise empty/uninitialized root warns;
-- an existing database is opened through a read-only/query-only inspection
-  connection;
+- an existing database with no WAL path is opened through the immutable
+  inspection connection;
+- a present WAL path produces the stable non-mutating `wal_present` failure;
 - schema_migrations is read without applying changes;
 - current migration equals the highest Task 6 migration;
 - an older or future unsupported schema fails clearly;
@@ -660,8 +688,9 @@ Required coverage includes:
 - assessment updates and immutable human history;
 - note redaction, omission, bounds, and artifact ordering;
 - additive runs and inspect text/JSON;
-- byte-for-byte and metadata-level proof that runs and inspect change no
-  data-root files, including SQLite WAL/SHM state;
+- byte-for-byte and metadata-level proof that successful checkpointed reads and
+  WAL-present refusals change no data-root files, including SQLite WAL/SHM
+  state;
 - doctor pass, warning, failure, privacy, and stable JSON;
 - safe migration of a pre-Task-6 database;
 - the complete Tasks 1–5 regression suite and real Codex smoke recording.

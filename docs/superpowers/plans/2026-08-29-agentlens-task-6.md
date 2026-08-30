@@ -10,6 +10,13 @@
 
 **Spec:** docs/superpowers/specs/2026-08-28-agentlens-task-6-design.md
 
+**Approved implementation amendment (2026-08-30):** SQLite's ordinary
+read-only/query-only connection was proven to create or change WAL/SHM
+sidecars. Pure reads therefore use a fail-closed WAL preflight plus an immutable
+main-database connection. Any present `-wal` path returns stable reason
+`wal_present` without opening SQLite. No copy, checkpoint, snapshot, sidecar
+cleanup, or weakened filesystem invariant is permitted.
+
 ## Global Constraints
 
 - Start from frozen-design commit 57247e16a6c218568aeb0b780226da192156bfdc on branch codex/agentlens-task-6.
@@ -21,6 +28,9 @@
 - Unknown and malformed Codex events must remain non-fatal.
 - Derivation may never affect run reconciliation.
 - runs and inspect are pure reads. They do not initialize, chmod, migrate, recover, derive, assess, or change lifecycle state.
+- Pure SQLite inspection succeeds only for a checkpointed database with no
+  `-wal` path. A present WAL is refused as `wal_present`; successful reads and
+  refusals preserve the exact data-root snapshot.
 - Git operations performed by AgentLens remain read-only.
 - Preserve exact Codex argv, stdin, model, sandbox, permissions, approval configuration, and working directory.
 - Raw real-world traces stay local and ignored; only sanitized behavior-preserving fixtures may be committed.
@@ -46,7 +56,8 @@
 
 - packages/core/src/events.ts adds an optional derivation identity field so Task 6 test derivations can expose it without invalidating existing run-reconciliation events.
 - packages/storage/migrations/004_task6_evaluation.sql is the only forward schema migration.
-- packages/storage/src/database.ts owns writable migration 004 and a dedicated read-only/query-only connection.
+- packages/storage/src/database.ts owns writable migration 004 and the
+  fail-closed WAL preflight plus immutable inspection connection.
 - packages/storage/src/runRepository.ts owns idempotent derived-event insertion, assessment transactions, schema capability detection, and Task 5-schema compatible reads.
 - packages/storage does not classify commands or compute presentation summaries.
 
@@ -390,7 +401,10 @@ Add migration 004 to the ordered MIGRATIONS list. Do not backfill identities, de
 
 - [ ] **Step 5: Write read-only database RED tests**
 
-Create fixtures for current schema, migration 003, missing schema_migrations, corrupt SQLite, and a live WAL. Snapshot database, WAL, SHM, modes, sizes, mtimes, inode identities, and content hashes before and after open/inspect/close.
+Create fixtures for current schema, migration 003, missing schema_migrations,
+corrupt SQLite, a closed checkpointed database, and a database with a present
+WAL. Snapshot database, WAL, SHM, modes, sizes, mtimes, inode identities, and
+content hashes before and after success or refusal.
 
 Assert the API:
 
@@ -408,13 +422,24 @@ Run:
 
 Expected: openDatabaseReadOnly does not exist.
 
-- [ ] **Step 7: Implement the dedicated read-only/query-only open**
+- [ ] **Step 7: Implement fail-closed WAL preflight and immutable inspection**
 
-Open only an existing regular database with better-sqlite3 readonly and fileMustExist. Set foreign_keys ON and query_only ON. Do not set journal mode, apply migrations, mkdir, chmod, or create a database.
+Open only an existing regular database. Before SQLite open, lstat the exact
+`<database>-wal` path without following symlinks. If it exists in any form,
+throw a stable read-only error whose reason is `wal_present`; do not open SQLite
+or inspect WAL bytes. With no WAL path, open the main database using SQLite
+immutable read-only mode and fileMustExist, then set foreign_keys ON and
+query_only ON. Do not set journal mode, apply migrations, mkdir, chmod, create a
+database, copy files, checkpoint, snapshot, or clean sidecars.
 
 Make inspectConnection tolerate a missing schema_migrations table by reporting an empty migration list and provide quick_check and foreign_key_check results without writes.
 
-If the WAL fixture proves that this open mode creates or changes a sidecar, stop implementation and report the proven incompatibility before choosing another design. Do not copy the database, create a temporary snapshot, or weaken the no-filesystem-change contract without explicit design approval.
+Retain the compatibility probe as regression evidence: ordinary readonly plus
+query_only is not the product path. Prove instead that immutable checkpointed
+inspection creates no sidecar and that `wal_present` refusal leaves the entire
+database/WAL/SHM snapshot unchanged. If the immutable no-WAL path mutates the
+filesystem or cannot read the checkpointed database correctly, stop and report
+the new incompatibility without choosing another design.
 
 - [ ] **Step 8: Add schema capability detection**
 
@@ -892,10 +917,15 @@ Cover:
 - neither command recovers stale ownership or appends recorder.recovery;
 - neither command fills derivation gaps or appends human evidence;
 - both commands can read a Task 5 schema;
+- both commands return the stable `wal_present` read error without opening
+  SQLite when a WAL path exists;
 - likely stale ownership is diagnosed in output only;
 - symlinked root/database/WAL/SHM is rejected without target mutation.
 
-Capture a recursive snapshot before and after each command containing relative path, file type, mode, uid, gid, size, mtime nanoseconds, inode, and SHA-256 for regular files. Compare exact snapshots, including database, WAL, and SHM.
+Capture a recursive snapshot before and after each successful command and each
+`wal_present` refusal containing relative path, file type, mode, uid, gid, size,
+mtime nanoseconds, inode, and SHA-256 for regular files. Compare exact snapshots,
+including database, WAL, and SHM.
 
 - [ ] **Step 3: Run pure-read RED**
 
@@ -998,7 +1028,11 @@ Name and test every sensitive location class: the data root; secrets; secrets/re
 
 - [ ] **Step 3: Write SQLite RED tests**
 
-Cover current schema pass, migration 003 fail as older, future migration fail, missing database warn only for uninitialized/empty root, missing tables/indexes fail, foreign_key_check failure, quick_check failure/corruption, and read-only open failure. Assert doctor applies no migration and changes no database/WAL/SHM bytes or metadata.
+Cover current schema pass, migration 003 fail as older, future migration fail,
+missing database warn only for uninitialized/empty root, missing tables/indexes
+fail, foreign_key_check failure, quick_check failure/corruption, immutable-open
+failure, and stable `wal_present` failure. Assert doctor applies no migration and
+changes no database/WAL/SHM bytes or metadata on either success or refusal.
 
 - [ ] **Step 4: Write Codex/platform/loopback RED tests**
 
