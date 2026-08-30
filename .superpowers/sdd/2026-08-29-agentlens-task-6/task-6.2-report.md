@@ -4,7 +4,7 @@ Status: implementation complete and verified; ready for the requested local comm
 
 ## Scope and starting state
 
-- Worktree: `/Users/chaitanyamatrubai/Agent lens/.worktrees/task6-implementation`
+- Worktree: `<worktree>`
 - Branch: `codex/agentlens-task-6-impl`
 - Verified starting HEAD: `c07d637ced998c69d3c7eb79ba1a71c8dc701bd8`
 - Starting tracked, staged, and untracked status: clean

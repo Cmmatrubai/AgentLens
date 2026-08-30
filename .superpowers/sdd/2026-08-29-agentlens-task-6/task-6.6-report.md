@@ -5,7 +5,7 @@
 - Base HEAD: `35453bc844b5479fe286457d6177119076a24032`.
 - Implemented only the pure provider-neutral `summarizeRun` value-object boundary, its public types/export, and focused Task 6.6 tests.
 - Did not change storage, recorder, Git/artifact readers, the Codex adapter, CLI output, frozen design/plan documents, or any Task 6.7+ surface.
-- Used the already isolated worktree `/Users/chaitanyamatrubai/Agent lens/.worktrees/task6-implementation` on `codex/agentlens-task-6-impl`.
+- Used the already isolated `<worktree>` on `codex/agentlens-task-6-impl`.
 
 ## TDD evidence
 

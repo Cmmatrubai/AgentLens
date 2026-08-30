@@ -1586,8 +1586,8 @@ export class RunRepository {
     audits: readonly RedactionAudit[],
     createdAt: number
   ): void {
-    const existing = this.#connection.prepare("SELECT * FROM artifacts WHERE id = ?")
-      .get(input.id) as ArtifactRow | undefined;
+    const existing = this.#connection.prepare("SELECT * FROM artifacts WHERE id = ? AND run_id = ?")
+      .get(input.id, input.runId) as ArtifactRow | undefined;
     if (!existing) {
       this.insertArtifactMetadata(input, audits, createdAt);
       return;
@@ -1611,9 +1611,9 @@ export class RunRepository {
     const storedAudits = this.#connection.prepare(`
       SELECT event_id, artifact_id, reason, count
       FROM redaction_audits
-      WHERE artifact_id = ?
+      WHERE artifact_id = ? AND run_id = ?
       ORDER BY id
-    `).all(input.id) as AuditRow[];
+    `).all(input.id, input.runId) as AuditRow[];
     const requestedAudits: AuditRow[] = audits.map((audit) => ({
       event_id: null,
       artifact_id: input.id,

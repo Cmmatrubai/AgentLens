@@ -594,6 +594,79 @@ describe.sequential("assess command", () => {
       .toBe(false);
   });
 
+  it("assesses two runs independently when their standard notes have identical bytes", async () => {
+    const context = await fixture("standard");
+    const otherRunId = `${context.runId}-other`;
+    const database = openDatabase(context.databasePath);
+    try {
+      const repository = new RunRepository(database, {
+        artifactRoot: join(context.dataRoot, "artifacts", "sha256")
+      });
+      repository.createRun({
+        id: otherRunId,
+        schemaVersion: 1,
+        provider: "codex-exec",
+        integrationVersion: "0.1.0",
+        agentVersion: "fixture-agent",
+        capturePolicy: "standard",
+        capturePolicyVersion: "1",
+        redactionVersion: "1",
+        repositoryFingerprint: `fingerprint-${otherRunId}`,
+        repositoryDisplay: "fixture-repository",
+        startedAt: FIXED_TIME - 9_000
+      }, {
+        recorderInstanceId: `recorder-${otherRunId}`,
+        recorderPid: 124,
+        recorderStartToken: `start-${otherRunId}`,
+        heartbeatAt: FIXED_TIME - 9_000
+      });
+    } finally {
+      database.close();
+    }
+    const note = "same reviewer note for both runs";
+
+    const first = await invoke([
+      "assess", context.runId, "--verdict", "partial", "--note", note,
+      "--data-root", context.dataRoot, "--json"
+    ]);
+    const second = await invoke([
+      "assess", otherRunId, "--verdict", "partial", "--note", note,
+      "--data-root", context.dataRoot, "--json"
+    ]);
+
+    expect(first.exitCode).toBe(0);
+    expect(second.exitCode).toBe(0);
+    const firstInspect = await invoke([
+      "inspect", context.runId, "--data-root", context.dataRoot, "--json"
+    ]);
+    const secondInspect = await invoke([
+      "inspect", otherRunId, "--data-root", context.dataRoot, "--json"
+    ]);
+    expect(firstInspect.exitCode).toBe(0);
+    expect(secondInspect.exitCode).toBe(0);
+
+    const firstDetail = JSON.parse(firstInspect.stdout) as {
+      summary: { assessment: Record<string, unknown> };
+      reviewerNote: Record<string, unknown>;
+    };
+    const secondDetail = JSON.parse(secondInspect.stdout) as typeof firstDetail;
+    for (const detail of [firstDetail, secondDetail]) {
+      expect(detail.summary.assessment).toMatchObject({
+        verdict: "partial",
+        note: { state: "artifact", artifactId: expect.any(String) },
+        state: "explicit",
+        provenance: "human"
+      });
+      expect(detail.reviewerNote).toMatchObject({
+        state: "artifact",
+        artifactId: expect.any(String),
+        contentAvailable: true,
+        content: note
+      });
+    }
+    expect(firstDetail.reviewerNote.artifactId).toBe(secondDetail.reviewerNote.artifactId);
+  });
+
   it.each(["metadata-only", "strict"] as const)(
     "omits a %s note without creating a key or artifact",
     async (capturePolicy) => {

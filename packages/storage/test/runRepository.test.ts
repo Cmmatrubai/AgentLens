@@ -1394,8 +1394,96 @@ describe("append-only human assessment storage", () => {
     }
   });
 
+  it("binds identical assessment-note bytes independently to two runs", async () => {
+    const { repository, databasePath, artifactRoot, close } = setup();
+    const otherRunId = "run-other";
+    try {
+      repository.createRun(
+        validRun({ id: otherRunId }),
+        validOwnership({ recorderInstanceId: "recorder-instance-other" })
+      );
+      const note = completedAssessmentNote(artifactRoot, "shared redacted note");
+      const otherNote = completedAssessmentNote(artifactRoot, "shared redacted note", {
+        runId: otherRunId
+      });
+      const audits = [{ reason: "assignment-secret", count: 2 }];
+
+      await repository.updateAssessment({
+        runId,
+        eventId: "assessment-shared-run-one",
+        receivedAt: "2026-08-26T20:14:00.000Z",
+        verdict: "partial",
+        note: { state: "artifact", artifact: note }
+      }, audits);
+      await repository.updateAssessment({
+        runId: otherRunId,
+        eventId: "assessment-shared-run-two",
+        receivedAt: "2026-08-26T20:15:00.000Z",
+        verdict: "partial",
+        note: { state: "artifact", artifact: otherNote }
+      }, audits);
+
+      expect(otherNote.id).toBe(note.id);
+      expect(queryRows(databasePath, `
+        SELECT id, run_id FROM artifacts WHERE id = ? ORDER BY run_id
+      `, note.id)).toEqual([
+        { id: note.id, run_id: runId },
+        { id: note.id, run_id: otherRunId }
+      ]);
+      expect(queryRows(databasePath, `
+        SELECT run_id, event_id, artifact_id, reason, count
+        FROM redaction_audits WHERE artifact_id = ? ORDER BY run_id
+      `, note.id)).toEqual([
+        {
+          run_id: runId,
+          event_id: null,
+          artifact_id: note.id,
+          reason: "assignment-secret",
+          count: 2
+        },
+        {
+          run_id: otherRunId,
+          event_id: null,
+          artifact_id: note.id,
+          reason: "assignment-secret",
+          count: 2
+        }
+      ]);
+      expect(queryRows(databasePath, `
+        SELECT event_id, run_id, artifact_id
+        FROM event_artifact_bindings ORDER BY run_id
+      `)).toEqual([
+        { event_id: "assessment-shared-run-one", run_id: runId, artifact_id: note.id },
+        { event_id: "assessment-shared-run-two", run_id: otherRunId, artifact_id: note.id }
+      ]);
+      for (const [assessedRunId, eventId] of [
+        [runId, "assessment-shared-run-one"],
+        [otherRunId, "assessment-shared-run-two"]
+      ] as const) {
+        expect(repository.getRunDetail(assessedRunId).events.filter(({ provenance }) =>
+          provenance === "human"
+        ).map(({ id }) => id)).toEqual([eventId]);
+        expect(repository.getCurrentAssessment(assessedRunId)).toMatchObject({
+          runId: assessedRunId,
+          currentEventId: eventId,
+          note: { state: "artifact", artifactId: note.id },
+          state: "explicit",
+          provenance: "human"
+        });
+      }
+      expect(queryRows(databasePath, `
+        SELECT run_id, current_event_id FROM current_assessments ORDER BY run_id
+      `)).toEqual([
+        { run_id: runId, current_event_id: "assessment-shared-run-one" },
+        { run_id: otherRunId, current_event_id: "assessment-shared-run-two" }
+      ]);
+    } finally {
+      close();
+    }
+  });
+
   it("rejects cross-run artifact ownership and event identity without partial writes", async () => {
-    const { repository, artifactRoot, close } = setup();
+    const { repository, databasePath, artifactRoot, close } = setup();
     try {
       repository.createRun(
         validRun({ id: "run-other" }),
@@ -1410,7 +1498,7 @@ describe("append-only human assessment storage", () => {
         eventId: "assessment-cross-run-artifact",
         receivedAt,
         verdict: "failure",
-        note: { state: "artifact", artifact: { ...crossRunNote, runId } }
+        note: { state: "artifact", artifact: crossRunNote }
       })).rejects.toThrow(/same run|run ownership|belong|owned/i);
 
       repository.appendEvent(event("event-owned-by-other-run", 0, "completed", {
@@ -1424,6 +1512,13 @@ describe("append-only human assessment storage", () => {
       })).rejects.toThrow(/another run|owned|unique|constraint/i);
       expect(repository.getCurrentAssessment(runId).state).toBe("projected");
       expect(repository.getRunDetail(runId).events).toEqual([]);
+      expect(queryRows(databasePath, "SELECT * FROM artifacts WHERE run_id = ?", runId)).toEqual([]);
+      expect(queryRows(databasePath, "SELECT * FROM redaction_audits WHERE run_id = ?", runId))
+        .toEqual([]);
+      expect(queryRows(databasePath, "SELECT * FROM event_artifact_bindings WHERE run_id = ?", runId))
+        .toEqual([]);
+      expect(queryRows(databasePath, "SELECT * FROM current_assessments WHERE run_id = ?", runId))
+        .toEqual([]);
     } finally {
       close();
     }

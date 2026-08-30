@@ -6,7 +6,7 @@
 - Implemented only append-only human-assessment storage and its focused repository tests.
 - Production changes are confined to `packages/storage/src/runRepository.ts`; `packages/storage/src/index.ts` did not need modification because it already exports the repository module.
 - Did not modify migration 004, recorder, CLI, derivations, frozen design/plan documents, or any Task 6.8+ surface.
-- Used the existing isolated worktree `/Users/chaitanyamatrubai/Agent lens/.worktrees/task6-implementation` on `codex/agentlens-task-6-impl`.
+- Used the existing isolated `<worktree>` on `codex/agentlens-task-6-impl`.
 
 ## TDD evidence
 
