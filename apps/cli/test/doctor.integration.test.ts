@@ -1262,6 +1262,47 @@ describe("doctor local readiness probes and privacy", () => {
     }
   }, 10_000);
 
+  it("awaits direct-child exit after non-POSIX timeout escalation", async () => {
+    const context = await fixture();
+    const bin = join(context.root, "bin");
+    const pidFile = join(context.root, "non-posix-direct-child-pid");
+    await mkdir(bin);
+    await writeExecutable(join(bin, "codex"), `
+      const { writeFileSync } = require("node:fs");
+      writeFileSync(process.env.DOCTOR_PID_FILE, String(process.pid));
+      process.on("SIGTERM", () => {});
+      setInterval(() => {}, 1000);
+    `);
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    if (!platformDescriptor) throw new Error("missing process.platform descriptor");
+
+    let result: Awaited<ReturnType<typeof diagnoseDoctor>>;
+    Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+    try {
+      result = await diagnoseDoctor(context.dataRoot, nonStorageDependencies({
+        codexVersion: undefined,
+        codexEnvironment: {
+          ...process.env,
+          PATH: bin,
+          DOCTOR_PID_FILE: pidFile
+        }
+      }));
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+    }
+    const pid = Number(await readFile(pidFile, "utf8"));
+    try {
+      expect(named(result, "codex")).toMatchObject({
+        status: "fail",
+        metadata: { code: "timeout" }
+      });
+      expect(processIsGone(pid)).toBe(true);
+    } finally {
+      if (!processIsGone(pid)) process.kill(pid, "SIGKILL");
+      await waitForProcessExit(pid);
+    }
+  }, 10_000);
+
   it.each([false, true])("uses exact loopback bind and leaves no listener after close failure=%s", async (
     closeFailure
   ) => {

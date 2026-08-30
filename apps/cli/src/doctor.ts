@@ -789,10 +789,42 @@ async function systemCodexVersion(environment?: NodeJS.ProcessEnv): Promise<Code
               await wait(10);
             }
           }
-        } else if (childIsOpen()) {
-          child.kill("SIGTERM");
-          await wait(250);
-          if (childIsOpen()) child.kill("SIGKILL");
+        } else {
+          let resolveDirectChildExit!: () => void;
+          let directChildExitObserved = false;
+          const directChildExit = new Promise<void>((resolve) => {
+            resolveDirectChildExit = resolve;
+          });
+          const observeDirectChildExit = (): void => {
+            if (directChildExitObserved) return;
+            directChildExitObserved = true;
+            child.off("exit", observeDirectChildExit);
+            child.off("close", observeDirectChildExit);
+            resolveDirectChildExit();
+          };
+          child.once("exit", observeDirectChildExit);
+          child.once("close", observeDirectChildExit);
+          if (!childIsOpen()) observeDirectChildExit();
+
+          if (childIsOpen()) {
+            child.kill("SIGTERM");
+            await wait(250);
+            if (childIsOpen()) child.kill("SIGKILL");
+          }
+
+          let confirmationTimer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            await Promise.race([
+              directChildExit,
+              new Promise<void>((resolve) => {
+                confirmationTimer = setTimeout(resolve, 250);
+              })
+            ]);
+          } finally {
+            if (confirmationTimer !== undefined) clearTimeout(confirmationTimer);
+            child.off("exit", observeDirectChildExit);
+            child.off("close", observeDirectChildExit);
+          }
         }
         if (destroyPipesRequested) destroyOwnedPipes();
       })();

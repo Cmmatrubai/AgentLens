@@ -322,6 +322,64 @@ git diff --check
 Exit        0
 ```
 
+### Final independent-review fix round
+
+Final fix-round base: `b4a4a9291aaa06dcac0f3eddd8c30b70c63cfba9`
+
+The controller added one permanent regression for forced cleanup on the
+non-POSIX direct-child fallback. The exact targeted RED was reproduced before
+the production edit:
+
+```text
+pnpm vitest --run apps/cli/test/doctor.integration.test.ts -t 'non-POSIX timeout escalation'
+Test Files  1 failed (1)
+Tests       1 failed | 75 skipped (76)
+Exit        1
+```
+
+The fallback sent TERM, waited 250 ms, sent KILL when the child remained open,
+and settled immediately without awaiting an exit/reap observation. The
+direct-child exit could therefore race the returned timeout result. The fixed
+fallback establishes an exit/close promise before signaling, preserves the
+250 ms TERM-to-KILL grace, and awaits that observation for a separately bounded
+250 ms confirmation before forced settlement. The POSIX owned-group path and
+all probe result facts are unchanged.
+
+The exact targeted rerun passed 1/1. Final fresh gates were:
+
+```text
+pnpm vitest --run apps/cli/test/doctor.integration.test.ts
+Test Files  1 passed (1)
+Tests       76 passed (76)
+Exit        0
+
+pnpm vitest --run apps/cli/test/doctor.test.ts apps/cli/test/doctor.integration.test.ts apps/cli/test/args.test.ts
+Test Files  3 passed (3)
+Tests       138 passed (138)
+Exit        0
+
+pnpm vitest --run apps/cli/test/packagedBinary.integration.test.ts apps/cli/test/readOnlyDataRoot.test.ts packages/storage/test/readOnlyDatabase.test.ts
+Test Files  3 passed (3)
+Tests       23 passed (23)
+Exit        0
+
+pnpm vitest --run apps/cli/test
+Test Files  20 passed (20)
+Tests       406 passed (406)
+Exit        0
+
+pnpm test
+Test Files  38 passed (38)
+Tests       784 passed (784)
+Exit        0
+
+pnpm typecheck
+Exit        0
+
+git diff --check
+Exit        0
+```
+
 ## Implemented contract
 
 - `agentlens doctor [--data-root PATH] [--json]` is part of the public CLI
@@ -357,9 +415,10 @@ Exit        0
 - The Codex probe spawns exactly `codex --version` without a shell, closes stdin,
   bounds stdout and stderr to 8 KiB, applies a three-second timeout, terminates
   and bounds owned process-group cleanup on POSIX (or direct-child fallback),
-  closes parent-owned pipes for forced settlement, and accepts only a bounded
-  semantic-version token from fatal UTF-8 decoding. Missing, nonzero, invalid,
-  overflow, timeout, and other spawn failures remain distinct stable results.
+  awaits bounded direct-child exit confirmation on the fallback, closes
+  parent-owned pipes for forced settlement, and accepts only a bounded semantic-
+  version token from fatal UTF-8 decoding. Missing, nonzero, invalid, overflow,
+  timeout, and other spawn failures remain distinct stable results.
 - Process-group support is a local platform capability check. Loopback binds
   only `127.0.0.1` on an ephemeral port and always closes the listener.
 - Production probes are dependency-injectable and the pure diagnosis coordinator
