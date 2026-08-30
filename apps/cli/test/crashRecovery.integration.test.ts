@@ -183,7 +183,7 @@ afterEach(async () => {
 });
 
 describe("durable crash ownership recovery", () => {
-  it("never steals a live recorder and reconciles a dead recorder only after its orphan group is gone", async () => {
+  it("diagnoses on reads and reconciles a dead recorder at clean record startup", async () => {
     const context = await fixture();
     const recorder = startCli(context, [
       "record", "--data-root", context.dataRoot, "--",
@@ -218,23 +218,52 @@ describe("durable crash ownership recovery", () => {
       process.kill(opened.recorderPid, "SIGKILL");
       await waitForPidGone(opened.recorderPid);
 
+      const staleRead = await runCli(context, [
+        "inspect", opened.runId, "--data-root", context.dataRoot, "--json"
+      ]);
+      expect(staleRead.code).toBe(0);
+      const stale = JSON.parse(staleRead.stdout) as {
+        run: { status: string; endedAt: number | null };
+        ownership: { condition: string; diagnosis: string };
+        events: Array<{ kind: string }>;
+        gitEvidence: { available: boolean };
+      };
+      expect(stale.run).toMatchObject({ status: "running", endedAt: null });
+      expect(stale.ownership).toMatchObject({ condition: "active", diagnosis: "likely_stale" });
+      expect(stale.events.filter(({ kind }) => kind === "recorder.ownership_lost")).toEqual([]);
+      expect(stale.gitEvidence.available).toBe(false);
+
+      const orphanTrigger = await runCli(context, [
+        "record", "--data-root", context.dataRoot, "--",
+        "codex", "exec", "--json", "--fake-mode=success"
+      ]);
+      expect(orphanTrigger.code).toBe(0);
       const orphanRead = await runCli(context, [
         "inspect", opened.runId, "--data-root", context.dataRoot, "--json"
       ]);
       expect(orphanRead.code).toBe(0);
       const orphan = JSON.parse(orphanRead.stdout) as {
         run: { status: string; endedAt: number | null };
-        ownership: { condition: string };
+        ownership: { condition: string; diagnosis: string };
         events: Array<{ kind: string }>;
         gitEvidence: { available: boolean };
       };
       expect(orphan.run).toMatchObject({ status: "running", endedAt: null });
-      expect(orphan.ownership.condition).toBe("orphan_child_active");
+      expect(orphan.ownership).toMatchObject({
+        condition: "orphan_child_active",
+        diagnosis: "orphan_child_active"
+      });
       expect(orphan.events.filter(({ kind }) => kind === "recorder.ownership_lost")).toHaveLength(1);
       expect(orphan.gitEvidence.available).toBe(false);
 
       process.kill(-opened.childProcessGroupId, "SIGKILL");
       await waitForGroupGone(opened.childProcessGroupId);
+
+      const recoveryTrigger = await runCli(context, [
+        "record", "--data-root", context.dataRoot, "--",
+        "codex", "exec", "--json", "--fake-mode=success"
+      ]);
+      expect(recoveryTrigger.code).toBe(0);
 
       const recoveredRead = await runCli(context, [
         "inspect", opened.runId, "--data-root", context.dataRoot, "--json"

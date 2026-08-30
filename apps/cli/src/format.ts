@@ -1,9 +1,16 @@
-import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { TextDecoder } from "node:util";
 import { codexExecCapabilities, type TraceEventV1 } from "@agentlens/core";
+import type { RunSummary } from "@agentlens/derivations";
 import type { RunDetail, RunListRecord, StoredArtifact } from "@agentlens/storage";
+
+import type { OwnershipDiagnosis } from "./diagnoseOwnership.js";
+import { readValidatedArtifact } from "./readArtifact.js";
+
+export interface RunListProjection {
+  readonly run: RunListRecord;
+  readonly summary: RunSummary;
+  readonly ownership: OwnershipDiagnosis;
+}
 
 export interface RunsJsonOutput {
   readonly runs: readonly ReturnType<typeof runListJson>[];
@@ -13,7 +20,8 @@ function runDurationMs(run: RunListRecord): number | null {
   return run.endedAt === null ? null : Math.max(0, run.endedAt - run.startedAt);
 }
 
-function runListJson(run: RunListRecord) {
+function runListJson(projection: RunListProjection) {
+  const { run, summary, ownership } = projection;
   return {
     id: run.id,
     status: run.status,
@@ -28,12 +36,17 @@ function runListJson(run: RunListRecord) {
       headChanged: run.headChanged,
       branchChanged: run.branchChanged
     },
-    ownership: { condition: run.ownershipCondition },
+    ownership: {
+      condition: ownership.storedCondition,
+      diagnosis: ownership.diagnosis
+    },
+    likelyTests: summary.likelyTests,
+    assessment: summary.assessment,
     capabilities: { ...codexExecCapabilities }
   };
 }
 
-export function runsJson(runs: readonly RunListRecord[]): RunsJsonOutput {
+export function runsJson(runs: readonly RunListProjection[]): RunsJsonOutput {
   return { runs: runs.map(runListJson) };
 }
 
@@ -53,13 +66,30 @@ function provenanceLabel(event: Pick<TraceEventV1, "kind" | "provenance">): stri
   }
 }
 
-export function runsText(runs: readonly RunListRecord[]): string {
+function likelyTestsText(likelyTests: RunSummary["likelyTests"]): string {
+  if (likelyTests.state === "detected") {
+    return `Likely tests: latest ${likelyTests.attempts.latest}, previous failures ${likelyTests.attempts.previousFailures}`;
+  }
+  return likelyTests.state === "none_detected"
+    ? "Likely tests: none detected"
+    : "Likely tests: unavailable due to capture policy";
+}
+
+function assessmentText(assessment: RunSummary["assessment"]): string {
+  return `Reviewer: ${assessment.verdict} (${assessment.state})`;
+}
+
+export function runsText(runs: readonly RunListProjection[]): string {
   if (runs.length === 0) return "No AgentLens runs found.\n";
-  return `${runs.map((run) => {
+  return `${runs.map(({ run, summary, ownership }) => {
     const child = run.terminatingSignal ?? (run.exitCode === null ? "pending" : `exit ${run.exitCode}`);
     const duration = runDurationMs(run);
     const git = `HEAD changed=${String(run.headChanged)} branch changed=${String(run.branchChanged)}`;
-    return `${run.id}  ${run.status}  ${run.provider}  ${new Date(run.startedAt).toISOString()}  duration=${duration === null ? "null" : `${duration}ms`}  ${child}  ownership=${run.ownershipCondition ?? "unavailable"}  ${git}`;
+    const storedOwnership = ownership.storedCondition ?? "unavailable";
+    const diagnosis = ownership.diagnosis === storedOwnership
+      ? ownership.diagnosis
+      : `${storedOwnership}/${ownership.diagnosis}`;
+    return `${run.id}  ${run.status}  ${run.provider}  ${new Date(run.startedAt).toISOString()}  duration=${duration === null ? "null" : `${duration}ms`}  ${child}  ownership=${diagnosis}  ${git}  ${likelyTestsText(summary.likelyTests)}  ${assessmentText(summary.assessment)}`;
   }).join("\n")}\n`;
 }
 
@@ -157,60 +187,29 @@ async function readValidatedNativeArtifact(
   artifact: StoredArtifact,
   artifactRoot: string
 ): Promise<unknown> {
-  if (
-    !/^[0-9a-f]{64}$/.test(artifact.id) ||
-    artifact.sha256 !== artifact.id ||
-    artifact.kind !== "native-payload" ||
-    artifact.mediaType !== "application/json" ||
-    artifact.redactionState !== "redacted" ||
-    (artifact.truncated
-      ? artifact.originalByteLength <= artifact.byteLength
-      : artifact.originalByteLength !== artifact.byteLength)
-  ) {
-    throw new Error(`Native artifact ${artifact.id} has invalid metadata.`);
+  const read = await readValidatedArtifact(artifact, artifactRoot, {
+    expectedKind: "native-payload",
+    expectedMediaType: "application/json",
+    requireComplete: false
+  });
+  if (read.truncated) {
+    return Object.freeze({
+      state: "truncated" as const,
+      truncated: true as const,
+      storedByteLength: read.storedByteLength,
+      originalByteLength: read.originalByteLength
+    });
   }
-
-  const configuredRoot = resolve(artifactRoot);
-  const expectedPath = join(configuredRoot, artifact.id.slice(0, 2), artifact.id);
-  if (artifact.path !== expectedPath || resolve(artifact.path) !== expectedPath) {
-    throw new Error(`Native artifact ${artifact.id} metadata path is not canonical.`);
-  }
-
-  const pathStat = await lstat(expectedPath);
-  if (pathStat.isSymbolicLink()) throw new Error(`Native artifact ${artifact.id} cannot be symbolic.`);
-  const [canonicalRoot, canonicalPath] = await Promise.all([
-    realpath(configuredRoot),
-    realpath(expectedPath)
-  ]);
-  if (canonicalPath !== join(canonicalRoot, artifact.id.slice(0, 2), artifact.id)) {
-    throw new Error(`Native artifact ${artifact.id} canonical path escapes the artifact root.`);
-  }
-
-  const handle = await open(expectedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let text: string;
   try {
-    const stat = await handle.stat();
-    if (
-      !stat.isFile() ||
-      stat.dev !== pathStat.dev ||
-      stat.ino !== pathStat.ino ||
-      stat.size !== artifact.byteLength
-    ) {
-      throw new Error(`Native artifact ${artifact.id} file identity or byte length is invalid.`);
-    }
-    const bytes = await handle.readFile();
-    const digest = createHash("sha256").update(bytes).digest("hex");
-    if (digest !== artifact.id) throw new Error(`Native artifact ${artifact.id} digest is invalid.`);
-    if (artifact.truncated) {
-      return Object.freeze({
-        state: "truncated" as const,
-        truncated: true as const,
-        storedByteLength: artifact.byteLength,
-        originalByteLength: artifact.originalByteLength
-      });
-    }
-    return JSON.parse(bytes.toString("utf8")) as unknown;
-  } finally {
-    await handle.close();
+    text = new TextDecoder("utf-8", { fatal: true }).decode(read.bytes);
+  } catch {
+    throw new Error("Native artifact has invalid UTF-8.");
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("Native artifact has invalid JSON.");
   }
 }
 
@@ -276,6 +275,9 @@ function projectEventBase(event: TraceEventV1): Omit<InspectEventDto, "nativePay
             name: event.derivation.name,
             version: event.derivation.version,
             sourceEventIds: [...event.derivation.sourceEventIds],
+            ...(event.derivation.identity === undefined
+              ? {}
+              : { identity: event.derivation.identity }),
             ...(event.derivation.confidence === undefined
               ? {}
               : { confidence: event.derivation.confidence })
@@ -361,7 +363,10 @@ function projectRun(run: RunDetail["run"]) {
   };
 }
 
-function projectOwnership(ownership: RunDetail["ownership"]) {
+function projectOwnership(
+  ownership: RunDetail["ownership"],
+  diagnosis: OwnershipDiagnosis
+) {
   if (ownership === null) return null;
   return {
     runId: ownership.runId,
@@ -373,6 +378,7 @@ function projectOwnership(ownership: RunDetail["ownership"]) {
     childProcessGroupId: ownership.childProcessGroupId,
     heartbeatAt: ownership.heartbeatAt,
     condition: ownership.condition,
+    diagnosis: diagnosis.diagnosis,
     ownershipLostEventId: ownership.ownershipLostEventId,
     updatedAt: ownership.updatedAt
   };
@@ -397,6 +403,7 @@ function projectArtifact(artifact: StoredArtifact) {
 export interface InspectJsonOutput {
   readonly run: ReturnType<typeof projectRun>;
   readonly ownership: ReturnType<typeof projectOwnership>;
+  readonly ownershipDiagnosis: OwnershipDiagnosis;
   readonly metadataSemantics: ReturnType<typeof metadataSemantics>;
   readonly capabilities: typeof codexExecCapabilities;
   readonly contradictions: readonly string[];
@@ -405,12 +412,35 @@ export interface InspectJsonOutput {
   readonly gitEvidence: ReturnType<typeof inspectGitEvidence>;
   readonly artifacts: readonly ReturnType<typeof projectArtifact>[];
   readonly redactionAudits: RunDetail["redactionAudits"];
+  readonly summary: RunSummary;
+  readonly reviewerNote: ReviewerNoteDto;
+}
+
+export type ReviewerNoteDto =
+  | Readonly<{ state: "absent"; contentAvailable: false }>
+  | Readonly<{
+      state: "artifact";
+      artifactId: string;
+      contentAvailable: true;
+      content: string;
+    }>
+  | Readonly<{
+      state: "omitted";
+      contentAvailable: false;
+      reason: "metadata-only" | "strict";
+    }>;
+
+export interface InspectProjection {
+  readonly summary: RunSummary;
+  readonly ownership: OwnershipDiagnosis;
+  readonly reviewerNote: ReviewerNoteDto;
 }
 
 export async function inspectJson(
   detail: RunDetail,
   native: boolean,
-  artifactRoot?: string
+  artifactRoot: string | undefined,
+  projection: InspectProjection
 ): Promise<InspectJsonOutput> {
   const artifacts = new Map(detail.artifacts.map((artifact) => [artifact.id, artifact]));
   const events = await Promise.all(detail.events.map((event) =>
@@ -419,7 +449,8 @@ export async function inspectJson(
   const git = detail.gitEvidence;
   return {
     run: projectRun(detail.run),
-    ownership: projectOwnership(detail.ownership),
+    ownership: projectOwnership(detail.ownership, projection.ownership),
+    ownershipDiagnosis: projection.ownership,
     metadataSemantics: metadataSemantics(detail.run),
     capabilities: { ...codexExecCapabilities },
     contradictions: [...detail.run.contradictionCodes],
@@ -432,13 +463,16 @@ export async function inspectJson(
       artifactId,
       reason,
       count
-    }))
+    })),
+    summary: projection.summary,
+    reviewerNote: projection.reviewerNote
   };
 }
 
 export function inspectText(
   detail: RunDetail,
-  events: readonly InspectEventDto[]
+  events: readonly InspectEventDto[],
+  projection: InspectProjection
 ): string {
   const git = detail.gitEvidence;
   const warnings = gitWarnings(git);
@@ -448,7 +482,7 @@ export function inspectText(
     `Status: ${detail.run.status}`,
     `Provider: ${detail.run.provider}`,
     `Child: exit=${String(detail.run.exitCode)} signal=${String(detail.run.terminatingSignal)}`,
-    `Ownership: ${detail.ownership?.condition ?? "unavailable"}`,
+    `Ownership: ${detail.ownership?.condition ?? "unavailable"} (diagnosis=${projection.ownership.diagnosis})`,
     `Contradictions: ${detail.run.contradictionCodes.join(", ") || "none"}`,
     "Git terminology: tracked final diff + untracked-file metadata",
     `Git evidence: ${git === null ? "unavailable" : `HEAD changed=${git.headChanged}, branch changed=${git.branchChanged}`}`
@@ -474,6 +508,15 @@ export function inspectText(
       ? `Agent version: ${semantics.agentVersion.value} (unavailable: ${semantics.agentVersion.reason})`
       : `Agent version: ${semantics.agentVersion.value} (reported)`,
     `Prompt source: ${String(semantics.promptSource.value)} (${semantics.promptSource.meaning}; semantic prompt location=${String(semantics.promptSource.semanticPromptLocation)}; prompt parsed or altered=${String(semantics.promptSource.promptParsedOrAltered)})`
+  );
+  lines.push(
+    likelyTestsText(projection.summary.likelyTests),
+    assessmentText(projection.summary.assessment),
+    projection.reviewerNote.state === "artifact"
+      ? `Reviewer note: ${projection.reviewerNote.content}`
+      : projection.reviewerNote.state === "omitted"
+        ? `Reviewer note: omitted (${projection.reviewerNote.reason})`
+        : "Reviewer note: absent"
   );
   lines.push(
     "Capabilities: file reads unavailable; tool output partial; tool durations unavailable; interruption signal partial",

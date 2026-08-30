@@ -11,17 +11,20 @@ export type LocatedReadOnlyDataRoot =
   | (ReadOnlyDataRootPaths & Readonly<{ state: "missing" }>)
   | (ReadOnlyDataRootPaths & Readonly<{ state: "existing" }>);
 
-function locationError(kind: "data root" | "database", path: string): Error {
+type LocatedPathKind = "data root" | "database" | "WAL sidecar" | "SHM sidecar";
+
+function locationError(kind: LocatedPathKind, path: string): Error {
+  const expectedDirectory = kind === "data root";
   return new Error(
     `Read-only AgentLens ${kind} must be an existing non-symbolic ${
-      kind === "data root" ? "directory" : "regular file"
+      expectedDirectory ? "directory" : "regular file"
     }: ${path}`
   );
 }
 
 async function validatePath(
   path: string,
-  kind: "data root" | "database"
+  kind: LocatedPathKind
 ): Promise<boolean> {
   const expectedDirectory = kind === "data root";
   let pathStat;
@@ -73,7 +76,10 @@ export async function locateReadOnlyDataRoot(
   if (!await validatePath(dataRoot, "data root")) {
     return { state: "missing", dataRoot, databasePath };
   }
-  if (!await validatePath(databasePath, "database")) {
+  const databaseExists = await validatePath(databasePath, "database");
+  await validatePath(`${databasePath}-wal`, "WAL sidecar");
+  await validatePath(`${databasePath}-shm`, "SHM sidecar");
+  if (!databaseExists) {
     return { state: "missing", dataRoot, databasePath };
   }
   return { state: "existing", dataRoot, databasePath };

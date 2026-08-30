@@ -1,16 +1,32 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  chmod,
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  readlink,
+  rm,
+  stat,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
-import { openDatabase } from "@agentlens/storage";
+import { openDatabase, RunRepository } from "@agentlens/storage";
 
 import { recordRun } from "../src/recordRun.js";
+import { runAssessCommand } from "../src/commands/assess.js";
 import { runInspectCommand } from "../src/commands/inspect.js";
 import { runRunsCommand } from "../src/commands/runs.js";
+import type { ProcessIdentityInspector } from "../src/processIdentity.js";
 
 const execFile = promisify(execFileCallback);
 const fakeCodex = fileURLToPath(new URL("./fixtures/fake-codex.mjs", import.meta.url));
@@ -34,6 +50,7 @@ async function fixture() {
   await copyFile(fakeCodex, join(bin, "codex"));
   await chmod(join(bin, "codex"), 0o700);
   return {
+    root,
     repo,
     dataRoot,
     env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}` }
@@ -49,6 +66,81 @@ function writer() {
   return {
     output: { write: (chunk: string | Uint8Array) => { text += String(chunk); return true; } },
     text: () => text
+  };
+}
+
+interface SnapshotEntry {
+  path: string;
+  kind: "directory" | "file" | "symlink" | "other";
+  mode: string;
+  uid: string;
+  gid: string;
+  size: string;
+  mtimeNs: string;
+  inode: string;
+  sha256?: string;
+  target?: string;
+}
+
+async function snapshot(path: string): Promise<SnapshotEntry[] | null> {
+  try {
+    await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const entries: SnapshotEntry[] = [];
+  const visit = async (current: string): Promise<void> => {
+    const stats = await lstat(current, { bigint: true });
+    const kind = stats.isDirectory()
+      ? "directory"
+      : stats.isFile()
+        ? "file"
+        : stats.isSymbolicLink()
+          ? "symlink"
+          : "other";
+    const entry: SnapshotEntry = {
+      path: relative(path, current) || ".",
+      kind,
+      mode: stats.mode.toString(),
+      uid: stats.uid.toString(),
+      gid: stats.gid.toString(),
+      size: stats.size.toString(),
+      mtimeNs: stats.mtimeNs.toString(),
+      inode: stats.ino.toString()
+    };
+    if (kind === "file") {
+      entry.sha256 = createHash("sha256").update(await readFile(current)).digest("hex");
+    } else if (kind === "symlink") {
+      entry.target = await readlink(current);
+    }
+    entries.push(entry);
+    if (kind === "directory") {
+      for (const child of (await readdir(current)).sort()) await visit(join(current, child));
+    }
+  };
+  await visit(path);
+  return entries;
+}
+
+async function downgradeToTask5(databasePath: string): Promise<void> {
+  await execFile("sqlite3", [databasePath, `
+    PRAGMA foreign_keys = OFF;
+    DROP TABLE event_artifact_bindings;
+    DROP TABLE current_assessments;
+    DROP TABLE derivation_identities;
+    DELETE FROM schema_migrations WHERE version = 4;
+    PRAGMA journal_mode = DELETE;
+  `]);
+}
+
+function identityInspector(
+  state: "same" | "gone" | "replaced" | "ambiguous"
+): ProcessIdentityInspector {
+  return {
+    captureStartToken: async () => "read-only-fixture-token",
+    inspect: async () => state,
+    inspectGroup: () => "gone"
   };
 }
 
@@ -89,24 +181,80 @@ describe("runs and inspect", () => {
     await mkdir(outside, { mode: 0o755 });
     await writeFile(sentinel, "OUTSIDE_DATA_ROOT_SENTINEL", { mode: 0o644 });
     await symlink(outside, context.dataRoot);
+    const before = await snapshot(context.root);
 
     await expect(runRunsCommand(
       { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
       { stdout: silentOutput }
     )).rejects.toThrow(/symbolic|symlink/i);
 
+    expect(await snapshot(context.root)).toEqual(before);
     expect(await readFile(sentinel, "utf8")).toBe("OUTSIDE_DATA_ROOT_SENTINEL");
     expect((await stat(outside)).mode & 0o777).toBe(0o755);
     expect((await stat(sentinel)).mode & 0o777).toBe(0o644);
   });
 
+  it.each(["runs", "inspect"] as const)(
+    "%s returns the missing-storage contract without creating the requested root",
+    async (name) => {
+      const context = await fixture();
+      const output = writer();
+
+      if (name === "runs") {
+        const value = await runRunsCommand(
+          { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+          { stdout: output.output }
+        );
+        expect(value).toEqual({ runs: [] });
+        expect(JSON.parse(output.text())).toEqual({ runs: [] });
+      } else {
+        await expect(runInspectCommand(
+          { name: "inspect", runId: "missing-run", dataRoot: context.dataRoot, json: true, native: false },
+          { stdout: output.output }
+        )).rejects.toThrow(/run not found/i);
+        expect(output.text()).toBe("");
+      }
+      expect(await snapshot(context.dataRoot)).toBeNull();
+    }
+  );
+
+  it.each(["runs", "inspect"] as const)(
+    "%s preserves an existing root without a database",
+    async (name) => {
+      const context = await fixture();
+      await mkdir(context.dataRoot, { mode: 0o755 });
+      const before = await snapshot(context.root);
+      const output = writer();
+
+      if (name === "runs") {
+        await expect(runRunsCommand(
+          { name: "runs", dataRoot: context.dataRoot, limit: 10, json: false },
+          { stdout: output.output }
+        )).resolves.toEqual({ runs: [] });
+        expect(output.text()).toBe("No AgentLens runs found.\n");
+      } else {
+        await expect(runInspectCommand(
+          { name: "inspect", runId: "missing-run", dataRoot: context.dataRoot, json: true, native: false },
+          { stdout: output.output }
+        )).rejects.toThrow(/run not found/i);
+        expect(output.text()).toBe("");
+      }
+      expect(await snapshot(context.root)).toEqual(before);
+    }
+  );
+
   it.each(["", "-wal", "-shm"] as const)(
     "rejects a symlinked agentlens.sqlite%s without mutating its external target",
     async (suffix) => {
       const context = await fixture();
-      await runRunsCommand(
-        { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
-        { stdout: silentOutput }
+      const recorded = await recordRun(
+        {
+          name: "record",
+          capture: "standard",
+          dataRoot: context.dataRoot,
+          childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+        },
+        { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
       );
       const databasePath = join(context.dataRoot, "agentlens.sqlite");
       const protectedPath = `${databasePath}${suffix}`;
@@ -115,30 +263,20 @@ describe("runs and inspect", () => {
       await writeFile(outsideTarget, "OUTSIDE_SQLITE_SENTINEL", { mode: 0o644 });
       await symlink(outsideTarget, protectedPath);
 
-      await expect(runRunsCommand(
-        { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+      const before = await snapshot(context.root);
+      await expect(runInspectCommand(
+        { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
         { stdout: silentOutput }
       )).rejects.toThrow(/symbolic|symlink/i);
 
       expect(await readFile(outsideTarget, "utf8")).toBe("OUTSIDE_SQLITE_SENTINEL");
       expect((await stat(outsideTarget)).mode & 0o777).toBe(0o644);
+      expect(await snapshot(context.root)).toEqual(before);
     }
   );
 
-  it("creates a migrated data root and database with owner-only modes", async () => {
-    const context = await fixture();
-
-    await runRunsCommand(
-      { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
-      { stdout: silentOutput }
-    );
-
-    expect((await stat(context.dataRoot)).mode & 0o777).toBe(0o700);
-    expect((await stat(join(context.dataRoot, "agentlens.sqlite"))).mode & 0o777).toBe(0o600);
-  });
-
   it.each(["runs", "inspect"] as const)(
-    "%s repairs owner-only modes on an existing data root and live SQLite sidecars",
+    "%s preserves permissive modes and every byte and metadata field on success",
     async (command) => {
       const context = await fixture();
       const recorded = await recordRun(
@@ -151,31 +289,210 @@ describe("runs and inspect", () => {
         { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
       );
       const databasePath = join(context.dataRoot, "agentlens.sqlite");
-      const keeper = openDatabase(databasePath);
-      try {
-        const protectedPaths = [databasePath, `${databasePath}-wal`, `${databasePath}-shm`];
-        for (const path of protectedPaths) await chmod(path, 0o666);
-        await chmod(context.dataRoot, 0o777);
+      await chmod(databasePath, 0o666);
+      await chmod(context.dataRoot, 0o777);
+      await mkdir(join(context.dataRoot, "unknown"), { mode: 0o755 });
+      await writeFile(join(context.dataRoot, "unknown", "sentinel.bin"), "UNKNOWN_SENTINEL", {
+        mode: 0o644
+      });
+      await writeFile(`${databasePath}-shm`, "REGULAR_SHM_SENTINEL", { mode: 0o666 });
+      const before = await snapshot(context.dataRoot);
 
-        if (command === "runs") {
-          await runRunsCommand(
+      if (command === "runs") {
+        await runRunsCommand(
+          { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+          { stdout: silentOutput }
+        );
+      } else {
+        await runInspectCommand(
+          { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+          { stdout: silentOutput }
+        );
+      }
+
+      expect(await snapshot(context.dataRoot)).toEqual(before);
+    }
+  );
+
+  it.each(["runs", "inspect"] as const)(
+    "%s fails closed on an exact regular WAL path without changing storage",
+    async (command) => {
+      const context = await fixture();
+      const recorded = await recordRun(
+        {
+          name: "record",
+          capture: "standard",
+          dataRoot: context.dataRoot,
+          childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+        },
+        { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+      );
+      await writeFile(join(context.dataRoot, "agentlens.sqlite-wal"), "WAL_SENTINEL", {
+        mode: 0o666
+      });
+      const before = await snapshot(context.dataRoot);
+      const read = command === "runs"
+        ? runRunsCommand(
             { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
             { stdout: silentOutput }
-          );
-        } else {
-          await runInspectCommand(
+          )
+        : runInspectCommand(
             { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
             { stdout: silentOutput }
           );
-        }
 
-        expect((await stat(context.dataRoot)).mode & 0o777).toBe(0o700);
-        for (const path of protectedPaths) expect((await stat(path)).mode & 0o777).toBe(0o600);
-      } finally {
-        keeper.close();
-      }
+      await expect(read).rejects.toThrow(/wal_present/);
+      expect(await snapshot(context.dataRoot)).toEqual(before);
     }
   );
+
+  it.each(["", "-wal", "-shm"] as const)(
+    "rejects a non-regular agentlens.sqlite%s path without changing storage",
+    async (suffix) => {
+      const context = await fixture();
+      const recorded = await recordRun(
+        {
+          name: "record",
+          capture: "standard",
+          dataRoot: context.dataRoot,
+          childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+        },
+        { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+      );
+      const path = `${join(context.dataRoot, "agentlens.sqlite")}${suffix}`;
+      await rm(path, { force: true });
+      await mkdir(path);
+      const before = await snapshot(context.dataRoot);
+
+      await expect(runInspectCommand(
+        { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+        { stdout: silentOutput }
+      )).rejects.toThrow(/regular file/i);
+      expect(await snapshot(context.dataRoot)).toEqual(before);
+    }
+  );
+
+  it("reads a Task 5 schema without migration and projects assessment/summary compatibly", async () => {
+    const context = await fixture();
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const databasePath = join(context.dataRoot, "agentlens.sqlite");
+    await downgradeToTask5(databasePath);
+    const before = await snapshot(context.dataRoot);
+
+    const runs = await runRunsCommand(
+      { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+      { stdout: silentOutput }
+    );
+    const inspected = await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: silentOutput }
+    );
+
+    expect(runs.runs[0]).toMatchObject({
+      id: recorded.runId,
+      likelyTests: { state: "detected" },
+      assessment: { state: "projected", provenance: null }
+    });
+    expect(inspected.summary).toMatchObject({
+      likelyTests: { state: "detected" },
+      assessment: { state: "projected", provenance: null }
+    });
+    expect(await snapshot(context.dataRoot)).toEqual(before);
+    expect((await execFile("sqlite3", [databasePath,
+      "SELECT group_concat(version, ',') FROM schema_migrations ORDER BY version"
+    ])).stdout.trim()).toBe("1,2,3");
+  });
+
+  it("diagnoses likely-stale ownership without recovery, lifecycle, or event mutation", async () => {
+    const context = await fixture();
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const databasePath = join(context.dataRoot, "agentlens.sqlite");
+    await execFile("sqlite3", [databasePath, `
+      UPDATE runs SET status = 'running', ended_at = NULL WHERE id = '${recorded.runId}';
+      UPDATE run_ownership SET condition = 'active', recorder_pid = 404404,
+        recorder_start_token = 'gone-token' WHERE run_id = '${recorded.runId}';
+      PRAGMA journal_mode = DELETE;
+    `]);
+    const before = await snapshot(context.dataRoot);
+    const inspector = identityInspector("gone");
+
+    const runs = await runRunsCommand(
+      { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+      { stdout: silentOutput, processIdentityInspector: inspector }
+    );
+    const inspected = await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: silentOutput, processIdentityInspector: inspector }
+    );
+
+    expect(runs.runs[0]?.ownership).toEqual({
+      condition: "active",
+      diagnosis: "likely_stale"
+    });
+    expect(inspected.ownership).toMatchObject({
+      condition: "active",
+      diagnosis: "likely_stale"
+    });
+    expect(inspected.ownershipDiagnosis).toEqual({
+      storedCondition: "active",
+      diagnosis: "likely_stale"
+    });
+    expect(inspected.events.filter(({ kind }) => kind === "recorder.recovery")).toEqual([]);
+    expect(await snapshot(context.dataRoot)).toEqual(before);
+  });
+
+  it("reports a derivation gap in memory without filling it or appending human evidence", async () => {
+    const context = await fixture();
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: context.env,
+        stdout: silentOutput,
+        derivePersistedTerminalCommand: () => [],
+        ensureTestDerivationsForRun: () => []
+      }
+    );
+    const before = await snapshot(context.dataRoot);
+
+    const inspected = await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: silentOutput }
+    );
+
+    expect(inspected.summary.likelyTests).toMatchObject({
+      state: "detected",
+      durability: "incomplete",
+      missingExpected: 2
+    });
+    expect(inspected.events.filter(({ provenance }) => provenance === "derived")).toEqual([
+      expect.objectContaining({ kind: "run.reconciled" })
+    ]);
+    expect(inspected.events.filter(({ provenance }) => provenance === "human")).toEqual([]);
+    expect(await snapshot(context.dataRoot)).toEqual(before);
+  });
 
   it("returns JSON run/process/Git/capability facts without collapsing them", async () => {
     const context = await fixture();
@@ -666,7 +983,8 @@ describe("runs and inspect", () => {
       if (tamper === "path") {
         await execFile("sqlite3", [
           join(context.dataRoot, "agentlens.sqlite"),
-          `UPDATE artifacts SET path = '/etc/passwd' WHERE run_id = '${recorded.runId}' AND id = '${artifact.id}'`
+          `UPDATE artifacts SET path = '/etc/passwd' WHERE run_id = '${recorded.runId}' AND id = '${artifact.id}';
+           PRAGMA journal_mode = DELETE;`
         ]);
       } else if (tamper === "symlink") {
         const target = join(context.dataRoot, "outside-native.json");
@@ -692,4 +1010,181 @@ describe("runs and inspect", () => {
       );
     }
   );
+
+  it("shows a validated standard reviewer note only in inspect and keeps runs content-free", async () => {
+    const context = await fixture();
+    const note = "reviewer-note-visible-only-in-inspect-48291";
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    await runAssessCommand({
+      name: "assess",
+      runId: recorded.runId,
+      verdict: "unreviewed",
+      taskCompleted: "uncertain",
+      note,
+      dataRoot: context.dataRoot,
+      json: true
+    }, { stdout: silentOutput });
+    const before = await snapshot(context.dataRoot);
+    const runsOutput = writer();
+    const runs = await runRunsCommand(
+      { name: "runs", dataRoot: context.dataRoot, limit: 10, json: true },
+      { stdout: runsOutput.output }
+    );
+    const inspected = await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: silentOutput }
+    );
+
+    expect(runs.runs[0]?.assessment).toMatchObject({
+      state: "explicit",
+      verdict: "unreviewed",
+      note: { state: "artifact", artifactId: expect.any(String) }
+    });
+    expect(runsOutput.text()).not.toContain(note);
+    expect(JSON.stringify(runs)).not.toContain(note);
+    expect(inspected.reviewerNote).toEqual({
+      state: "artifact",
+      artifactId: expect.any(String),
+      contentAvailable: true,
+      content: note
+    });
+    expect(await snapshot(context.dataRoot)).toEqual(before);
+  });
+
+  it("rejects digest tampering through the reviewer-note consumer without leaking content", async () => {
+    const context = await fixture();
+    const note = "reviewer-note-digest-boundary-92174";
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    await runAssessCommand({
+      name: "assess",
+      runId: recorded.runId,
+      verdict: "partial",
+      taskCompleted: "uncertain",
+      note,
+      dataRoot: context.dataRoot,
+      json: true
+    }, { stdout: silentOutput });
+    const database = openDatabase(join(context.dataRoot, "agentlens.sqlite"));
+    let notePath: string;
+    try {
+      const detail = new RunRepository(database, {
+        artifactRoot: join(context.dataRoot, "artifacts", "sha256")
+      }).getRunDetail(recorded.runId);
+      const noteArtifact = detail.artifacts.find(({ kind }) => kind === "assessment-note");
+      if (!noteArtifact) throw new Error("missing reviewer note fixture");
+      notePath = noteArtifact.path;
+    } finally {
+      database.close();
+    }
+    await writeFile(notePath, "x".repeat(Buffer.byteLength(note)), "utf8");
+
+    await expect(runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: silentOutput }
+    )).rejects.toThrow(/artifact validation failed \(digest\)/i);
+  });
+
+  it.each(["metadata-only", "strict"] as const)(
+    "reports exact %s reviewer-note omission without reading content",
+    async (capture) => {
+      const context = await fixture();
+      const note = `restrictive-reviewer-note-${capture}-18374`;
+      const recorded = await recordRun(
+        {
+          name: "record",
+          capture,
+          dataRoot: context.dataRoot,
+          childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+        },
+        { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+      );
+      await runAssessCommand({
+        name: "assess",
+        runId: recorded.runId,
+        verdict: "partial",
+        taskCompleted: "uncertain",
+        note,
+        dataRoot: context.dataRoot,
+        json: true
+      }, { stdout: silentOutput });
+
+      const inspected = await runInspectCommand(
+        { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+        { stdout: silentOutput }
+      );
+      expect(inspected.reviewerNote).toEqual({
+        state: "omitted",
+        contentAvailable: false,
+        reason: capture
+      });
+      expect(JSON.stringify(inspected)).not.toContain(note);
+    }
+  );
+
+  it("preserves derived identity/source relationships and distinct provenance labels", async () => {
+    const context = await fixture();
+    const recorded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=test-command"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    await runAssessCommand({
+      name: "assess",
+      runId: recorded.runId,
+      verdict: "success",
+      taskCompleted: "yes",
+      dataRoot: context.dataRoot,
+      json: true
+    }, { stdout: silentOutput });
+    const json = await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: true, native: false },
+      { stdout: silentOutput }
+    );
+    const command = json.events.find(({ kind }) => kind === "test.command");
+    expect(command).toMatchObject({
+      provenance: "derived",
+      relationships: [{ type: "derived_from", eventId: expect.any(String) }],
+      derivation: {
+        name: "test-command",
+        version: "1",
+        sourceEventIds: [expect.any(String)],
+        confidence: expect.any(String),
+        identity: expect.stringMatching(/^agentlens-derivation-sha256:/)
+      }
+    });
+
+    const output = writer();
+    await runInspectCommand(
+      { name: "inspect", runId: recorded.runId, dataRoot: context.dataRoot, json: false, native: false },
+      { stdout: output.output }
+    );
+    expect(output.text()).toContain("[Provider]");
+    expect(output.text()).toContain("[Derived]");
+    expect(output.text()).toContain("[Git recovered]");
+    expect(output.text()).toContain("[Recorder]");
+    expect(output.text()).toContain("[Human]");
+    expect(output.text()).toContain("Likely tests: latest passed, previous failures 0");
+    expect(output.text()).not.toMatch(/\btests passed\b/i);
+    expect(output.text()).toContain("Reviewer: success (explicit)");
+  });
 });

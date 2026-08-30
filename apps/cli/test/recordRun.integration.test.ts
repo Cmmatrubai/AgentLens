@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import {
   chmod,
@@ -8,12 +9,13 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  readlink,
   rm,
   symlink,
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Readable } from "node:stream";
@@ -26,6 +28,10 @@ import {
   derivePersistedTerminalCommand,
   ensureTestDerivationsForRun
 } from "../src/deriveTests.js";
+import {
+  recoverStaleRuns,
+  type RecoverStaleRunsInput
+} from "../src/recoverRuns.js";
 import { recordRun } from "../src/recordRun.js";
 
 const execFile = promisify(execFileCallback);
@@ -193,6 +199,60 @@ async function durableBytes(root: string): Promise<Buffer> {
   return Buffer.concat(await Promise.all(files.map((entry) => readFile(join(entry.parentPath, entry.name)))));
 }
 
+interface SnapshotEntry {
+  path: string;
+  kind: "directory" | "file" | "symlink" | "other";
+  mode: string;
+  uid: string;
+  gid: string;
+  size: string;
+  mtimeNs: string;
+  inode: string;
+  sha256?: string;
+  target?: string;
+}
+
+async function snapshot(path: string): Promise<SnapshotEntry[] | null> {
+  try {
+    await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const entries: SnapshotEntry[] = [];
+  const visit = async (current: string): Promise<void> => {
+    const stats = await lstat(current, { bigint: true });
+    const kind = stats.isDirectory()
+      ? "directory"
+      : stats.isFile()
+        ? "file"
+        : stats.isSymbolicLink()
+          ? "symlink"
+          : "other";
+    const entry: SnapshotEntry = {
+      path: relative(path, current) || ".",
+      kind,
+      mode: stats.mode.toString(),
+      uid: stats.uid.toString(),
+      gid: stats.gid.toString(),
+      size: stats.size.toString(),
+      mtimeNs: stats.mtimeNs.toString(),
+      inode: stats.ino.toString()
+    };
+    if (kind === "file") {
+      entry.sha256 = createHash("sha256").update(await readFile(current)).digest("hex");
+    } else if (kind === "symlink") {
+      entry.target = await readlink(current);
+    }
+    entries.push(entry);
+    if (kind === "directory") {
+      for (const child of (await readdir(current)).sort()) await visit(join(current, child));
+    }
+  };
+  await visit(path);
+  return entries;
+}
+
 async function waitForOpenCommand(dataRoot: string, runId: () => string | undefined): Promise<void> {
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
@@ -265,6 +325,57 @@ describe("recordRun lifecycle", () => {
     await expect(readFile(join(context.dataRoot, "agentlens.sqlite"))).rejects.toMatchObject({
       code: "ENOENT"
     });
+  });
+
+  it("leaves pre-existing stale-capable storage byte-and-metadata unchanged on dirty Git refusal", async () => {
+    const context = await fixture();
+    const seeded = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    await execFile("sqlite3", [join(context.dataRoot, "agentlens.sqlite"), `
+      UPDATE runs SET status = 'running', ended_at = NULL WHERE id = '${seeded.runId}';
+      UPDATE run_ownership SET condition = 'active', recorder_pid = 404404,
+        recorder_start_token = 'stale-token' WHERE run_id = '${seeded.runId}';
+    `]);
+    await writeFile(join(context.repo, "dirty-before-recovery.txt"), "dirty\n", "utf8");
+    const startedFile = join(context.root, "dirty-stale-child-started.log");
+    const before = await snapshot(context.dataRoot);
+    const recovery = vi.fn(async (_input: RecoverStaleRunsInput) => ({
+      recoveredRunIds: [],
+      orphanRunIds: [],
+      ambiguousRunIds: []
+    }));
+
+    await expect(recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: { ...context.env, AGENTLENS_FAKE_STARTED_FILE: startedFile },
+        stdout: silentOutput,
+        recoverStaleRuns: recovery,
+        processIdentityInspector: {
+          captureStartToken: vi.fn(async () => "must-not-be-called"),
+          inspect: vi.fn(async () => "gone" as const),
+          inspectGroup: vi.fn(() => "gone" as const)
+        }
+      }
+    )).rejects.toThrow(/clean Git repository before child spawn/i);
+
+    expect(recovery).not.toHaveBeenCalled();
+    await expect(lstat(startedFile)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await snapshot(context.dataRoot)).toEqual(before);
   });
 
   it("refuses a missing data-root child inside the repository before storage or spawn", async () => {
@@ -407,6 +518,82 @@ describe("recordRun lifecycle", () => {
     ]);
     expect(JSON.parse(await readFile(argvCapture, "utf8"))).toEqual(childArgs.slice(1));
     expect(detail(context.dataRoot, result.runId).run.childPid).toEqual(expect.any(Number));
+  });
+
+  it("recovers an eligible older run before creating/printing the new run and spawning Codex", async () => {
+    const context = await fixture();
+    const databasePath = join(context.dataRoot, "agentlens.sqlite");
+    const database = openDatabase(databasePath);
+    try {
+      const repository = new RunRepository(database, {
+        artifactRoot: join(context.dataRoot, "artifacts", "sha256")
+      });
+      repository.createRun({
+        id: "older-stale-run",
+        schemaVersion: 1,
+        provider: "codex-exec",
+        integrationVersion: "0.1.0",
+        agentVersion: "unknown",
+        capturePolicy: "standard",
+        capturePolicyVersion: "1",
+        redactionVersion: "1",
+        repositoryFingerprint: "older-fixture",
+        repositoryDisplay: "fixture",
+        startedAt: 1
+      }, {
+        recorderInstanceId: "older-recorder",
+        recorderPid: 404_404,
+        recorderStartToken: "older-start-token",
+        heartbeatAt: 1
+      });
+    } finally {
+      database.close();
+    }
+    const orderFile = join(context.root, "recovery-order.log");
+    let recoveredAtPrint = false;
+    let newRunPresentAtPrint = false;
+    let runIdsAtRecovery: readonly string[] = [];
+
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--fake-mode=success"]
+      },
+      {
+        cwd: context.repo,
+        stdin: piped(),
+        env: { ...context.env, AGENTLENS_FAKE_STARTED_FILE: orderFile },
+        stdout: silentOutput,
+        recoverStaleRuns: async (input) => {
+          runIdsAtRecovery = input.repository.listRuns({ limit: 100 }).map(({ id }) => id);
+          return recoverStaleRuns(input);
+        },
+        processIdentityInspector: {
+          captureStartToken: async (pid) => `token-${pid}`,
+          inspect: async (pid) => pid === 404_404 ? "gone" : "same",
+          inspectGroup: () => "gone"
+        },
+        onRunIdPrinted: async (runId) => {
+          const older = detail(context.dataRoot, "older-stale-run");
+          recoveredAtPrint = older.run.status !== "starting" &&
+            older.ownership?.condition === "released" &&
+            older.events.some(({ kind }) => kind === "recorder.ownership_lost");
+          newRunPresentAtPrint = detail(context.dataRoot, runId).run.id === runId;
+          await writeFile(orderFile, "run-id-after-recovery\n", "utf8");
+        }
+      }
+    );
+
+    expect(result.status).toBe("completed");
+    expect(runIdsAtRecovery).toEqual(["older-stale-run"]);
+    expect(recoveredAtPrint).toBe(true);
+    expect(newRunPresentAtPrint).toBe(true);
+    expect((await readFile(orderFile, "utf8")).split("\n").slice(0, 2)).toEqual([
+      "run-id-after-recovery",
+      "child-started"
+    ]);
   });
 
   it("does not label ID-less thread or turn starts as interrupted recovery", async () => {

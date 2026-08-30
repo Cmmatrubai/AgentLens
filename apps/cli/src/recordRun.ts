@@ -48,6 +48,7 @@ import {
   type ChildProcessResult
 } from "./processRunner.js";
 import { resolvePromptInput } from "./promptInput.js";
+import { recoverStaleRuns } from "./recoverRuns.js";
 
 interface OutputWriter {
   write(chunk: string | Uint8Array): unknown;
@@ -75,6 +76,7 @@ export interface RecordRunDependencies {
   ) => void | Promise<void>;
   readonly derivePersistedTerminalCommand?: typeof derivePersistedTerminalCommand;
   readonly ensureTestDerivationsForRun?: typeof ensureTestDerivationsForRun;
+  readonly recoverStaleRuns?: typeof recoverStaleRuns;
 }
 
 export interface RecordResult {
@@ -545,23 +547,46 @@ export async function recordRun(
   const processIdentityInspector =
     dependencies.processIdentityInspector ?? systemProcessIdentityInspector;
   const recorderPid = dependencies.recorderPid ?? process.pid;
-  const recorderStartToken = await processIdentityInspector.captureStartToken(recorderPid);
-  if (recorderStartToken === null) {
-    throw new Error("AgentLens could not establish the recorder process start identity.");
-  }
-  const recorderInstanceId = randomUUID();
+  const recoverRuns = dependencies.recoverStaleRuns ?? recoverStaleRuns;
 
   const before = await captureGitBefore(cwd);
   const promptInput = await resolvePromptInput(command.childArgs, stdin);
   const dataRoot = resolve(command.dataRoot);
   const databasePath = await prepareDataRoot(dataRoot, before.repositoryRoot);
-  const key = await loadOrCreateRedactionKey(dataRoot);
   const database = openDatabase(databasePath);
-  await ownerOnlyDatabaseFiles(databasePath);
   const artifactRoot = join(dataRoot, "artifacts", "sha256");
-  const repository = new RunRepository(database, { artifactRoot });
-  const artifactStore = new ArtifactStore(dataRoot);
-  const runId = nextId();
+  let repository: RunRepository;
+  let recorderStartToken: string;
+  let recorderInstanceId: string;
+  let key: Buffer;
+  let artifactStore: ArtifactStore;
+  let runId: string;
+  try {
+    await ownerOnlyDatabaseFiles(databasePath);
+    repository = new RunRepository(database, { artifactRoot });
+    await recoverRuns({
+      repository,
+      dataRoot,
+      cwd,
+      now,
+      nextId,
+      recorderPid,
+      processIdentityInspector
+    });
+    const capturedStartToken = await processIdentityInspector.captureStartToken(recorderPid);
+    if (capturedStartToken === null) {
+      throw new Error("AgentLens could not establish the recorder process start identity.");
+    }
+    recorderStartToken = capturedStartToken;
+    recorderInstanceId = randomUUID();
+    key = await loadOrCreateRedactionKey(dataRoot);
+    artifactStore = new ArtifactStore(dataRoot);
+    runId = nextId();
+  } catch (error) {
+    database.close();
+    await ownerOnlyDatabaseFiles(databasePath);
+    throw error;
+  }
   const state: RecordingState = { sequence: 0 };
   const committedArtifactIds = new Set<string>();
   const gitContext: GitPersistenceContext = {
