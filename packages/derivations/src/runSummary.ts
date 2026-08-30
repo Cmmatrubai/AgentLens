@@ -333,7 +333,8 @@ function hasExpectedSemantics(
   expected: TestDerivationDraft
 ): event is TraceEventV1 {
   return event !== undefined &&
-    event.source.provider === expected.source.provider &&
+    hasExactFlatPayload(event.source, expected.source) &&
+    event.nativePayload === undefined &&
     event.status === expected.status &&
     event.derivation?.confidence === expected.derivation.confidence &&
     hasExactFlatPayload(event.normalizedPayload, expected.normalizedPayload);

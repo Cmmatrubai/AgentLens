@@ -151,3 +151,51 @@ Result: exit 0 with no output.
 - `.superpowers/sdd/2026-08-29-agentlens-task-6/task-6.6-report.md`
 
 No public type change was required. When capture policy has omitted the source command, the summary cannot independently reconstruct the original test family; it therefore validates the durable family/confidence schema, agreement between command/result rows, and every invariant available without reading omitted content. This is the intentional privacy boundary rather than a new correctness claim.
+
+# Task 6.6 fix round 2: reject provider-native derived context
+
+## Review finding reproduced
+
+A deterministic, otherwise valid `test.result` row was counted as durable when its source copied a provider-native lifecycle key or when it carried a native payload/reference. This violated the frozen derived-event contract, which permits only `{ provider: run.provider }` as source context and no native payload.
+
+## RED
+
+Added adversarial cases for all eight optional `NativeSourceV1` keys (`sessionId`, `threadId`, `turnId`, `itemId`, `toolId`, `eventType`, `itemType`, and `correlationId`) and all three `nativePayload` reference variants (inline, artifact, and omitted).
+
+    pnpm vitest --run packages/derivations/test/runSummary.test.ts
+
+Result: exit 1; 44 tests ran, the 11 new tests failed and 33 existing tests passed. Every forged result row was incorrectly included, yielding complete durability, zero missing expected rows, and both derived IDs.
+
+## Fix decision
+
+The semantic matcher now compares the complete derived `source` object with the pure builder draft's provider-only source and rejects any defined `nativePayload`. Existing deterministic identity, relationship, status, confidence, and exact normalized-payload checks remain unchanged. This uses only structured durable fields, does not compare rendered summaries, and does not inspect omitted command content under metadata-only or strict capture.
+
+## GREEN and verification
+
+    pnpm vitest --run packages/derivations/test/runSummary.test.ts
+
+Result: exit 0; 1 file and 44 tests passed.
+
+    pnpm vitest --run packages/derivations/test
+
+Result: exit 0; 5 files and 132 tests passed.
+
+    pnpm test
+
+Result: exit 0; 31 files and 461 tests passed.
+
+    pnpm typecheck
+
+Result: exit 0 (`tsc -b --pretty false`).
+
+    git diff --check
+
+Result: exit 0 with no output.
+
+## Fix-round files and residual risk
+
+- `packages/derivations/src/runSummary.ts`
+- `packages/derivations/test/runSummary.test.ts`
+- `.superpowers/sdd/2026-08-29-agentlens-task-6/task-6.6-report.md`
+
+No public type change was required. Valid provider-only derived rows continue to project under every capture policy. The earlier intentional privacy boundary for omitted source-command content is unchanged.

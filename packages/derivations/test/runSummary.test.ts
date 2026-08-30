@@ -734,6 +734,91 @@ describe("likely-test summaries", () => {
     });
   });
 
+  it.each([
+    { nativeField: "sessionId", extraSource: { sessionId: "session-native" } },
+    { nativeField: "threadId", extraSource: { threadId: "thread-native" } },
+    { nativeField: "turnId", extraSource: { turnId: "turn-native" } },
+    { nativeField: "itemId", extraSource: { itemId: "item-native" } },
+    { nativeField: "toolId", extraSource: { toolId: "tool-native" } },
+    { nativeField: "eventType", extraSource: { eventType: "item.failed" } },
+    { nativeField: "itemType", extraSource: { itemType: "command_execution" } },
+    { nativeField: "correlationId", extraSource: { correlationId: "correlation-native" } }
+  ] satisfies readonly {
+    nativeField: string;
+    extraSource: Partial<TraceEventV1["source"]>;
+  }[])("rejects derived evidence with native source $nativeField", ({ extraSource }) => {
+    const source = command({
+      id: "native-source-context",
+      sequence: 1,
+      command: "pnpm test",
+      status: "failed",
+      exitCode: 7
+    });
+    const [commandDraft, resultDraft] = durableTestEvents(source, 7);
+    const forgedResult = {
+      ...resultDraft,
+      source: { ...resultDraft.source, ...extraSource }
+    } as TraceEventV1;
+
+    expect(summarizeRun(input({
+      events: [source, commandDraft, forgedResult]
+    })).likelyTests).toMatchObject({
+      state: "detected",
+      attempts: {
+        passed: 0,
+        failed: 1,
+        unknown: 0,
+        latest: "failed"
+      },
+      durability: "incomplete",
+      missingExpected: 1,
+      derivedEventIds: [commandDraft.id]
+    });
+  });
+
+  it.each([
+    {
+      nativeForm: "inline payload",
+      nativePayload: { storage: "inline", redacted: { type: "item.failed" } }
+    },
+    {
+      nativeForm: "artifact reference",
+      nativePayload: { storage: "artifact", artifactId: "native-artifact" }
+    },
+    {
+      nativeForm: "omission reference",
+      nativePayload: { storage: "omitted", reason: "strict" }
+    }
+  ] satisfies readonly {
+    nativeForm: string;
+    nativePayload: NonNullable<TraceEventV1["nativePayload"]>;
+  }[])("rejects derived evidence with native $nativeForm", ({ nativePayload }) => {
+    const source = command({
+      id: "native-payload-context",
+      sequence: 1,
+      command: "pnpm test",
+      status: "failed",
+      exitCode: 7
+    });
+    const [commandDraft, resultDraft] = durableTestEvents(source, 7);
+    const forgedResult = { ...resultDraft, nativePayload } as TraceEventV1;
+
+    expect(summarizeRun(input({
+      events: [source, commandDraft, forgedResult]
+    })).likelyTests).toMatchObject({
+      state: "detected",
+      attempts: {
+        passed: 0,
+        failed: 1,
+        unknown: 0,
+        latest: "failed"
+      },
+      durability: "incomplete",
+      missingExpected: 1,
+      derivedEventIds: [commandDraft.id]
+    });
+  });
+
   it("validates derived source provider against the run provider", () => {
     const source = {
       ...command({
