@@ -188,7 +188,11 @@ function eventPayload(value: unknown): EventCursorPayload | null {
       (payload.direction !== "earlier" && payload.direction !== "later") ||
       (payload.mode !== "before" && payload.mode !== "after") ||
       !validInteger(payload.boundarySequence) || !validInteger(payload.latestCommittedSequence) ||
-      payload.boundarySequence > payload.latestCommittedSequence ||
+      !validEventBoundary(
+        payload.direction,
+        payload.boundarySequence,
+        payload.latestCommittedSequence
+      ) ||
       (payload.direction === "earlier" ? payload.mode !== "before" : payload.mode !== "after")) return null;
   return {
     v: 1,
@@ -199,6 +203,17 @@ function eventPayload(value: unknown): EventCursorPayload | null {
     boundarySequence: payload.boundarySequence,
     latestCommittedSequence: payload.latestCommittedSequence
   };
+}
+
+function validEventBoundary(
+  direction: "earlier" | "later",
+  boundarySequence: number,
+  latestCommittedSequence: number
+): boolean {
+  return boundarySequence <= latestCommittedSequence ||
+    (direction === "earlier" &&
+      latestCommittedSequence < Number.MAX_SAFE_INTEGER &&
+      boundarySequence === latestCommittedSequence + 1);
 }
 
 export function createCursorCodec(cursorKey: Uint8Array = randomBytes(32)): CursorCodec {
@@ -231,7 +246,11 @@ export function createCursorCodec(cursorKey: Uint8Array = randomBytes(32)): Curs
       if ((input.direction !== "earlier" && input.direction !== "later") ||
           !validText(input.runId, 256) || !validInteger(input.boundarySequence) ||
           !validInteger(input.latestCommittedSequence) ||
-          input.boundarySequence > input.latestCommittedSequence) {
+          !validEventBoundary(
+            input.direction,
+            input.boundarySequence,
+            input.latestCommittedSequence
+          )) {
         throw new Error("Event cursor boundary is invalid.");
       }
       return encode(key, {

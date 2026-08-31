@@ -462,6 +462,42 @@ describe("RunQueryService", () => {
     });
   });
 
+  it("keeps an empty after-poll earlier cursor adjacent to its captured snapshot", async () => {
+    const setup = await fixture();
+    setup.create("empty-poll-adjacency", 1);
+    for (let sequence = 0; sequence < 4; sequence += 1) {
+      setup.repository.appendEvent(event(
+        "empty-poll-adjacency",
+        `empty-poll-${sequence}`,
+        sequence
+      ));
+    }
+    setup.database.close();
+
+    const query = service(setup.databasePath, setup.artifactRoot);
+    const empty = await query.getEvents("empty-poll-adjacency", {
+      limit: 2,
+      afterSequence: 3
+    });
+    expect(empty).toMatchObject({
+      items: [],
+      window: {
+        state: "empty",
+        latestCommittedSequence: 3,
+        hasEarlier: true
+      }
+    });
+    if (empty.window.state !== "empty" || empty.window.earlierCursor === null) {
+      throw new Error("expected an earlier cursor through the empty poll snapshot");
+    }
+
+    const previous = await query.getEvents("empty-poll-adjacency", {
+      limit: 2,
+      cursor: empty.window.earlierCursor
+    });
+    expect(previous.items.map(({ sequence }) => sequence)).toEqual([2, 3]);
+  });
+
   it("keeps cursor pages on their captured snapshot while polling sees later WAL commits", async () => {
     const setup = await fixture();
     setup.create("active-snapshot", 1);

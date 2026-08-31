@@ -869,7 +869,10 @@ export function projectTrajectoryPageV1(
       ? context.cursors.encodeEvent({
           runId: context.runId,
           direction: "earlier",
-          boundarySequence: snapshot,
+          // Storage's `before` window is exclusive. Empty after-polls have no
+          // first item to use as that boundary, so place it immediately after
+          // the authenticated snapshot to keep the latest event adjacent.
+          boundarySequence: snapshot + 1,
           latestCommittedSequence: snapshot
         })
       : null;
