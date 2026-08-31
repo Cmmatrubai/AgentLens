@@ -18,13 +18,17 @@ import {
   routeId,
   type RouteContext
 } from "./routeContext.js";
+import {
+  decodeAssessmentRevisionEtag,
+  encodeAssessmentRevisionEtag,
+  projectedAssessmentEtag
+} from "./assessmentRevision.js";
 
 export const maximumAssessmentRequestBytes = 32 * 1024;
-export const projectedAssessmentEtag = '"assessment:projected"';
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
 export function explicitAssessmentEtag(eventId: string): string {
-  return `"assessment:${Buffer.from(eventId, "utf8").toString("base64url")}"`;
+  return encodeAssessmentRevisionEtag(eventId);
 }
 
 function singleHeader(request: IncomingMessage, name: string): string | undefined {
@@ -41,24 +45,12 @@ function singleHeader(request: IncomingMessage, name: string): string | undefine
 
 function parsePrecondition(request: IncomingMessage) {
   const value = singleHeader(request, "if-match");
-  if (value === undefined) return null;
-  if (value === projectedAssessmentEtag) {
-    return { state: "match", currentEventId: null } as const;
-  }
-  if (value.length > 512 || !/^"assessment:[A-Za-z0-9_-]+"$/.test(value)) {
-    throw new RouteRequestError();
-  }
-  const encoded = value.slice('"assessment:'.length, -1);
-  let eventId: string;
+  if (value === undefined) return undefined;
   try {
-    eventId = UTF8.decode(Buffer.from(encoded, "base64url"));
+    return { state: "match", currentEventId: decodeAssessmentRevisionEtag(value) } as const;
   } catch {
     throw new RouteRequestError();
   }
-  if (Buffer.from(eventId, "utf8").toString("base64url") !== encoded) {
-    throw new RouteRequestError();
-  }
-  return { state: "match", currentEventId: routeId(encodeURIComponent(eventId)) } as const;
 }
 
 function parseBody(request: IncomingMessage, body: Buffer | undefined) {
@@ -88,7 +80,7 @@ export async function handleAssessmentRoute(
   if (match === null) return false;
   if (url.search !== "") throw new RouteRequestError();
   const expectedRevision = parsePrecondition(request);
-  if (expectedRevision === null) {
+  if (expectedRevision === undefined) {
     endError(response, 428, "precondition_required", "Assessment revision is required.");
     return true;
   }

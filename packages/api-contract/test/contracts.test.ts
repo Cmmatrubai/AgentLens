@@ -546,4 +546,30 @@ describe("closed v1 browser schemas", () => {
       { ...valid, rawNote: "must-not-cross" }
     ]) expect(() => assessmentUpdateRequestV1Schema.parse(invalid)).toThrow();
   });
+
+  it("bounds assessment IDs and ETags over the complete canonical UTF-8 domain", () => {
+    const maximumEventId = "\u0800".repeat(256);
+    const maximumEtag = `"assessment:${Buffer.from(maximumEventId).toString("base64url")}"`;
+    const explicit = {
+      schemaVersion: 1,
+      state: "explicit",
+      verdict: "success",
+      taskCompleted: "yes",
+      note: { state: "absent" },
+      provenance: "human",
+      currentEventId: maximumEventId,
+      reviewedAt: 1,
+      updatedAt: 1
+    } as const;
+
+    expect(assessmentResponseV1Schema.parse({
+      schemaVersion: 1, assessment: explicit, etag: maximumEtag
+    }).etag).toBe(maximumEtag);
+    expect(() => currentAssessmentV1Schema.parse({
+      ...explicit, currentEventId: "a".repeat(257)
+    })).toThrow();
+    expect(() => currentAssessmentV1Schema.parse({
+      ...explicit, currentEventId: "broken-\ud800-surrogate"
+    })).toThrow();
+  });
 });

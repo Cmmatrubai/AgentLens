@@ -27,6 +27,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 import {
   EvidenceServiceError,
   createEvidenceService,
+  maximumAssessmentNoteResponseBytes,
   parseGitDiff
 } from "../src/index.js";
 
@@ -1465,12 +1466,25 @@ describe("Task 7.7 bound artifact route matrix", () => {
       .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
   });
 
-  it.each(artifactRoutes)("rejects a %s projection over the response limit", async (route) => {
+  it.each(artifactRoutes.filter((route) => route !== "note"))(
+    "rejects a %s projection over the response limit",
+    async (route) => {
     const content = responseLimitRouteContent(route);
     expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(artifactRouteLimits[route]);
     const setup = await artifactEvidenceFixture(route, { targetContent: content });
     await expect(readMatrixRoute(setup, route))
       .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+    }
+  );
+
+  it("accepts worst-case JSON escaping for an exact-limit assessment note", async () => {
+    const content = "\0".repeat(artifactRouteLimits.note);
+    const setup = await artifactEvidenceFixture("note", { targetContent: content });
+    const value = await readMatrixRoute(setup, "note");
+
+    expect(value).toMatchObject({ content });
+    expect(Buffer.byteLength(JSON.stringify(value), "utf8"))
+      .toBeLessThanOrEqual(maximumAssessmentNoteResponseBytes);
   });
 });
 

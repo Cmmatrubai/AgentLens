@@ -3,10 +3,15 @@ import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { loadOrCreateRedactionKey } from "@agentlens/core";
 import { openDatabase, RunRepository } from "@agentlens/storage";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createAssessmentService } from "../src/assessmentService.js";
+import {
+  AssessmentServiceError,
+  createAssessmentService
+} from "../src/assessmentService.js";
+import { createEvidenceService } from "../src/evidence/evidenceService.js";
 
 const roots: string[] = [];
 const assessedAt = new Date("2026-08-31T18:00:00.000Z");
@@ -160,19 +165,56 @@ describe("shared assessment application service", () => {
       runId: setup.runId,
       verdict: "success",
       taskCompleted: "yes",
-      note: "é".repeat(8 * 1024),
+      note: "\0".repeat(16 * 1024),
       expectedRevision: { state: "unconditional" }
     })).resolves.toMatchObject({ currentEventId: "assessment-exact-boundary" });
+
+    await expect(createEvidenceService({
+      databasePath: setup.databasePath,
+      artifactRoot: join(setup.dataRoot, "artifacts", "sha256")
+    }).assessmentNote(setup.runId, "assessment-exact-boundary")).resolves.toEqual({
+      schemaVersion: 1,
+      eventId: "assessment-exact-boundary",
+      content: "\0".repeat(16 * 1024)
+    });
 
     const before = current(setup.databasePath, setup.dataRoot, setup.runId);
     await expect(service.assess({
       runId: setup.runId,
       verdict: "success",
       taskCompleted: "yes",
-      note: `${"é".repeat(8 * 1024)}a`,
+      note: `${"\0".repeat(16 * 1024)}a`,
       expectedRevision: { state: "unconditional" }
     })).rejects.toThrow(/16 KiB UTF-8 limit/i);
     expect(current(setup.databasePath, setup.dataRoot, setup.runId)).toEqual(before);
+  });
+
+  it("rejects redaction expansion above 16 KiB before note artifact or assessment persistence", async () => {
+    const setup = await fixture("standard");
+    await loadOrCreateRedactionKey(setup.dataRoot);
+    const beforeFiles = await regularFiles(setup.dataRoot);
+    const before = current(setup.databasePath, setup.dataRoot, setup.runId);
+    const note = "API_KEY=x\n".repeat(1_600);
+    expect(Buffer.byteLength(note, "utf8")).toBeLessThanOrEqual(16 * 1024);
+
+    const error = await createAssessmentService({
+      dataRoot: setup.dataRoot,
+      now: () => assessedAt,
+      eventId: () => "assessment-redaction-expansion"
+    }).assess({
+      runId: setup.runId,
+      verdict: "success",
+      taskCompleted: "yes",
+      note,
+      expectedRevision: { state: "unconditional" }
+    }).then(() => null, (cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(AssessmentServiceError);
+    expect(error).toMatchObject({ code: "invalid_request" });
+    expect((error as Error).message).toMatch(/redacted.*16 KiB/i);
+    expect(current(setup.databasePath, setup.dataRoot, setup.runId)).toEqual(before);
+    expect(await regularFiles(setup.dataRoot)).toEqual(beforeFiles);
+    expect((await durableBytes(setup.dataRoot)).includes(Buffer.from("API_KEY=x"))).toBe(false);
   });
 
   it("rejects invalid explicit unreviewed input before creating a missing data root", async () => {

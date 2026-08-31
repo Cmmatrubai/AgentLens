@@ -6,6 +6,7 @@ import {
   gitStatusContentV1Schema,
   gitUntrackedContentV1Schema,
   nativeContentResponseV1Schema,
+  maximumAssessmentEventIdCharacters,
   type AssessmentNoteContentV1,
   type GitDiffCheckContentV1,
   type GitDiffContentV1,
@@ -30,10 +31,17 @@ import { readValidatedArtifact } from "../artifacts/readValidatedArtifact.js";
 import { projectEventContent } from "./contentProjector.js";
 import { parseGitDiff } from "./gitDiffParser.js";
 
+// JSON string escaping is at most six output bytes per input byte/code unit.
+// The fixed empty DTO is 45 bytes; this keeps every valid 16 KiB note and
+// 256-character event ID bounded without weakening any other evidence route.
+export const maximumAssessmentNoteResponseBytes =
+  45 + 6 * (16 * 1024 + maximumAssessmentEventIdCharacters);
+
 const LIMITS = Object.freeze({
   content: 256 * 1024,
   native: 256 * 1024,
-  note: 16 * 1024,
+  noteContent: 16 * 1024,
+  noteResponse: maximumAssessmentNoteResponseBytes,
   diff: 2 * 1024 * 1024,
   status: 256 * 1024,
   diffCheck: 256 * 1024,
@@ -449,7 +457,7 @@ export function createEvidenceService(input: CreateEvidenceServiceInput): Eviden
         const binding = repository.getEventArtifactBinding(runId, eventId, "assessment_note");
         if (binding === null) throw new EvidenceServiceError("evidence_binding_mismatch");
         const artifact = await artifactBytes(binding.artifact, input.artifactRoot, {
-          maximum: LIMITS.note,
+          maximum: LIMITS.noteContent,
           expectedKind: "assessment-note",
           expectedMediaType: "text/plain; charset=utf-8",
           requireComplete: true
@@ -457,7 +465,7 @@ export function createEvidenceService(input: CreateEvidenceServiceInput): Eviden
         const value = assessmentNoteContentV1Schema.parse({
           schemaVersion: 1, eventId, content: decodeUtf8(artifact.bytes)
         });
-        responseWithin(value, LIMITS.note);
+        responseWithin(value, LIMITS.noteResponse);
         return value;
       });
     },

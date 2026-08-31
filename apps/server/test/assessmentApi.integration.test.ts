@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import {
   createAssessmentService,
+  createEvidenceService,
   type AssessmentService,
   type EvidenceService,
   type RunQueryService
@@ -50,7 +51,7 @@ async function fixture(capturePolicy: "standard" | "metadata-only" | "strict" = 
   } finally {
     database.close();
   }
-  return { dataRoot, databasePath, runId: "run-http-assessment" };
+  return { dataRoot, databasePath, artifactRoot, runId: "run-http-assessment" };
 }
 
 function inspect(databasePath: string, dataRoot: string) {
@@ -80,7 +81,10 @@ async function durableBytes(root: string): Promise<Buffer> {
   return Buffer.concat(await visit(root));
 }
 
-async function serve(assessment: AssessmentService) {
+async function serve(
+  assessment: AssessmentService,
+  evidence: EvidenceService = {} as EvidenceService
+) {
   const server = createServer();
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -95,7 +99,7 @@ async function serve(assessment: AssessmentService) {
     staticAssets: { entryUrl: "/assets/fixture.js", read: async () => null },
     health: () => ({ schemaVersion: 1, ready: true, readModel: "ready" }),
     runQueries: {} as RunQueryService,
-    evidence: {} as EvidenceService,
+    evidence,
     assessment
   });
   server.on("request", (request, response) => { void router(request, response); });
@@ -176,7 +180,7 @@ describe("Task 7.8 conditional assessment API", () => {
 
     for (const etag of [
       "*", "W/\"assessment:projected\"", "assessment:projected",
-      "\"assessment:\"", "\"assessment:YQ==\"", "\"assessment:Lw\"",
+      "\"assessment:\"", "\"assessment:YQ==\"",
       "\"assessment:projected\", \"assessment:projected\""
     ]) {
       const response = await fetch(path, {
@@ -294,6 +298,57 @@ describe("Task 7.8 conditional assessment API", () => {
     );
     expect(inspect(setup.databasePath, setup.dataRoot).events.map(({ id }) => id))
       .toEqual(["assessment-http-one", "assessment-http-two"]);
+  });
+
+  it("round-trips storage-valid spaces, punctuation, and Unicode in an explicit revision", async () => {
+    const setup = await fixture();
+    const firstEventId = "valid storage event id !@#$%^&*()[]{};,'?/ ☃ 😀";
+    const eventIds = [firstEventId, "assessment-after-unusual-id"];
+    const origin = await serve(createAssessmentService({
+      dataRoot: setup.dataRoot,
+      now: () => new Date("2026-08-31T18:14:00.000Z"),
+      eventId: () => eventIds.shift()!
+    }));
+    const path = `${origin}/api/v1/runs/${setup.runId}/assessment`;
+    const first = await fetch(path, {
+      method: "PUT", headers: requestHeaders(origin, '"assessment:projected"'), body: body()
+    });
+    const firstBody = await first.json() as { etag: string; assessment: { currentEventId: string } };
+
+    expect(first.status).toBe(200);
+    expect(firstBody.assessment.currentEventId).toBe(firstEventId);
+    expect(first.headers.get("etag")).toBe(firstBody.etag);
+    const second = await fetch(path, {
+      method: "PUT", headers: requestHeaders(origin, firstBody.etag), body: body()
+    });
+    expect(second.status).toBe(200);
+    expect(inspect(setup.databasePath, setup.dataRoot).events.map(({ id }) => id))
+      .toEqual([firstEventId, "assessment-after-unusual-id"]);
+  });
+
+  it("returns and accepts the maximum-size canonical assessment revision ETag", async () => {
+    const setup = await fixture();
+    const maximumEventId = "\u0800".repeat(256);
+    const eventIds = [maximumEventId, "assessment-after-maximum-id"];
+    const origin = await serve(createAssessmentService({
+      dataRoot: setup.dataRoot,
+      now: () => new Date("2026-08-31T18:15:00.000Z"),
+      eventId: () => eventIds.shift()!
+    }));
+    const path = `${origin}/api/v1/runs/${setup.runId}/assessment`;
+    const first = await fetch(path, {
+      method: "PUT", headers: requestHeaders(origin, '"assessment:projected"'), body: body()
+    });
+    const firstBody = await first.json() as { etag: string; assessment: { currentEventId: string } };
+
+    expect(first.status).toBe(200);
+    expect(firstBody.assessment.currentEventId).toBe(maximumEventId);
+    expect(first.headers.get("etag")).toBe(firstBody.etag);
+    expect(firstBody.etag.length).toBe(1_037);
+    const second = await fetch(path, {
+      method: "PUT", headers: requestHeaders(origin, firstBody.etag), body: body()
+    });
+    expect(second.status).toBe(200);
   });
 
   it("rejects bearer and Origin failures before note bytes reach durable assessment storage", async () => {
@@ -475,5 +530,62 @@ describe("Task 7.8 conditional assessment API", () => {
       taskCompleted: "uncertain",
       note: { state: "absent" }
     });
+  });
+
+  it("writes and reads an exact 16 KiB note through the authenticated HTTP boundary", async () => {
+    const setup = await fixture();
+    const evidence = createEvidenceService({
+      databasePath: setup.databasePath,
+      artifactRoot: setup.artifactRoot
+    });
+    const origin = await serve(createAssessmentService({
+      dataRoot: setup.dataRoot,
+      now: () => new Date("2026-08-31T18:22:00.000Z"),
+      eventId: () => "assessment-http-note-boundary"
+    }), evidence);
+    const note = "a".repeat(16 * 1024);
+    const update = await fetch(`${origin}/api/v1/runs/${setup.runId}/assessment`, {
+      method: "PUT",
+      headers: requestHeaders(origin, '"assessment:projected"'),
+      body: body({ state: "text", text: note })
+    });
+    expect(update.status).toBe(200);
+
+    const read = await fetch(
+      `${origin}/api/v1/runs/${setup.runId}/events/assessment-http-note-boundary/assessment-note`,
+      { headers: { Authorization: authorization } }
+    );
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({
+      schemaVersion: 1,
+      eventId: "assessment-http-note-boundary",
+      content: note
+    });
+  });
+
+  it("maps redaction expansion above the durable note cap to a closed 400 without assessment writes", async () => {
+    const setup = await fixture();
+    const origin = await serve(createAssessmentService({ dataRoot: setup.dataRoot }));
+    const note = "API_KEY=x\n".repeat(1_600);
+    const response = await fetch(`${origin}/api/v1/runs/${setup.runId}/assessment`, {
+      method: "PUT",
+      headers: requestHeaders(origin, '"assessment:projected"'),
+      body: body({ state: "text", text: note })
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      schemaVersion: 1,
+      error: {
+        code: "invalid_request",
+        message: "Request parameters are invalid.",
+        retryable: false
+      }
+    });
+    const stored = inspect(setup.databasePath, setup.dataRoot);
+    expect(stored.events).toEqual([]);
+    expect(stored.artifacts).toEqual([]);
+    expect(stored.current).toMatchObject({ state: "projected", currentEventId: null });
+    expect((await durableBytes(setup.dataRoot)).includes(Buffer.from("API_KEY=x"))).toBe(false);
   });
 });

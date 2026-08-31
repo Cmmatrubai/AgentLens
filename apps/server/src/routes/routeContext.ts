@@ -130,6 +130,10 @@ export function handleRouteError(response: ServerResponse, error: unknown): void
     }
   }
   if (error instanceof AssessmentServiceError) {
+    if (error.code === "invalid_request") {
+      endError(response, 400, "invalid_request", "Request parameters are invalid.");
+      return;
+    }
     endError(response, 404, "run_not_found", "Run was not found.");
     return;
   }

@@ -1,5 +1,27 @@
 import { z } from "zod";
 
+export const maximumAssessmentEventIdCharacters = 256;
+// A canonical 256-code-unit ID needs at most 768 UTF-8 bytes and 1,024
+// unpadded base64url characters, plus the fixed quotes and assessment prefix.
+export const maximumAssessmentRevisionEtagCharacters =
+  13 + 4 * maximumAssessmentEventIdCharacters;
+
+const UTF8_ENCODER = new TextEncoder();
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+function isCanonicalUtf8(value: string): boolean {
+  try {
+    return UTF8_DECODER.decode(UTF8_ENCODER.encode(value)) === value;
+  } catch {
+    return false;
+  }
+}
+
+export const assessmentEventIdV1Schema = z.string()
+  .min(1)
+  .max(maximumAssessmentEventIdCharacters)
+  .refine(isCanonicalUtf8, "Assessment event ID must round-trip through UTF-8.");
+
 export const assessmentVerdictV1Schema = z.enum([
   "unreviewed",
   "success",
@@ -37,7 +59,7 @@ const explicitAssessmentV1Schema = z.object({
   taskCompleted: taskCompletionV1Schema,
   note: assessmentNoteAvailabilityV1Schema,
   provenance: z.literal("human"),
-  currentEventId: z.string().min(1).max(256),
+  currentEventId: assessmentEventIdV1Schema,
   reviewedAt: z.number().int().nonnegative(),
   updatedAt: z.number().int().nonnegative()
 }).strict();
@@ -76,7 +98,7 @@ export const assessmentUpdateRequestV1Schema = z.object({
 export const assessmentResponseV1Schema = z.object({
   schemaVersion: z.literal(1),
   assessment: currentAssessmentV1Schema,
-  etag: z.string().min(1).max(256)
+  etag: z.string().min(1).max(maximumAssessmentRevisionEtagCharacters)
 }).strict();
 
 export const assessmentConflictResponseV1Schema = z.object({
@@ -87,12 +109,12 @@ export const assessmentConflictResponseV1Schema = z.object({
     retryable: z.literal(false)
   }).strict(),
   assessment: currentAssessmentV1Schema,
-  etag: z.string().min(1).max(256)
+  etag: z.string().min(1).max(maximumAssessmentRevisionEtagCharacters)
 }).strict();
 
 export const assessmentNoteContentV1Schema = z.object({
   schemaVersion: z.literal(1),
-  eventId: z.string().min(1).max(256),
+  eventId: assessmentEventIdV1Schema,
   content: z.string().max(16_384)
 }).strict();
 

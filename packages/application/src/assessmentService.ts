@@ -30,10 +30,10 @@ export { AssessmentConflictError };
 const maximumAssessmentNoteBytes = 16 * 1024;
 
 export class AssessmentServiceError extends Error {
-  readonly code: "run_not_found";
+  readonly code: "invalid_request" | "run_not_found";
 
-  constructor(code: "run_not_found") {
-    super("Run not found.");
+  constructor(code: "invalid_request" | "run_not_found", message?: string) {
+    super(message ?? (code === "run_not_found" ? "Run not found." : "Assessment input is invalid."));
     this.name = "AssessmentServiceError";
     this.code = code;
   }
@@ -255,6 +255,12 @@ export function createAssessmentService(
           if (run.capturePolicy === "standard") {
             const key = await noteContent.loadKey(located.dataRoot);
             const redacted = noteContent.redact(input.note, key);
+            if (redacted.redactedBytes.byteLength > maximumAssessmentNoteBytes) {
+              throw new AssessmentServiceError(
+                "invalid_request",
+                "Redacted assessment note exceeds the 16 KiB durable-content limit."
+              );
+            }
             const artifact = await noteContent.write({
               dataRoot: located.dataRoot,
               runId: input.runId,
