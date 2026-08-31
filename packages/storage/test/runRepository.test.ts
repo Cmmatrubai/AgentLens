@@ -16,10 +16,11 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { CompletedArtifact, EventStatus, TraceEventV1 } from "@agentlens/core";
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { openDatabase, openDatabaseReadOnly } from "../src/database.js";
 import {
   RunRepository,
+  Task7StorageCapabilityError,
   type AppendDerivedEventInput,
   type CreateRecorderOwnershipInput,
   type CreateRunInput,
@@ -903,6 +904,224 @@ describe("storage schema capabilities", () => {
         redactionAudits: [],
         gitEvidence: null
       });
+    } finally {
+      close();
+    }
+  });
+});
+
+describe("bounded Task 7 storage reads", () => {
+  it("paginates duplicate timestamps by descending (startedAt, id) and applies every run filter", async () => {
+    const { repository, databasePath, close } = setup({ id: "run-a", startedAt: 100 });
+    try {
+      for (const input of [
+        validRun({ id: "run-b", startedAt: 200, repositoryFingerprint: "repo-one" }),
+        validRun({ id: "run-c", startedAt: 200, repositoryFingerprint: "repo-two" }),
+        validRun({ id: "run-d", startedAt: 300, repositoryFingerprint: "repo-one" })
+      ]) {
+        repository.createRun(input, validOwnership({
+          recorderInstanceId: `recorder-${input.id}`
+        }));
+      }
+      const writable = new Database(databasePath);
+      try {
+        writable.prepare("UPDATE runs SET status = 'completed' WHERE id = ?").run("run-b");
+        writable.prepare("UPDATE runs SET status = 'failed' WHERE id = ?").run("run-c");
+      } finally {
+        writable.close();
+      }
+      await repository.updateAssessment({
+        runId: "run-b", eventId: "assessment-b", receivedAt, verdict: "success"
+      });
+      await repository.updateAssessment({
+        runId: "run-c", eventId: "assessment-c", receivedAt, verdict: "failure"
+      });
+
+      const first = repository.listRunPage({ limit: 2 });
+      const second = repository.listRunPage({
+        limit: 2,
+        before: {
+          startedAt: first.items.at(-1)!.startedAt,
+          runId: first.items.at(-1)!.id
+        }
+      });
+      expect(first.items.map(({ id }) => id)).toEqual(["run-d", "run-c"]);
+      expect(first.hasMore).toBe(true);
+      expect(second.items.map(({ id }) => id)).toEqual(["run-b", "run-a"]);
+      expect(new Set([...first.items, ...second.items].map(({ id }) => id)).size).toBe(4);
+      expect(repository.listRunPage({ limit: 10, status: "completed" }).items.map(({ id }) => id))
+        .toEqual(["run-b"]);
+      expect(repository.listRunPage({ limit: 10, repositoryFingerprint: "repo-one" }).items
+        .map(({ id }) => id)).toEqual(["run-d", "run-b"]);
+      expect(repository.listRunPage({ limit: 10, assessment: { state: "projected" } }).items
+        .map(({ id }) => id)).toEqual(["run-d", "run-a"]);
+      expect(repository.listRunPage({ limit: 10, assessment: { state: "explicit" } }).items
+        .map(({ id }) => id)).toEqual(["run-c", "run-b"]);
+      expect(repository.listRunPage({
+        limit: 10, assessment: { state: "explicit", verdict: "success" }
+      }).items.map(({ id }) => id)).toEqual(["run-b"]);
+      expect(repository.listRunPage({
+        limit: 10,
+        status: "completed",
+        repositoryFingerprint: "repo-one",
+        assessment: { state: "explicit", verdict: "success" }
+      }).items.map(({ id }) => id)).toEqual(["run-b"]);
+      expect(() => repository.listRunPage({ limit: 0 })).toThrow(/limit/i);
+      expect(() => repository.listRunPage({ limit: 101 })).toThrow(/limit/i);
+    } finally {
+      close();
+    }
+  });
+
+  it("returns chronological bounded head, tail, after, around, and before event windows", () => {
+    const { repository, close } = setup();
+    try {
+      for (let sequence = 0; sequence <= 1_000; sequence += 1) {
+        repository.appendEvent(event(`window-${sequence}`, sequence, "completed", {
+          relationships: sequence === 1_000
+            ? [{ type: "correlates_with", eventId: "window-999" }]
+            : []
+        }));
+      }
+      const sequences = (mode: Parameters<RunRepository["getEventWindow"]>[1]) =>
+        repository.getEventWindow(runId, mode).events.map(({ sequence }) => sequence);
+      expect(sequences({ mode: "head", limit: 3 })).toEqual([0, 1, 2]);
+      expect(sequences({ mode: "tail", limit: 3 })).toEqual([998, 999, 1_000]);
+      expect(sequences({ mode: "after", sequence: 500, limit: 3 })).toEqual([501, 502, 503]);
+      expect(sequences({ mode: "around", sequence: 500, limit: 5 })).toEqual([498, 499, 500, 501, 502]);
+      expect(sequences({ mode: "before", sequence: 500, limit: 3 })).toEqual([497, 498, 499]);
+      const tail = repository.getEventWindow(runId, { mode: "tail", limit: 3 });
+      expect(tail).toMatchObject({ latestCommittedSequence: 1_000, hasEarlier: true, hasLater: false });
+      expect(tail.events.at(-1)?.relationships).toEqual([
+        { type: "correlates_with", eventId: "window-999" }
+      ]);
+      expect(repository.getEventWindow(runId, {
+        mode: "after", sequence: 1_000, limit: 3
+      })).toEqual({
+        events: [], latestCommittedSequence: 1_000, hasEarlier: true, hasLater: false
+      });
+      expect(() => repository.getEventWindow(runId, { mode: "head", limit: 251 }))
+        .toThrow(/limit/i);
+    } finally {
+      close();
+    }
+  });
+
+  it("preserves null empty-window semantics and same-run event lookup", () => {
+    const { repository, close } = setup();
+    try {
+      repository.createRun(validRun({ id: "empty-run" }), validOwnership({
+        recorderInstanceId: "empty-recorder"
+      }));
+      repository.createRun(validRun({ id: "other-run" }), validOwnership({
+        recorderInstanceId: "other-recorder"
+      }));
+      repository.appendEvent(event("other-event", 0, "completed", { runId: "other-run" }));
+      expect(repository.getEventWindow("empty-run", { mode: "head", limit: 10 })).toEqual({
+        events: [], latestCommittedSequence: null, hasEarlier: false, hasLater: false
+      });
+      expect(repository.getEvent(runId, "other-event")).toBeNull();
+      expect(repository.getEvent("other-run", "other-event")?.id).toBe("other-event");
+    } finally {
+      close();
+    }
+  });
+
+  it("resolves only the exact same-run standard assessment-note binding", async () => {
+    const { repository, databasePath, artifactRoot, close } = setup();
+    try {
+      const note = completedAssessmentNote(artifactRoot, "bound note");
+      await repository.updateAssessment({
+        runId, eventId: "bound-assessment", receivedAt, verdict: "partial",
+        note: { state: "artifact", artifact: note }
+      });
+      expect(repository.getEventArtifactBinding(runId, "bound-assessment", "assessment_note"))
+        .toMatchObject({ runId, eventId: "bound-assessment", role: "assessment_note", artifact: { id: note.id } });
+      expect(repository.getArtifactForRun(runId, note.id)?.id).toBe(note.id);
+      expect(repository.getEventArtifactBinding("missing-run", "bound-assessment", "assessment_note"))
+        .toBeNull();
+      expect(repository.getArtifactForRun("missing-run", note.id)).toBeNull();
+
+      const writable = new Database(databasePath);
+      try {
+        writable.prepare("UPDATE runs SET capture_policy = 'metadata-only' WHERE id = ?").run(runId);
+      } finally {
+        writable.close();
+      }
+      expect(repository.getEventArtifactBinding(runId, "bound-assessment", "assessment_note"))
+        .toBeNull();
+
+      const secondWritable = new Database(databasePath);
+      try {
+        secondWritable.prepare("UPDATE runs SET capture_policy = 'standard' WHERE id = ?").run(runId);
+        secondWritable.prepare("UPDATE artifacts SET kind = 'native-payload' WHERE id = ? AND run_id = ?")
+          .run(note.id, runId);
+      } finally {
+        secondWritable.close();
+      }
+      expect(repository.getEventArtifactBinding(runId, "bound-assessment", "assessment_note"))
+        .toBeNull();
+    } finally {
+      close();
+    }
+  });
+
+  it("batches only the frozen summary evidence classes without detail N+1", async () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("source-event", 0, "completed"));
+      repository.appendEvent(event("summary-file", 1, "completed", {
+        kind: "file.change", source: { provider: "codex-exec", eventType: "item.completed", itemType: "file_change" }
+      }));
+      repository.appendEvent(event("summary-usage", 2, "completed", {
+        kind: "turn.completed", source: { provider: "codex-exec", eventType: "turn.completed" },
+        normalizedPayload: { usage: { input_tokens: 4 } }
+      }));
+      repository.appendEvent(event("summary-diagnostic", 3, "failed", {
+        kind: "error", provenance: "recorder", source: { provider: "codex-exec", correlationId: runId }
+      }));
+      repository.appendEvent(event("summary-noise", 4, "completed", { kind: "message" }));
+      const testCommand = repository.appendDerivedEvent(derivedInput("test.command"));
+      const testResult = repository.appendDerivedEvent(derivedInput("test.result"));
+      await repository.updateAssessment({
+        runId, eventId: "summary-assessment", receivedAt: "2026-08-26T20:10:00.000Z", verdict: "success"
+      });
+      repository.saveGitEvidence(runId, {
+        initialHead: "a".repeat(40), finalHead: "a".repeat(40), initialBranch: "main", finalBranch: "main",
+        initialStatus: { state: "omitted", reason: "metadata-only" }, finalStatus: { state: "omitted", reason: "metadata-only" },
+        trackedFinalDiff: { state: "absent" }, diffCheck: { state: "omitted", reason: "metadata-only" },
+        diffCheckPassed: true, untrackedMetadata: { state: "absent" }, headChanged: false, branchChanged: false,
+        capturedAt: 1_777_777_778_000
+      });
+      const detail = vi.spyOn(repository, "getRunDetail");
+      const [summary] = repository.getRunSummaryBatch([runId]);
+      expect(detail).not.toHaveBeenCalled();
+      expect(summary?.summaryEvents.map(({ id }) => id)).toEqual([
+        "source-event", "summary-file", "summary-usage", "summary-diagnostic",
+        testCommand.id, testResult.id
+      ]);
+      expect(summary?.gitEvidence?.runId).toBe(runId);
+      expect(summary?.currentAssessment).toMatchObject({ state: "explicit", verdict: "success" });
+      expect(repository.getRunSummaryBatch(["missing-run", runId]).map(({ runId: id }) => id))
+        .toEqual([runId]);
+      expect(() => repository.getRunSummaryBatch(Array.from({ length: 101 }, (_, index) => `run-${index}`)))
+        .toThrow(/100/);
+    } finally {
+      close();
+    }
+  });
+
+  it("fails Task 7 capability-dependent reads explicitly on a Task 5 schema", () => {
+    const { repository, close } = setupMigration003();
+    try {
+      expect(() => repository.listRunPage({ limit: 10, assessment: { state: "projected" } }))
+        .toThrow(Task7StorageCapabilityError);
+      expect(() => repository.getRunSummaryBatch(["legacy-run"]))
+        .toThrow(Task7StorageCapabilityError);
+      expect(() => repository.getEventArtifactBinding("legacy-run", "event", "assessment_note"))
+        .toThrow(Task7StorageCapabilityError);
+      expect(repository.getEventWindow("legacy-run", { mode: "head", limit: 10 }))
+        .toEqual({ events: [], latestCommittedSequence: null, hasEarlier: false, hasLater: false });
     } finally {
       close();
     }

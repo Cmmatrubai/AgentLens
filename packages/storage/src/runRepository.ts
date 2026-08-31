@@ -149,8 +149,49 @@ export interface RunListRecord extends RunRecord {
   ownershipCondition: RecorderOwnershipCondition | null;
 }
 
+export interface RunPageBoundary {
+  readonly startedAt: number;
+  readonly runId: string;
+}
+
+export interface ListRunPageInput {
+  readonly limit: number;
+  readonly before?: RunPageBoundary;
+  readonly status?: RunStatus;
+  readonly repositoryFingerprint?: string;
+  readonly assessment?:
+    | { readonly state: "projected" }
+    | { readonly state: "explicit"; readonly verdict?: AssessmentVerdict };
+}
+
+export interface RunPageRecord {
+  readonly items: readonly RunListRecord[];
+  readonly hasMore: boolean;
+}
+
+export type EventWindowInput =
+  | { readonly mode: "head"; readonly limit: number }
+  | { readonly mode: "tail"; readonly limit: number }
+  | { readonly mode: "after"; readonly sequence: number; readonly limit: number }
+  | { readonly mode: "around"; readonly sequence: number; readonly limit: number }
+  | { readonly mode: "before"; readonly sequence: number; readonly limit: number };
+
+export interface EventWindowRecord {
+  readonly events: readonly TraceEventV1[];
+  readonly latestCommittedSequence: number | null;
+  readonly hasEarlier: boolean;
+  readonly hasLater: boolean;
+}
+
 export interface StoredArtifact extends CompletedArtifact {
   createdAt: number;
+}
+
+export interface EventArtifactBinding {
+  readonly runId: string;
+  readonly eventId: string;
+  readonly role: "assessment_note";
+  readonly artifact: StoredArtifact;
 }
 
 export interface StoredRedactionAudit extends RedactionAudit {
@@ -174,6 +215,8 @@ export interface StoredGitEvidence {
   branchChanged: boolean;
   capturedAt: number;
 }
+
+export type RunGitEvidence = StoredGitEvidence;
 
 export interface RunRepositoryOptions {
   artifactRoot: string;
@@ -257,6 +300,22 @@ export interface ExplicitCurrentAssessment {
 export type CurrentAssessment =
   | ProjectedCurrentAssessment
   | ExplicitCurrentAssessment;
+
+export interface RunSummaryBatchRecord {
+  readonly runId: string;
+  readonly summaryEvents: readonly TraceEventV1[];
+  readonly gitEvidence: RunGitEvidence | null;
+  readonly currentAssessment: CurrentAssessment;
+}
+
+export class Task7StorageCapabilityError extends Error {
+  readonly code = "task7_storage_capability_unavailable";
+
+  constructor(message = "Task 7 storage capabilities are unavailable for this schema.") {
+    super(message);
+    this.name = "Task7StorageCapabilityError";
+  }
+}
 
 export interface RunDetail {
   run: RunRecord;
@@ -481,6 +540,33 @@ function runFromRow(row: RunRow): RunRecord {
   };
   optionalProperty(result, "label", row.label);
   optionalProperty(result, "promptSource", row.prompt_source);
+  return result;
+}
+
+function runListFromRow(row: RunListRow): RunListRecord {
+  return {
+    ...runFromRow(row),
+    headChanged: row.git_head_changed === null ? null : row.git_head_changed === 1,
+    branchChanged: row.git_branch_changed === null ? null : row.git_branch_changed === 1,
+    ownershipCondition: row.ownership_condition
+  };
+}
+
+function validateBoundedLimit(limit: number, maximum: number, label: string): void {
+  if (!Number.isInteger(limit) || limit < 1 || limit > maximum) {
+    throw new Error(`${label} limit must be an integer from 1 through ${maximum}.`);
+  }
+}
+
+function placeholders(count: number): string {
+  return Array.from({ length: count }, () => "?").join(", ");
+}
+
+function chunks<T>(values: readonly T[], size: number): readonly (readonly T[])[] {
+  const result: T[][] = [];
+  for (let index = 0; index < values.length; index += size) {
+    result.push(values.slice(index, index + size));
+  }
   return result;
 }
 
@@ -1872,12 +1958,229 @@ export class RunRepository {
         LIMIT ?
       `)
       .all(limit) as RunListRow[];
-    return rows.map((row) => ({
-      ...runFromRow(row),
-      headChanged: row.git_head_changed === null ? null : row.git_head_changed === 1,
-      branchChanged: row.git_branch_changed === null ? null : row.git_branch_changed === 1,
-      ownershipCondition: row.ownership_condition
-    }));
+    return rows.map(runListFromRow);
+  }
+
+  listRunPage(input: ListRunPageInput): RunPageRecord {
+    validateBoundedLimit(input?.limit, 100, "Run page");
+    const conditions: string[] = [];
+    const parameters: unknown[] = [];
+    if (input.before) {
+      if (!Number.isInteger(input.before.startedAt) || input.before.runId.length === 0) {
+        throw new Error("Run page boundary requires an integer startedAt and non-empty runId.");
+      }
+      conditions.push("(runs.started_at < ? OR (runs.started_at = ? AND runs.id < ?))");
+      parameters.push(input.before.startedAt, input.before.startedAt, input.before.runId);
+    }
+    if (input.status !== undefined) {
+      const statuses: readonly RunStatus[] = [
+        "starting", "running", "completed", "failed", "interrupted", "recorder_error"
+      ];
+      if (!statuses.includes(input.status)) throw new Error("Run page status filter is invalid.");
+      conditions.push("runs.status = ?");
+      parameters.push(input.status);
+    }
+    if (input.repositoryFingerprint !== undefined) {
+      if (input.repositoryFingerprint.length === 0) {
+        throw new Error("Run page repository fingerprint must not be empty.");
+      }
+      conditions.push("runs.repository_fingerprint = ?");
+      parameters.push(input.repositoryFingerprint);
+    }
+    if (input.assessment !== undefined) {
+      if (!this.schemaCapabilities.currentAssessments) throw new Task7StorageCapabilityError();
+      if (input.assessment.state === "projected") {
+        conditions.push("current_assessments.run_id IS NULL");
+      } else if (input.assessment.state === "explicit") {
+        conditions.push("current_assessments.run_id IS NOT NULL");
+        if (input.assessment.verdict !== undefined) {
+          const verdicts: readonly AssessmentVerdict[] = ["unreviewed", "success", "partial", "failure"];
+          if (!verdicts.includes(input.assessment.verdict)) {
+            throw new Error("Run page assessment verdict filter is invalid.");
+          }
+          conditions.push("current_assessments.verdict = ?");
+          parameters.push(input.assessment.verdict);
+        }
+      } else {
+        throw new Error("Run page assessment state filter is invalid.");
+      }
+    }
+    const rows = this.#connection.prepare(`
+      SELECT runs.*, git_evidence.head_changed AS git_head_changed,
+        git_evidence.branch_changed AS git_branch_changed,
+        run_ownership.condition AS ownership_condition
+      FROM runs
+      LEFT JOIN git_evidence ON git_evidence.run_id = runs.id
+      LEFT JOIN run_ownership ON run_ownership.run_id = runs.id
+      ${this.schemaCapabilities.currentAssessments
+        ? "LEFT JOIN current_assessments ON current_assessments.run_id = runs.id"
+        : ""}
+      ${conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : ""}
+      ORDER BY runs.started_at DESC, runs.id DESC
+      LIMIT ?
+    `).all(...parameters, input.limit + 1) as RunListRow[];
+    return Object.freeze({
+      items: rows.slice(0, input.limit).map(runListFromRow),
+      hasMore: rows.length > input.limit
+    });
+  }
+
+  getRunSummaryBatch(runIds: readonly string[]): readonly RunSummaryBatchRecord[] {
+    if (!Array.isArray(runIds) || runIds.length > 100) {
+      throw new Error("Run summary batch accepts at most 100 run IDs.");
+    }
+    if (!this.schemaCapabilities.currentAssessments ||
+        !this.schemaCapabilities.derivationIdentities) {
+      throw new Task7StorageCapabilityError();
+    }
+    if (runIds.some((id) => typeof id !== "string" || id.length === 0)) {
+      throw new Error("Run summary batch IDs must be non-empty strings.");
+    }
+    const uniqueIds = [...new Set(runIds)];
+    if (uniqueIds.length === 0) return [];
+
+    const existing = new Set<string>();
+    const gitByRun = new Map<string, StoredGitEvidence>();
+    const assessmentByRun = new Map<string, CurrentAssessment>();
+    const eventsByRun = new Map<string, TraceEventV1[]>();
+    for (const batch of chunks(uniqueIds, 50)) {
+      const marks = placeholders(batch.length);
+      const runRows = this.#connection.prepare(`
+        SELECT id FROM runs WHERE id IN (${marks})
+      `).all(...batch) as { id: string }[];
+      for (const row of runRows) existing.add(row.id);
+      const gitRows = this.#connection.prepare(`
+        SELECT * FROM git_evidence WHERE run_id IN (${marks})
+      `).all(...batch) as GitEvidenceRow[];
+      for (const row of gitRows) gitByRun.set(row.run_id, gitEvidenceFromRow(row));
+      const assessmentRows = this.#connection.prepare(`
+        SELECT * FROM current_assessments WHERE run_id IN (${marks})
+      `).all(...batch) as CurrentAssessmentRow[];
+      for (const row of assessmentRows) {
+        assessmentByRun.set(row.run_id, currentAssessmentFromRow(row));
+      }
+      const rows = this.eventRows(`
+        events.run_id IN (${marks}) AND (
+          (events.provenance = 'observed' AND events.kind = 'command'
+            AND events.status IN ('completed', 'failed')
+            AND (event_sources.item_type IS NULL OR event_sources.item_type = 'command_execution')
+            AND (event_sources.event_type IS NULL OR event_sources.event_type IN ('item.completed', 'item.failed')))
+          OR (events.provenance = 'observed' AND events.kind = 'file.change'
+            AND events.status IN ('completed', 'failed')
+            AND (event_sources.item_type IS NULL OR event_sources.item_type = 'file_change')
+            AND (event_sources.event_type IS NULL OR event_sources.event_type IN ('item.completed', 'item.failed')))
+          OR (events.provenance = 'observed' AND events.kind = 'turn.completed'
+            AND json_type(events.normalized_payload_json, '$.usage') = 'object')
+          OR (events.provenance = 'recorder' AND events.kind IN (
+            'error', 'recorder.recovery', 'recorder.ownership_lost',
+            'recorder.interruption', 'recorder.process_exit'
+          ))
+          OR (events.provenance = 'derived' AND events.kind IN ('test.command', 'test.result')
+            AND events.derivation_name = 'test-command' AND events.derivation_version = '1')
+        )
+      `, batch, "events.run_id, events.sequence, events.id");
+      for (const event of this.eventsFromRows(rows)) {
+        const stored = eventsByRun.get(event.runId) ?? [];
+        stored.push(event);
+        eventsByRun.set(event.runId, stored);
+      }
+    }
+    return uniqueIds.flatMap((id) => existing.has(id) ? [Object.freeze({
+      runId: id,
+      summaryEvents: eventsByRun.get(id) ?? [],
+      gitEvidence: gitByRun.get(id) ?? null,
+      currentAssessment: assessmentByRun.get(id) ?? projectedAssessment(id)
+    })] : []);
+  }
+
+  getEventWindow(runId: string, input: EventWindowInput): EventWindowRecord {
+    if (typeof runId !== "string" || runId.length === 0) throw new Error("Run ID must not be empty.");
+    validateBoundedLimit(input?.limit, 250, "Event window");
+    if ("sequence" in input && (!Number.isInteger(input.sequence) || input.sequence < 0)) {
+      throw new Error("Event window sequence must be a non-negative integer.");
+    }
+    const bounds = this.#connection.prepare(`
+      SELECT MIN(sequence) AS earliest, MAX(sequence) AS latest FROM events WHERE run_id = ?
+    `).get(runId) as { earliest: number | null; latest: number | null };
+    const requestLimit = input.limit + 1;
+    let rows: EventRow[];
+    switch (input.mode) {
+      case "head":
+        rows = this.eventRows("events.run_id = ?", [runId], "events.sequence, events.id", requestLimit);
+        break;
+      case "tail":
+        rows = this.eventRows("events.run_id = ?", [runId], "events.sequence DESC, events.id DESC", requestLimit);
+        break;
+      case "after":
+        rows = this.eventRows("events.run_id = ? AND events.sequence > ?", [runId, input.sequence], "events.sequence, events.id", requestLimit);
+        break;
+      case "before":
+        rows = this.eventRows("events.run_id = ? AND events.sequence < ?", [runId, input.sequence], "events.sequence DESC, events.id DESC", requestLimit);
+        break;
+      case "around":
+        rows = this.eventRows("events.run_id = ?", [runId], "ABS(events.sequence - ?), events.sequence, events.id", requestLimit, [input.sequence]);
+        break;
+      default:
+        throw new Error("Event window mode is invalid.");
+    }
+    const selected = rows.slice(0, input.limit).sort((left, right) =>
+      left.sequence - right.sequence || left.id.localeCompare(right.id)
+    );
+    const events = this.eventsFromRows(selected);
+    if (events.length === 0) {
+      return Object.freeze({
+        events,
+        latestCommittedSequence: bounds.latest,
+        hasEarlier: input.mode === "after" ? bounds.latest !== null : false,
+        hasLater: false
+      });
+    }
+    const minimum = events[0]!.sequence;
+    const maximum = events.at(-1)!.sequence;
+    return Object.freeze({
+      events,
+      latestCommittedSequence: bounds.latest,
+      hasEarlier: bounds.earliest !== null && minimum > bounds.earliest,
+      hasLater: bounds.latest !== null && maximum < bounds.latest
+    });
+  }
+
+  getEvent(runId: string, eventId: string): TraceEventV1 | null {
+    if (runId.length === 0 || eventId.length === 0) throw new Error("Run and event IDs must not be empty.");
+    const rows = this.eventRows("events.run_id = ? AND events.id = ?", [runId, eventId], "events.sequence, events.id", 1);
+    return this.eventsFromRows(rows)[0] ?? null;
+  }
+
+  getEventArtifactBinding(
+    runId: string,
+    eventId: string,
+    role: "assessment_note"
+  ): EventArtifactBinding | null {
+    if (!this.schemaCapabilities.eventArtifactBindings) throw new Task7StorageCapabilityError();
+    if (role !== "assessment_note") throw new Error("Unsupported event artifact binding role.");
+    const row = this.#connection.prepare(`
+      SELECT artifacts.*
+      FROM event_artifact_bindings AS bindings
+      JOIN events ON events.id = bindings.event_id AND events.run_id = bindings.run_id
+      JOIN artifacts ON artifacts.id = bindings.artifact_id AND artifacts.run_id = bindings.run_id
+      JOIN runs ON runs.id = bindings.run_id
+      WHERE bindings.run_id = ? AND bindings.event_id = ? AND bindings.role = ?
+        AND events.kind = 'assessment.updated' AND events.provenance = 'human'
+        AND artifacts.kind = 'assessment-note'
+        AND artifacts.media_type = 'text/plain; charset=utf-8'
+        AND artifacts.redaction_state = 'redacted'
+        AND runs.capture_policy = 'standard'
+        AND json_extract(events.normalized_payload_json, '$.note.state') = 'artifact'
+        AND json_extract(events.normalized_payload_json, '$.note.artifactId') = artifacts.id
+    `).get(runId, eventId, role) as ArtifactRow | undefined;
+    return row ? Object.freeze({ runId, eventId, role, artifact: artifactFromRow(row) }) : null;
+  }
+
+  getArtifactForRun(runId: string, artifactId: string): StoredArtifact | null {
+    if (runId.length === 0 || artifactId.length === 0) throw new Error("Run and artifact IDs must not be empty.");
+    const row = this.#connection.prepare("SELECT * FROM artifacts WHERE run_id = ? AND id = ?")
+      .get(runId, artifactId) as ArtifactRow | undefined;
+    return row ? artifactFromRow(row) : null;
   }
 
   getRunDetail(runId: string): RunDetail {
@@ -2041,42 +2344,50 @@ export class RunRepository {
     }
   }
 
-  private readEvents(runId: string): TraceEventV1[] {
-    const eventQuery = this.schemaCapabilities.derivationIdentities
-      ? `
-          SELECT events.*, event_sources.provider AS source_provider,
-            event_sources.session_id, event_sources.thread_id, event_sources.turn_id,
-            event_sources.item_id, event_sources.tool_id, event_sources.event_type,
-            event_sources.item_type, event_sources.correlation_id,
-            derivation_identities.identity AS derivation_identity
-          FROM events
-          JOIN event_sources ON event_sources.event_id = events.id
-          LEFT JOIN derivation_identities
-            ON derivation_identities.run_id = events.run_id
-            AND derivation_identities.derived_event_id = events.id
-          WHERE events.run_id = ?
-          ORDER BY events.sequence, events.id
-        `
-      : `
-          SELECT events.*, event_sources.provider AS source_provider,
-            event_sources.session_id, event_sources.thread_id, event_sources.turn_id,
-            event_sources.item_id, event_sources.tool_id, event_sources.event_type,
-            event_sources.item_type, event_sources.correlation_id
-          FROM events
-          JOIN event_sources ON event_sources.event_id = events.id
-          WHERE events.run_id = ?
-          ORDER BY events.sequence, events.id
-        `;
-    const rows = this.#connection.prepare(eventQuery).all(runId) as EventRow[];
-    const relationshipRows = this.#connection.prepare(`
-      SELECT relationships.event_id, relationships.relationship_type,
-        relationships.related_event_id
-      FROM event_relationships AS relationships
-      JOIN events AS source_event ON source_event.id = relationships.event_id
-      WHERE source_event.run_id = ?
-      ORDER BY relationships.event_id, relationships.relationship_type,
-        relationships.related_event_id
-    `).all(runId) as RelationshipRow[];
+  private eventRows(
+    where: string,
+    parameters: readonly unknown[],
+    orderBy: string,
+    limit?: number,
+    orderParameters: readonly unknown[] = []
+  ): EventRow[] {
+    const derivationColumn = this.schemaCapabilities.derivationIdentities
+      ? ", derivation_identities.identity AS derivation_identity"
+      : "";
+    const derivationJoin = this.schemaCapabilities.derivationIdentities
+      ? `LEFT JOIN derivation_identities
+          ON derivation_identities.run_id = events.run_id
+          AND derivation_identities.derived_event_id = events.id`
+      : "";
+    return this.#connection.prepare(`
+      SELECT events.*, event_sources.provider AS source_provider,
+        event_sources.session_id, event_sources.thread_id, event_sources.turn_id,
+        event_sources.item_id, event_sources.tool_id, event_sources.event_type,
+        event_sources.item_type, event_sources.correlation_id${derivationColumn}
+      FROM events
+      JOIN event_sources ON event_sources.event_id = events.id
+      ${derivationJoin}
+      WHERE ${where}
+      ORDER BY ${orderBy}
+      ${limit === undefined ? "" : "LIMIT ?"}
+    `).all(
+      ...parameters,
+      ...orderParameters,
+      ...(limit === undefined ? [] : [limit])
+    ) as EventRow[];
+  }
+
+  private eventsFromRows(rows: readonly EventRow[]): TraceEventV1[] {
+    if (rows.length === 0) return [];
+    const relationshipRows: RelationshipRow[] = [];
+    for (const ids of chunks(rows.map(({ id }) => id), 100)) {
+      relationshipRows.push(...this.#connection.prepare(`
+        SELECT event_id, relationship_type, related_event_id
+        FROM event_relationships
+        WHERE event_id IN (${placeholders(ids.length)})
+        ORDER BY event_id, relationship_type, related_event_id
+      `).all(...ids) as RelationshipRow[]);
+    }
     const relationshipsByEvent = new Map<string, RelationshipRow[]>();
     for (const relationship of relationshipRows) {
       const existing = relationshipsByEvent.get(relationship.event_id) ?? [];
@@ -2131,6 +2442,14 @@ export class RunRepository {
       }
       return traceEventV1Schema.parse(value);
     });
+  }
+
+  private readEvents(runId: string): TraceEventV1[] {
+    return this.eventsFromRows(this.eventRows(
+      "events.run_id = ?",
+      [runId],
+      "events.sequence, events.id"
+    ));
   }
 
   private validateDerivedEventInput(input: AppendDerivedEventInput): void {
