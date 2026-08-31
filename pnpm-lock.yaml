@@ -51,6 +51,15 @@ importers:
       '@agentlens/api-contract':
         specifier: workspace:*
         version: link:../../packages/api-contract
+      '@agentlens/application':
+        specifier: workspace:*
+        version: link:../../packages/application
+      '@agentlens/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
 
   packages/api-contract:
     dependencies:

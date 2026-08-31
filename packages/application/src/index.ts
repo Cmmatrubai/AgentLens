@@ -4,4 +4,6 @@ export * from "./api/projectors.js";
 export * from "./api/sourceRefs.js";
 export * from "./ownership.js";
 export * from "./processIdentity.js";
+export * from "./queries/anchors.js";
+export * from "./queries/runQueryService.js";
 export * from "./runSummary.js";

@@ -1,6 +1,13 @@
 import { createServer, type RequestListener } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  createCursorCodec,
+  createRunQueryService,
+  createSourceRefProjector,
+  systemProcessIdentityInspector
+} from "@agentlens/application";
+import { codexExecCapabilities, type AdapterCapabilities } from "@agentlens/core";
 import { createAgentLensRouter } from "./router.js";
 import { loadStaticAssets, type StaticAssets } from "./staticAssets.js";
 import {
@@ -26,6 +33,14 @@ export interface AgentLensServerHandle {
 function defaultWebRoot(): string {
   return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "web", "dist");
 }
+
+const unavailableProviderCapabilities: AdapterCapabilities = Object.freeze({
+  sourceTimestamps: false,
+  fileReads: "unavailable",
+  toolOutput: "unavailable",
+  toolDurations: "unavailable",
+  interruptionSignal: "recorder_only"
+});
 
 export async function startAgentLensServer(
   options: StartAgentLensServerOptions
@@ -80,13 +95,26 @@ export async function startAgentLensServer(
   }
   const expectedHost = `127.0.0.1:${address.port}`;
   const origin = `http://${expectedHost}`;
+  const runQueries = createRunQueryService({
+    databasePath: join(options.dataRoot, "agentlens.sqlite"),
+    artifactRoot: join(options.dataRoot, "artifacts", "sha256"),
+    cursorCodec: createCursorCodec(),
+    sourceRefProjector: createSourceRefProjector(),
+    processIdentityInspector: systemProcessIdentityInspector,
+    providerCapabilities: {
+      forProvider: (provider) => provider === "codex-exec"
+        ? codexExecCapabilities
+        : unavailableProviderCapabilities
+    }
+  });
   listener = createAgentLensRouter({
     origin,
     expectedHost,
     bearer,
     bootstrapCode,
     staticAssets,
-    health: () => ({ schemaVersion: 1, ready: true, readModel: "ready" })
+    health: () => ({ schemaVersion: 1, ready: true, readModel: "ready" }),
+    runQueries
   });
 
   let closePromise: Promise<void> | undefined;
