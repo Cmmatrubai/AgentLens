@@ -1,5 +1,17 @@
 import { request } from "node:http";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  truncate,
+  writeFile
+} from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -12,6 +24,7 @@ import {
 } from "../src/startServer.js";
 import { createBootstrapHtml } from "../src/bootstrap.js";
 import { noStoreSecurityHeaders } from "../src/security/headers.js";
+import { loadStaticAssets } from "../src/staticAssets.js";
 import { boot as fixtureBoot } from "./fixtures/web/assets/fixture.js";
 
 const fixtureWebRoot = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "web");
@@ -209,8 +222,16 @@ describe("AgentLens loopback security boundary", () => {
     const handle = await startFixtureServer();
     expect(new URL(handle.origin).hostname).toBe("127.0.0.1");
     const bootstrapPath = new URL(handle.bootstrapUrl).pathname;
+    const expectedHost = new URL(handle.origin).host;
 
-    for (const host of ["localhost", "evil.test", "127.0.0.1:1, evil.test", "[::1]"]) {
+    for (const host of [
+      "localhost",
+      "evil.test",
+      "127.0.0.1:1, evil.test",
+      "[::1]",
+      `${expectedHost}, evil.test`,
+      `evil.test, ${expectedHost}`
+    ]) {
       const rejected = await rawRequest(handle.origin, bootstrapPath, { headers: { Host: host } });
       expect(rejected.status).toBe(400);
       expect(rejected.body).not.toContain("agentlens-security-sentinel");
@@ -346,6 +367,77 @@ describe("AgentLens loopback security boundary", () => {
       expect((await fetch(`${handle.origin}/assets/oversized.js`)).status).toBe(404);
     } finally {
       await handle?.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["growth", "abc", async (path: string) => appendFile(path, "def")],
+    ["shrink", "abcdefgh", async (path: string) => truncate(path, 3)]
+  ] as const)("rejects descriptor content after an in-read %s", async (
+    _change,
+    initialContent,
+    mutate
+  ) => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-static-stability-"));
+    const webRoot = join(root, "web");
+    const assetPath = join(webRoot, "assets", "mutable.js");
+    await mkdir(join(webRoot, ".vite"), { recursive: true });
+    await mkdir(join(webRoot, "assets"), { recursive: true });
+    await writeFile(assetPath, initialContent, "utf8");
+    await writeFile(join(webRoot, ".vite", "manifest.json"), JSON.stringify({
+      entry: { file: "assets/mutable.js", isEntry: true }
+    }), "utf8");
+    const canonicalAssetPath = await realpath(assetPath);
+    let changed = false;
+    const fileAccess = {
+      lstat,
+      realpath,
+      async open(path: string, flags: number) {
+        const handle = await open(path, flags);
+        if (path !== canonicalAssetPath) return handle;
+        return {
+          stat: () => handle.stat(),
+          async read(
+            buffer: Buffer,
+            offset: number,
+            length: number,
+            position: number
+          ) {
+            if (!changed) {
+              changed = true;
+              await mutate(canonicalAssetPath);
+            }
+            return handle.read(buffer, offset, length, position);
+          },
+          close: () => handle.close()
+        };
+      }
+    };
+
+    try {
+      const assets = await loadStaticAssets(webRoot, fileAccess);
+      expect(await assets.read("/assets/mutable.js")).toBeNull();
+      expect(changed).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves an unchanged empty allowlisted asset", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-static-empty-"));
+    const webRoot = join(root, "web");
+    await mkdir(join(webRoot, ".vite"), { recursive: true });
+    await mkdir(join(webRoot, "assets"), { recursive: true });
+    await writeFile(join(webRoot, "assets", "empty.js"), Buffer.alloc(0));
+    await writeFile(join(webRoot, ".vite", "manifest.json"), JSON.stringify({
+      entry: { file: "assets/empty.js", isEntry: true }
+    }), "utf8");
+
+    try {
+      const assets = await loadStaticAssets(webRoot);
+      expect((await assets.read("/assets/empty.js"))?.bytes).toEqual(Buffer.alloc(0));
+    } finally {
       await rm(root, { recursive: true, force: true });
     }
   });

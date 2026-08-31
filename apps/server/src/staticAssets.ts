@@ -1,5 +1,5 @@
-import { constants } from "node:fs";
-import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { lstat, open, realpath } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 
 const maximumManifestBytes = 256 * 1024;
@@ -15,6 +15,29 @@ export interface StaticAssets {
   readonly entryUrl: string;
   read(pathname: string): Promise<StaticAsset | null>;
 }
+
+export interface StaticFileHandle {
+  stat(): Promise<Stats>;
+  read(
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number
+  ): Promise<Readonly<{ bytesRead: number }>>;
+  close(): Promise<void>;
+}
+
+export interface StaticFileAccess {
+  lstat(path: string): Promise<Stats>;
+  realpath(path: string): Promise<string>;
+  open(path: string, flags: number): Promise<StaticFileHandle>;
+}
+
+const nodeFileAccess: StaticFileAccess = {
+  lstat,
+  realpath,
+  open: (path, flags) => open(path, flags)
+};
 
 function safeAssetPath(value: string): boolean {
   return value.startsWith("assets/")
@@ -42,20 +65,24 @@ function isContained(root: string, candidate: string): boolean {
     && !isAbsolute(pathFromRoot);
 }
 
-async function hasNoSymlinkComponents(root: string, candidate: string): Promise<boolean> {
+async function hasNoSymlinkComponents(
+  root: string,
+  candidate: string,
+  fileAccess: StaticFileAccess
+): Promise<boolean> {
   if (!isContained(root, candidate)) return false;
   const components = relative(root, candidate).split(sep).filter((component) => component !== "");
   let current = root;
   for (const component of components) {
     current = resolve(current, component);
-    if ((await lstat(current)).isSymbolicLink()) return false;
+    if ((await fileAccess.lstat(current)).isSymbolicLink()) return false;
   }
   return true;
 }
 
 function isSameFile(
-  before: Awaited<ReturnType<typeof lstat>>,
-  after: Awaited<ReturnType<FileHandle["stat"]>>
+  before: Stats,
+  after: Stats
 ): boolean {
   return before.dev === after.dev && before.ino === after.ino;
 }
@@ -63,24 +90,27 @@ function isSameFile(
 async function readBoundedRegularFile(
   root: string,
   path: string,
-  maximumBytes: number
+  maximumBytes: number,
+  fileAccess: StaticFileAccess
 ): Promise<Buffer | null> {
-  if (!isContained(root, path) || !(await hasNoSymlinkComponents(root, path))) return null;
-  const canonicalPath = await realpath(path);
+  if (!isContained(root, path)
+    || !(await hasNoSymlinkComponents(root, path, fileAccess))) return null;
+  const canonicalPath = await fileAccess.realpath(path);
   if (!isContained(root, canonicalPath)) return null;
-  const before = await lstat(path);
+  const before = await fileAccess.lstat(path);
   if (!before.isFile() || before.isSymbolicLink() || before.size > maximumBytes) return null;
 
-  let handle: FileHandle | undefined;
+  let handle: StaticFileHandle | undefined;
   try {
-    handle = await open(path, constants.O_RDONLY | noFollowOpenFlag);
+    handle = await fileAccess.open(path, constants.O_RDONLY | noFollowOpenFlag);
     const opened = await handle.stat();
     if (!opened.isFile() || opened.size > maximumBytes || !isSameFile(before, opened)) return null;
-    const canonicalAfterOpen = await realpath(path);
-    const pathAfterOpen = await lstat(path);
+    const canonicalAfterOpen = await fileAccess.realpath(path);
+    const pathAfterOpen = await fileAccess.lstat(path);
     if (!isContained(root, canonicalAfterOpen)
-      || !(await hasNoSymlinkComponents(root, path))
+      || !(await hasNoSymlinkComponents(root, path, fileAccess))
       || pathAfterOpen.isSymbolicLink()
+      || pathAfterOpen.size !== opened.size
       || !isSameFile(pathAfterOpen, opened)) {
       return null;
     }
@@ -92,9 +122,12 @@ async function readBoundedRegularFile(
       if (result.bytesRead === 0) break;
       offset += result.bytesRead;
     }
-    if (offset > maximumBytes) return null;
+    if (offset > maximumBytes || offset !== opened.size) return null;
     const finalState = await handle.stat();
-    if (!finalState.isFile() || !isSameFile(opened, finalState)) return null;
+    if (!finalState.isFile()
+      || finalState.size > maximumBytes
+      || finalState.size !== opened.size
+      || !isSameFile(opened, finalState)) return null;
     return bytes.subarray(0, offset);
   } finally {
     await handle?.close();
@@ -128,13 +161,17 @@ function collectManifestAssets(manifest: object): Readonly<{
   return { entry, allowlist };
 }
 
-export async function loadStaticAssets(webRoot: string): Promise<StaticAssets> {
-  const canonicalRoot = await realpath(webRoot);
+export async function loadStaticAssets(
+  webRoot: string,
+  fileAccess: StaticFileAccess = nodeFileAccess
+): Promise<StaticAssets> {
+  const canonicalRoot = await fileAccess.realpath(webRoot);
   const manifestPath = resolve(canonicalRoot, ".vite", "manifest.json");
   const manifestBytes = await readBoundedRegularFile(
     canonicalRoot,
     manifestPath,
-    maximumManifestBytes
+    maximumManifestBytes,
+    fileAccess
   );
   if (manifestBytes === null) throw new Error("AgentLens web manifest is unavailable.");
   const parsed = JSON.parse(manifestBytes.toString("utf8")) as unknown;
@@ -156,7 +193,12 @@ export async function loadStaticAssets(webRoot: string): Promise<StaticAssets> {
       if (!allowlist.has(candidate) || !safeAssetPath(candidate)) return null;
       const unresolved = resolve(canonicalRoot, candidate);
       try {
-        const bytes = await readBoundedRegularFile(canonicalRoot, unresolved, maximumAssetBytes);
+        const bytes = await readBoundedRegularFile(
+          canonicalRoot,
+          unresolved,
+          maximumAssetBytes,
+          fileAccess
+        );
         return bytes === null ? null : { bytes, contentType: contentType(unresolved) };
       } catch {
         return null;
