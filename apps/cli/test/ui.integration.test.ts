@@ -21,6 +21,70 @@ function deferredAbort(): Readonly<{
 }
 
 describe("AgentLens UI command", () => {
+  it("does not start, print, or open when already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const startServer = vi.fn();
+    const openBrowser = vi.fn(async () => {});
+    let stdout = "";
+
+    await runUiCommand({
+      name: "ui",
+      dataRoot: "/tmp/agentlens-ui",
+      noOpen: false
+    }, {
+      signal: controller.signal,
+      startServer,
+      openBrowser,
+      stdout: { write: (chunk) => { stdout += String(chunk); return true; } }
+    });
+
+    expect(startServer).not.toHaveBeenCalled();
+    expect(openBrowser).not.toHaveBeenCalled();
+    expect(stdout).toBe("");
+  });
+
+  it("closes without output or browser launch when aborted during startup", async () => {
+    const controller = new AbortController();
+    const close = vi.fn(async () => {});
+    const openBrowser = vi.fn(async () => {});
+    let stdout = "";
+    let resolveServer = (_handle: {
+      origin: string;
+      bootstrapUrl: string;
+      close(): Promise<void>;
+    }): void => {};
+    const server = new Promise<{
+      origin: string;
+      bootstrapUrl: string;
+      close(): Promise<void>;
+    }>((resolve) => { resolveServer = resolve; });
+    const startServer = vi.fn(async () => server);
+    const running = runUiCommand({
+      name: "ui",
+      dataRoot: "/tmp/agentlens-ui",
+      noOpen: false
+    }, {
+      signal: controller.signal,
+      startServer,
+      openBrowser,
+      stdout: { write: (chunk) => { stdout += String(chunk); return true; } }
+    });
+
+    expect(startServer).toHaveBeenCalledTimes(1);
+    controller.abort();
+    resolveServer({
+      origin: "http://127.0.0.1:43212",
+      bootstrapUrl: "http://127.0.0.1:43212/bootstrap/private-code",
+      close
+    });
+    await running;
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(openBrowser).not.toHaveBeenCalled();
+    expect(stdout).toBe("");
+  });
+
   it("opens the one-use bootstrap while printing only the token-free origin", async () => {
     const lifecycle = deferredAbort();
     const close = vi.fn(async () => {});

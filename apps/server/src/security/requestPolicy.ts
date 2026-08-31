@@ -3,7 +3,14 @@ import type { IncomingMessage } from "node:http";
 export const maximumRequestBodyBytes = 1024 * 1024;
 
 export function hasExactHost(request: IncomingMessage, expectedHost: string): boolean {
-  return request.headers.host === expectedHost;
+  let hostCount = 0;
+  let hostValue: string | undefined;
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    if (request.rawHeaders[index]?.toLowerCase() !== "host") continue;
+    hostCount += 1;
+    hostValue = request.rawHeaders[index + 1];
+  }
+  return hostCount === 1 && hostValue === expectedHost;
 }
 
 export function isMutationMethod(method: string | undefined): boolean {

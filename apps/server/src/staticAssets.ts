@@ -1,8 +1,10 @@
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve, sep } from "node:path";
 
 const maximumManifestBytes = 256 * 1024;
 const maximumAssetBytes = 8 * 1024 * 1024;
+const noFollowOpenFlag = process.platform === "win32" ? 0 : constants.O_NOFOLLOW;
 
 export interface StaticAsset {
   readonly bytes: Buffer;
@@ -40,6 +42,65 @@ function isContained(root: string, candidate: string): boolean {
     && !isAbsolute(pathFromRoot);
 }
 
+async function hasNoSymlinkComponents(root: string, candidate: string): Promise<boolean> {
+  if (!isContained(root, candidate)) return false;
+  const components = relative(root, candidate).split(sep).filter((component) => component !== "");
+  let current = root;
+  for (const component of components) {
+    current = resolve(current, component);
+    if ((await lstat(current)).isSymbolicLink()) return false;
+  }
+  return true;
+}
+
+function isSameFile(
+  before: Awaited<ReturnType<typeof lstat>>,
+  after: Awaited<ReturnType<FileHandle["stat"]>>
+): boolean {
+  return before.dev === after.dev && before.ino === after.ino;
+}
+
+async function readBoundedRegularFile(
+  root: string,
+  path: string,
+  maximumBytes: number
+): Promise<Buffer | null> {
+  if (!isContained(root, path) || !(await hasNoSymlinkComponents(root, path))) return null;
+  const canonicalPath = await realpath(path);
+  if (!isContained(root, canonicalPath)) return null;
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.size > maximumBytes) return null;
+
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(path, constants.O_RDONLY | noFollowOpenFlag);
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.size > maximumBytes || !isSameFile(before, opened)) return null;
+    const canonicalAfterOpen = await realpath(path);
+    const pathAfterOpen = await lstat(path);
+    if (!isContained(root, canonicalAfterOpen)
+      || !(await hasNoSymlinkComponents(root, path))
+      || pathAfterOpen.isSymbolicLink()
+      || !isSameFile(pathAfterOpen, opened)) {
+      return null;
+    }
+
+    const bytes = Buffer.alloc(opened.size + 1);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const result = await handle.read(bytes, offset, bytes.byteLength - offset, offset);
+      if (result.bytesRead === 0) break;
+      offset += result.bytesRead;
+    }
+    if (offset > maximumBytes) return null;
+    const finalState = await handle.stat();
+    if (!finalState.isFile() || !isSameFile(opened, finalState)) return null;
+    return bytes.subarray(0, offset);
+  } finally {
+    await handle?.close();
+  }
+}
+
 function collectManifestAssets(manifest: object): Readonly<{
   entry: string;
   allowlist: ReadonlySet<string>;
@@ -70,15 +131,13 @@ function collectManifestAssets(manifest: object): Readonly<{
 export async function loadStaticAssets(webRoot: string): Promise<StaticAssets> {
   const canonicalRoot = await realpath(webRoot);
   const manifestPath = resolve(canonicalRoot, ".vite", "manifest.json");
-  const manifestInfo = await lstat(manifestPath);
-  const canonicalManifestPath = await realpath(manifestPath);
-  if (!isContained(canonicalRoot, canonicalManifestPath)
-    || !manifestInfo.isFile()
-    || manifestInfo.isSymbolicLink()
-    || manifestInfo.size > maximumManifestBytes) {
-    throw new Error("AgentLens web manifest is unavailable.");
-  }
-  const parsed = JSON.parse(await readFile(canonicalManifestPath, "utf8")) as unknown;
+  const manifestBytes = await readBoundedRegularFile(
+    canonicalRoot,
+    manifestPath,
+    maximumManifestBytes
+  );
+  if (manifestBytes === null) throw new Error("AgentLens web manifest is unavailable.");
+  const parsed = JSON.parse(manifestBytes.toString("utf8")) as unknown;
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("AgentLens web manifest is invalid.");
   }
@@ -96,17 +155,12 @@ export async function loadStaticAssets(webRoot: string): Promise<StaticAssets> {
       const candidate = decoded.startsWith("/") ? decoded.slice(1) : decoded;
       if (!allowlist.has(candidate) || !safeAssetPath(candidate)) return null;
       const unresolved = resolve(canonicalRoot, candidate);
-      if (!isContained(canonicalRoot, unresolved)) return null;
-      let canonicalPath: string;
       try {
-        canonicalPath = await realpath(unresolved);
+        const bytes = await readBoundedRegularFile(canonicalRoot, unresolved, maximumAssetBytes);
+        return bytes === null ? null : { bytes, contentType: contentType(unresolved) };
       } catch {
         return null;
       }
-      if (!isContained(canonicalRoot, canonicalPath)) return null;
-      const info = await lstat(canonicalPath);
-      if (!info.isFile() || info.isSymbolicLink() || info.size > maximumAssetBytes) return null;
-      return { bytes: await readFile(canonicalPath), contentType: contentType(canonicalPath) };
     }
   };
 }

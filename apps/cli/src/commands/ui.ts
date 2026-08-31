@@ -54,6 +54,7 @@ export async function runUiCommand(
   command: UiCommand,
   dependencies: RunUiCommandDependencies
 ): Promise<void> {
+  if (dependencies.signal.aborted) return;
   const server = await (dependencies.startServer ?? startAgentLensServer)({
     dataRoot: command.dataRoot,
     ...(dependencies.webRoot === undefined ? {} : { webRoot: dependencies.webRoot })
@@ -61,6 +62,7 @@ export async function runUiCommand(
   const stdout = dependencies.stdout ?? process.stdout;
   const openBrowser = dependencies.openBrowser ?? createBrowserOpener();
   try {
+    if (dependencies.signal.aborted) return;
     if (command.noOpen) {
       stdout.write(`${server.bootstrapUrl}\n`);
     } else {

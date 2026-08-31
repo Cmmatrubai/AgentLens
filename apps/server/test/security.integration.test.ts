@@ -1,5 +1,6 @@
 import { request } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,6 +63,35 @@ function rawRequest(
     outbound.once("error", reject);
     if (options.body !== undefined) outbound.write(options.body);
     outbound.end();
+  });
+}
+
+function rawSocketRequest(
+  origin: string,
+  path: string,
+  headerLines: readonly string[]
+): Promise<Readonly<{ status: number; body: string }>> {
+  const url = new URL(origin);
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: url.hostname, port: Number(url.port) });
+    socket.setEncoding("utf8");
+    let response = "";
+    socket.once("connect", () => {
+      socket.end([
+        `GET ${path} HTTP/1.1`,
+        ...headerLines,
+        "Connection: close",
+        "",
+        ""
+      ].join("\r\n"));
+    });
+    socket.on("data", (chunk: string) => { response += chunk; });
+    socket.once("error", reject);
+    socket.once("close", () => {
+      const [head = "", body = ""] = response.split("\r\n\r\n", 2);
+      const status = Number(/^HTTP\/1\.1 (\d{3})/.exec(head)?.[1] ?? 0);
+      resolve({ status, body });
+    });
   });
 }
 
@@ -192,6 +222,27 @@ describe("AgentLens loopback security boundary", () => {
     expect(valid.status).toBe(200);
   });
 
+  it("rejects duplicate Host fields in either order without consuming bootstrap", async () => {
+    const handle = await startFixtureServer();
+    const bootstrapPath = new URL(handle.bootstrapUrl).pathname;
+    const expectedHost = new URL(handle.origin).host;
+
+    for (const headers of [
+      [`Host: evil.test`, `hOsT: ${expectedHost}`],
+      [`HOST: ${expectedHost}`, "Host: evil.test"]
+    ]) {
+      const rejected = await rawSocketRequest(handle.origin, bootstrapPath, headers);
+      expect(rejected.status).toBe(400);
+      expect(rejected.body).not.toContain("agentlens-bootstrap");
+    }
+
+    const accepted = await rawSocketRequest(handle.origin, bootstrapPath, [
+      `Host: ${expectedHost}`
+    ]);
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toContain("agentlens-bootstrap");
+  });
+
   it("authenticates every API request with the bearer obtained by executing bootstrap once", async () => {
     const handle = await startFixtureServer();
     const ordinaryStdout = vi.spyOn(process.stdout, "write");
@@ -241,6 +292,62 @@ describe("AgentLens loopback security boundary", () => {
     expect(source).not.toContain(bearer);
     expect((await fetch(`${handle.origin}/assets/../.vite/manifest.json`)).status).toBe(404);
     expect((await fetch(`${handle.origin}/.vite/manifest.json`)).status).toBe(404);
+  });
+
+  it.each(["final", "intermediate"] as const)(
+    "refuses an allowlisted asset with a %s symlink component",
+    async (symlinkKind) => {
+      if (process.platform === "win32") return;
+      const root = await mkdtemp(join(tmpdir(), "agentlens-static-nofollow-"));
+      const webRoot = join(root, "web");
+      await mkdir(join(webRoot, ".vite"), { recursive: true });
+      let assetUrl: string;
+      if (symlinkKind === "final") {
+        await mkdir(join(webRoot, "assets"), { recursive: true });
+        await writeFile(join(webRoot, "assets", "real.js"), "export const secret = 1;\n", "utf8");
+        await symlink("real.js", join(webRoot, "assets", "link.js"));
+        assetUrl = "assets/link.js";
+      } else {
+        await mkdir(join(webRoot, "real-assets"), { recursive: true });
+        await writeFile(
+          join(webRoot, "real-assets", "fixture.js"),
+          "export const secret = 1;\n",
+          "utf8"
+        );
+        await symlink("real-assets", join(webRoot, "assets"));
+        assetUrl = "assets/fixture.js";
+      }
+      await writeFile(join(webRoot, ".vite", "manifest.json"), JSON.stringify({
+        entry: { file: assetUrl, isEntry: true }
+      }), "utf8");
+      let handle: AgentLensServerHandle | undefined;
+      try {
+        handle = await startAgentLensServer({ dataRoot: join(root, "data"), webRoot });
+        expect((await fetch(`${handle.origin}/${assetUrl}`)).status).toBe(404);
+      } finally {
+        await handle?.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("bounds an allowlisted asset through the opened descriptor", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-static-bounded-"));
+    const webRoot = join(root, "web");
+    await mkdir(join(webRoot, ".vite"), { recursive: true });
+    await mkdir(join(webRoot, "assets"), { recursive: true });
+    await writeFile(join(webRoot, "assets", "oversized.js"), Buffer.alloc(8 * 1024 * 1024 + 1));
+    await writeFile(join(webRoot, ".vite", "manifest.json"), JSON.stringify({
+      entry: { file: "assets/oversized.js", isEntry: true }
+    }), "utf8");
+    let handle: AgentLensServerHandle | undefined;
+    try {
+      handle = await startAgentLensServer({ dataRoot: join(root, "data"), webRoot });
+      expect((await fetch(`${handle.origin}/assets/oversized.js`)).status).toBe(404);
+    } finally {
+      await handle?.close();
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it.each(["/runs", "/runs/run-fixture"])(
