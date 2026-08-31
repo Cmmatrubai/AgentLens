@@ -27,6 +27,9 @@ importers:
 
   apps/cli:
     dependencies:
+      '@agentlens/application':
+        specifier: workspace:*
+        version: link:../../packages/application
       '@agentlens/codex':
         specifier: workspace:*
         version: link:../../packages/codex
@@ -39,6 +42,18 @@ importers:
       '@agentlens/storage':
         specifier: workspace:*
         version: link:../../packages/storage
+
+  packages/application:
+    dependencies:
+      '@agentlens/core':
+        specifier: workspace:*
+        version: link:../core
+      '@agentlens/derivations':
+        specifier: workspace:*
+        version: link:../derivations
+      '@agentlens/storage':
+        specifier: workspace:*
+        version: link:../storage
 
   packages/codex:
     dependencies:

@@ -1,13 +1,15 @@
 {
-  "name": "@agentlens/cli",
+  "name": "@agentlens/application",
   "private": true,
   "type": "module",
-  "bin": {
-    "agentlens": "dist/main.js"
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "development": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
   },
   "dependencies": {
-    "@agentlens/application": "workspace:*",
-    "@agentlens/codex": "workspace:*",
     "@agentlens/core": "workspace:*",
     "@agentlens/derivations": "workspace:*",
     "@agentlens/storage": "workspace:*"

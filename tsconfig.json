@@ -5,6 +5,7 @@
     { "path": "./packages/derivations" },
     { "path": "./packages/storage" },
     { "path": "./packages/codex" },
+    { "path": "./packages/application" },
     { "path": "./apps/cli" }
   ]
 }
