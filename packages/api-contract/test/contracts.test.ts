@@ -373,6 +373,60 @@ describe("closed v1 browser schemas", () => {
     })).toThrow();
   });
 
+  it("accepts only safe structured Git diff coordinates", () => {
+    const maximum = Number.MAX_SAFE_INTEGER;
+    const valid = {
+      schemaVersion: 1,
+      kind: "diff",
+      files: [{
+        oldPath: "a.ts",
+        newPath: "a.ts",
+        headers: ["diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts"],
+        metadata: [],
+        hunks: [{
+          header: `@@ -${maximum},${maximum} +${maximum},${maximum} @@`,
+          oldStart: maximum,
+          oldCount: maximum,
+          newStart: maximum,
+          newCount: maximum,
+          lines: [{
+            type: "context",
+            oldLineNumber: maximum,
+            newLineNumber: maximum,
+            text: "boundary"
+          }]
+        }]
+      }],
+      preamble: [],
+      truncated: true,
+      malformed: false
+    } as const;
+    expect(gitDiffContentV1Schema.parse(valid)).toEqual(valid);
+
+    const unsafe = Number.MAX_SAFE_INTEGER + 1;
+    const baseHunk = valid.files[0].hunks[0];
+    const withHunk = (hunk: Record<string, unknown>) => ({
+      ...valid,
+      files: [{ ...valid.files[0], hunks: [hunk] }]
+    });
+    for (const candidate of [
+      withHunk({ ...baseHunk, oldStart: unsafe }),
+      withHunk({ ...baseHunk, oldCount: unsafe }),
+      withHunk({ ...baseHunk, newStart: unsafe }),
+      withHunk({ ...baseHunk, newCount: unsafe }),
+      withHunk({
+        ...baseHunk,
+        lines: [{ ...baseHunk.lines[0], oldLineNumber: unsafe }]
+      }),
+      withHunk({
+        ...baseHunk,
+        lines: [{ ...baseHunk.lines[0], newLineNumber: unsafe }]
+      })
+    ]) {
+      expect(gitDiffContentV1Schema.safeParse(candidate).success).toBe(false);
+    }
+  });
+
   it("preserves projected versus explicit human assessment provenance", () => {
     const projected = {
       schemaVersion: 1,

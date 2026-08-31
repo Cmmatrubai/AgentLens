@@ -592,6 +592,88 @@ describe("Task 7.7 evidence projection", () => {
     }
   });
 
+  it.each([
+    ["old start", "@@ -9007199254740992 +1 @@"],
+    ["new start", "@@ -1 +9007199254740992 @@"],
+    ["old count", "@@ -1,9007199254740992 +1 @@"],
+    ["new count", "@@ -1 +1,9007199254740992 @@"]
+  ] as const)("rejects an unsafe hunk %s without appending the hunk", (_component, header) => {
+    const parsed = parseGitDiff([
+      "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts",
+      header, "-old", "+new", ""
+    ].join("\n"), false);
+    expect(parsed.malformed).toBe(true);
+    expect(parsed.files[0]?.hunks).toEqual([]);
+  });
+
+  it("accepts exact MAX_SAFE_INTEGER hunk coordinates and counts", () => {
+    const maximum = "9007199254740991";
+    const coordinates = parseGitDiff([
+      "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts",
+      `@@ -${maximum} +${maximum} @@`, "-old", "+new", ""
+    ].join("\n"), false);
+    expect(coordinates).toMatchObject({
+      malformed: false,
+      files: [{ hunks: [{
+        oldStart: Number.MAX_SAFE_INTEGER,
+        newStart: Number.MAX_SAFE_INTEGER,
+        lines: [
+          { type: "delete", oldLineNumber: Number.MAX_SAFE_INTEGER },
+          { type: "add", newLineNumber: Number.MAX_SAFE_INTEGER }
+        ]
+      }] }]
+    });
+
+    const counts = parseGitDiff([
+      "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts",
+      `@@ -1,${maximum} +1,${maximum} @@`, ""
+    ].join("\n"), true);
+    expect(counts).toMatchObject({
+      truncated: true,
+      malformed: false,
+      files: [{ hunks: [{
+        oldCount: Number.MAX_SAFE_INTEGER,
+        newCount: Number.MAX_SAFE_INTEGER
+      }] }]
+    });
+  });
+
+  it("fails closed before emitting coordinates whose arithmetic exceeds MAX_SAFE_INTEGER", () => {
+    const maximum = "9007199254740991";
+    const parsed = parseGitDiff([
+      "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts",
+      `@@ -${maximum},2 +${maximum},2 @@`,
+      "-old-one", "+new-one", "-old-two", "+new-two", ""
+    ].join("\n"), false);
+    expect(parsed.malformed).toBe(true);
+    expect(parsed.files[0]?.hunks[0]?.lines).toEqual([
+      { type: "delete", oldLineNumber: Number.MAX_SAFE_INTEGER, newLineNumber: null, text: "old-one" },
+      { type: "add", oldLineNumber: null, newLineNumber: Number.MAX_SAFE_INTEGER, text: "new-one" }
+    ]);
+    for (const line of parsed.files[0]?.hunks[0]?.lines ?? []) {
+      if (line.oldLineNumber !== null) expect(Number.isSafeInteger(line.oldLineNumber)).toBe(true);
+      if (line.newLineNumber !== null) expect(Number.isSafeInteger(line.newLineNumber)).toBe(true);
+    }
+  });
+
+  it("contains an unsafe hunk and resumes at a later valid hunk", () => {
+    const parsed = parseGitDiff([
+      "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts",
+      "@@ -9007199254740992 +1 @@", "-ignored", "+ignored",
+      "@@ -2 +2 @@", "-old", "+new", ""
+    ].join("\n"), false);
+    expect(parsed.malformed).toBe(true);
+    expect(parsed.files[0]?.hunks).toHaveLength(1);
+    expect(parsed.files[0]?.hunks[0]).toMatchObject({
+      oldStart: 2,
+      newStart: 2,
+      lines: [
+        { type: "delete", oldLineNumber: 2, text: "old" },
+        { type: "add", newLineNumber: 2, text: "new" }
+      ]
+    });
+  });
+
   it("does not excuse an earlier incomplete hunk when only the final hunk is truncated", () => {
     const parsed = parseGitDiff([
       "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts",

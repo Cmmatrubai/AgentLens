@@ -3,6 +3,8 @@ import { z } from "zod";
 const boundedText = z.string().max(262_144);
 const boundedDiffText = z.string().max(2_097_152);
 const boundedPath = z.string().min(1).max(4_096);
+const safeNonnegativeInteger = z.number().int().safe().nonnegative();
+const safePositiveInteger = z.number().int().safe().positive();
 
 export const gitStatusContentV1Schema = z.object({
   schemaVersion: z.literal(1),
@@ -15,8 +17,8 @@ export const gitStatusContentV1Schema = z.object({
 
 const gitDiffLineV1Schema = z.object({
   type: z.enum(["context", "add", "delete", "excluded", "no_newline"]),
-  oldLineNumber: z.number().int().positive().nullable(),
-  newLineNumber: z.number().int().positive().nullable(),
+  oldLineNumber: safePositiveInteger.nullable(),
+  newLineNumber: safePositiveInteger.nullable(),
   text: boundedDiffText
 }).strict().superRefine((line, context) => {
   if (line.type === "context" && (line.oldLineNumber === null || line.newLineNumber === null)) {
@@ -35,10 +37,10 @@ const gitDiffLineV1Schema = z.object({
 
 const gitDiffHunkV1Schema = z.object({
   header: z.string().max(8_192),
-  oldStart: z.number().int().nonnegative(),
-  oldCount: z.number().int().nonnegative(),
-  newStart: z.number().int().nonnegative(),
-  newCount: z.number().int().nonnegative(),
+  oldStart: safeNonnegativeInteger,
+  oldCount: safeNonnegativeInteger,
+  newStart: safeNonnegativeInteger,
+  newCount: safeNonnegativeInteger,
   lines: z.array(gitDiffLineV1Schema).max(200_000)
 }).strict();
 

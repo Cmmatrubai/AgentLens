@@ -8,6 +8,17 @@ const UTF8 = new TextDecoder("utf-8", { fatal: true });
 const MAX_FILE_HEADERS = 64;
 const MAX_FILE_METADATA = 1_000;
 
+function safeDecimal(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function safeLineNumber(start: number, consumed: number): number | null {
+  const lineNumber = start + consumed;
+  return Number.isSafeInteger(lineNumber) && lineNumber > 0 ? lineNumber : null;
+}
+
 function decodeGitQuoted(value: string): string {
   if (!value.startsWith('"')) return value;
   if (!value.endsWith('"')) throw new Error("Malformed quoted Git path.");
@@ -119,8 +130,6 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
   const preamble: string[] = [];
   let current: typeof files[number] | undefined;
   let hunk: typeof files[number]["hunks"][number] | undefined;
-  let oldLine = 0;
-  let newLine = 0;
   let consumedOld = 0;
   let consumedNew = 0;
   let hasOldHeader = false;
@@ -215,17 +224,23 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
         malformed = true;
         continue;
       }
+      const oldLineNumber = consumesOld ? safeLineNumber(hunk.oldStart, consumedOld) : null;
+      const newLineNumber = consumesNew ? safeLineNumber(hunk.newStart, consumedNew) : null;
+      if ((consumesOld && oldLineNumber === null) || (consumesNew && newLineNumber === null)) {
+        malformed = true;
+        continue;
+      }
       if (prefix === " ") {
-        hunk.lines.push({ type: "context", oldLineNumber: oldLine++, newLineNumber: newLine++, text: content });
+        hunk.lines.push({ type: "context", oldLineNumber, newLineNumber, text: content });
       } else if (prefix === "+") {
         hunk.lines.push({
           type: EXCLUSION.test(content) ? "excluded" : "add",
           oldLineNumber: null,
-          newLineNumber: newLine++,
+          newLineNumber,
           text: content
         });
       } else {
-        hunk.lines.push({ type: "delete", oldLineNumber: oldLine++, newLineNumber: null, text: content });
+        hunk.lines.push({ type: "delete", oldLineNumber, newLineNumber: null, text: content });
       }
       if (consumesOld) consumedOld += 1;
       if (consumesNew) consumedNew += 1;
@@ -236,17 +251,23 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
     if (header !== null) {
       closeHunk(false);
       if (!hasOldHeader || !hasNewHeader) malformed = true;
+      const oldStart = safeDecimal(header[1]!);
+      const oldCount = safeDecimal(header[2] ?? "1");
+      const newStart = safeDecimal(header[3]!);
+      const newCount = safeDecimal(header[4] ?? "1");
+      if (oldStart === null || oldCount === null || newStart === null || newCount === null) {
+        malformed = true;
+        continue;
+      }
       hunk = {
         header: line,
-        oldStart: Number(header[1]),
-        oldCount: Number(header[2] ?? "1"),
-        newStart: Number(header[3]),
-        newCount: Number(header[4] ?? "1"),
+        oldStart,
+        oldCount,
+        newStart,
+        newCount,
         lines: []
       };
       current.hunks.push(hunk);
-      oldLine = hunk.oldStart;
-      newLine = hunk.newStart;
       consumedOld = 0;
       consumedNew = 0;
       continue;
