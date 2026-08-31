@@ -383,6 +383,7 @@ export function openDatabaseForServerRead(path: string): ServerReadDatabase {
     connection.pragma("foreign_keys = ON");
     connection.pragma("query_only = ON");
     connection.pragma("busy_timeout = 5000");
+    connection.pragma("schema_version", { simple: true });
   } catch (error) {
     connection.close();
     try {

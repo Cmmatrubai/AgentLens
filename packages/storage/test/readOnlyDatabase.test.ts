@@ -70,6 +70,8 @@ type PathSnapshot =
     device: bigint;
     inode: bigint;
     size: bigint;
+    mtimeNs: bigint;
+    ctimeNs: bigint;
     sha256?: string;
   }>;
 
@@ -101,6 +103,8 @@ function snapshotPath(root: string, path: string): PathSnapshot {
     device: stat.dev,
     inode: stat.ino,
     size: stat.size,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
     ...(type === "file"
       ? { sha256: createHash("sha256").update(readFileSync(path)).digest("hex") }
       : {})
@@ -122,10 +126,19 @@ function snapshotStorage(path: string): readonly PathSnapshot[] {
 
 function withAllowedShmCoordination(
   snapshot: readonly PathSnapshot[]
-): readonly Readonly<Omit<PathSnapshot, "sha256"> & { sha256?: string }>[] {
+): readonly Readonly<Omit<PathSnapshot, "sha256" | "mtimeNs" | "ctimeNs"> & {
+  sha256?: string;
+  mtimeNs?: bigint;
+  ctimeNs?: bigint;
+}>[] {
   return Object.freeze(snapshot.map((entry) => {
     if (entry.path !== "agentlens.sqlite-shm") return entry;
-    const { sha256: _allowedShmBytes, ...metadata } = entry;
+    const {
+      sha256: _allowedShmBytes,
+      mtimeNs: _allowedShmMtime,
+      ctimeNs: _allowedShmCtime,
+      ...metadata
+    } = entry;
     return Object.freeze(metadata);
   }));
 }
@@ -179,7 +192,11 @@ function makeActiveDatabaseOwnerOnly(path: string): void {
 
 function runServerReadWithInjectedLstat(
   path: string,
-  mutation: "owner_mismatch" | "inode_swap"
+  mutation:
+    | "owner_mismatch"
+    | "inode_swap"
+    | "main_owner_mismatch"
+    | "main_inode_swap"
 ): Readonly<{ reason: string | null; name: string | null }> {
   const environment = {
     ...process.env,
@@ -193,16 +210,18 @@ function runServerReadWithInjectedLstat(
     const path = process.env.AGENTLENS_SERVER_DATABASE_PATH;
     const mutation = process.env.AGENTLENS_LSTAT_MUTATION;
     const originalLstat = fs.lstatSync.bind(fs);
-    let shmStats = 0;
+    const target = mutation.startsWith("main_") ? path : path + "-shm";
+    let targetStats = 0;
     fs.lstatSync = (candidate, options) => {
       const stat = originalLstat(candidate, options);
-      if (String(candidate) !== path + "-shm") return stat;
-      shmStats += 1;
-      const shouldMutate = mutation === "owner_mismatch" ||
-        (mutation === "inode_swap" && shmStats === 2);
+      if (String(candidate) !== target) return stat;
+      targetStats += 1;
+      const ownerMismatch = mutation.endsWith("owner_mismatch");
+      const inodeSwap = mutation.endsWith("inode_swap");
+      const shouldMutate = ownerMismatch || (inodeSwap && targetStats === 2);
       if (!shouldMutate) return stat;
       const changed = Object.assign(Object.create(Object.getPrototypeOf(stat)), stat);
-      if (mutation === "owner_mismatch") {
+      if (ownerMismatch) {
         changed.uid = typeof stat.uid === "bigint" ? stat.uid + 1n : stat.uid + 1;
       } else {
         changed.ino = typeof stat.ino === "bigint" ? stat.ino + 1n : stat.ino + 1;
@@ -629,12 +648,32 @@ describe("openDatabaseForServerRead", () => {
     }
   });
 
+  it("maps a stable corrupt active database without mutation outside SHM coordination", () => {
+    const path = temporaryDatabasePath();
+    writeFileSync(path, "not a sqlite database\n", { mode: 0o600 });
+    writeFileSync(`${path}-wal`, Buffer.alloc(32, 0x57), { mode: 0o600 });
+    writeFileSync(`${path}-shm`, Buffer.alloc(32_768, 0x53), { mode: 0o600 });
+    const before = snapshotStorage(path);
+
+    const error = thrownBy(() => openDatabaseForServerRead(path));
+    expect(error).toMatchObject({
+      name: "ServerReadDatabaseError",
+      reason: "active_wal_unavailable"
+    });
+    expect((error as Error).cause).toBeInstanceOf(Error);
+    expect(withAllowedShmCoordination(snapshotStorage(path))).toEqual(
+      withAllowedShmCoordination(before)
+    );
+  });
+
   it.each([
-    { sidecar: "wal", kind: "directory" },
-    { sidecar: "wal", kind: "symlink" },
-    { sidecar: "shm", kind: "directory" },
-    { sidecar: "shm", kind: "symlink" }
-  ] as const)("rejects an active $sidecar $kind without mutation", ({ sidecar, kind }) => {
+    { entry: "database", kind: "directory" },
+    { entry: "database", kind: "symlink" },
+    { entry: "wal", kind: "directory" },
+    { entry: "wal", kind: "symlink" },
+    { entry: "shm", kind: "directory" },
+    { entry: "shm", kind: "symlink" }
+  ] as const)("rejects an active $entry $kind without mutation", ({ entry, kind }) => {
     const path = temporaryDatabasePath();
     createDatabaseThrough(path, 4).close();
     chmodSync(path, 0o600);
@@ -642,13 +681,13 @@ describe("openDatabaseForServerRead", () => {
     const shmPath = `${path}-shm`;
     writeFileSync(walPath, "WAL fixture bytes", { mode: 0o600 });
     writeFileSync(shmPath, "SHM fixture bytes", { mode: 0o600 });
-    const sidecarPath = sidecar === "wal" ? walPath : shmPath;
-    rmSync(sidecarPath);
-    if (kind === "directory") mkdirSync(sidecarPath, { mode: 0o700 });
+    const entryPath = entry === "database" ? path : entry === "wal" ? walPath : shmPath;
+    rmSync(entryPath);
+    if (kind === "directory") mkdirSync(entryPath, { mode: 0o700 });
     else {
-      const target = join(dirname(path), `${sidecar}-target`);
+      const target = join(dirname(path), `${entry}-target`);
       writeFileSync(target, "target bytes", { mode: 0o600 });
-      symlinkSync(target, sidecarPath);
+      symlinkSync(target, entryPath);
     }
     const before = snapshotStorage(path);
 
@@ -659,17 +698,18 @@ describe("openDatabaseForServerRead", () => {
   });
 
   it.each([
-    { sidecar: "wal", mode: 0o640 },
-    { sidecar: "shm", mode: 0o604 }
-  ] as const)("rejects group/world permissions on the active $sidecar", ({ sidecar, mode }) => {
+    { entry: "database", mode: 0o640 },
+    { entry: "wal", mode: 0o640 },
+    { entry: "shm", mode: 0o604 }
+  ] as const)("rejects group/world permissions on the active $entry", ({ entry, mode }) => {
     const path = temporaryDatabasePath();
     const writable = openDatabase(path);
     try {
       new RunRepository(writable, {
         artifactRoot: join(dirname(path), "artifacts", "sha256")
-      }).createRun(validRun(`permissive-${sidecar}`), validOwnership());
+      }).createRun(validRun(`permissive-${entry}`), validOwnership());
       makeActiveDatabaseOwnerOnly(path);
-      chmodSync(`${path}-${sidecar}`, mode);
+      chmodSync(entry === "database" ? path : `${path}-${entry}`, mode);
       const before = snapshotStorage(path);
 
       expect(thrownBy(() => openDatabaseForServerRead(path))).toMatchObject({
@@ -712,6 +752,48 @@ describe("openDatabaseForServerRead", () => {
       const before = snapshotStorage(path);
 
       expect(runServerReadWithInjectedLstat(path, "inode_swap")).toEqual({
+        name: "ServerReadDatabaseError",
+        reason: "active_sidecar_changed"
+      });
+      expect(withAllowedShmCoordination(snapshotStorage(path))).toEqual(
+        withAllowedShmCoordination(before)
+      );
+    } finally {
+      writable.close();
+    }
+  });
+
+  it("rejects an active main database whose owner differs from the effective user", () => {
+    const path = temporaryDatabasePath();
+    const writable = openDatabase(path);
+    try {
+      new RunRepository(writable, {
+        artifactRoot: join(dirname(path), "artifacts", "sha256")
+      }).createRun(validRun("main-owner-mismatch-run"), validOwnership());
+      makeActiveDatabaseOwnerOnly(path);
+      const before = snapshotStorage(path);
+
+      expect(runServerReadWithInjectedLstat(path, "main_owner_mismatch")).toEqual({
+        name: "ServerReadDatabaseError",
+        reason: "active_sidecar_invalid"
+      });
+      expect(snapshotStorage(path)).toEqual(before);
+    } finally {
+      writable.close();
+    }
+  });
+
+  it("fails closed when the main database inode changes between validation and open", () => {
+    const path = temporaryDatabasePath();
+    const writable = openDatabase(path);
+    try {
+      new RunRepository(writable, {
+        artifactRoot: join(dirname(path), "artifacts", "sha256")
+      }).createRun(validRun("main-inode-swap-run"), validOwnership());
+      makeActiveDatabaseOwnerOnly(path);
+      const before = snapshotStorage(path);
+
+      expect(runServerReadWithInjectedLstat(path, "main_inode_swap")).toEqual({
         name: "ServerReadDatabaseError",
         reason: "active_sidecar_changed"
       });
