@@ -8,17 +8,30 @@ export const maximumAssessmentRevisionEtagCharacters =
 export const maximumAssessmentNoteUtf8Bytes = 16 * 1024;
 
 // The closed request's longest fixed fields use `unreviewed`, `uncertain`, and
-// a text note. Each accepted note byte can require at most one six-byte JSON
-// escape (`\u0000`). The fixed empty-note envelope is ASCII, so its UTF-8 byte
-// length is exact and the full request maximum is fixed bytes + 6 * note bytes.
+// a text note. JSON permits every ASCII character in property names and enum
+// values to arrive as a six-byte `\uXXXX` escape. The compact fixed envelope
+// already budgets one byte for each such character, so add the other five.
 const maximumAssessmentRequestFixedBytes = new TextEncoder().encode(JSON.stringify({
   schemaVersion: 1,
   verdict: "unreviewed",
   taskCompleted: "uncertain",
   note: { state: "text", text: "" }
 })).byteLength;
+const maximumAssessmentRequestFixedStringCharacters = [
+  "schemaVersion",
+  "verdict",
+  "unreviewed",
+  "taskCompleted",
+  "uncertain",
+  "note",
+  "state",
+  "text",
+  "text"
+].reduce((total, token) => total + token.length, 0);
 export const maximumAssessmentRequestEnvelopeBytes =
-  maximumAssessmentRequestFixedBytes + 6 * maximumAssessmentNoteUtf8Bytes;
+  maximumAssessmentRequestFixedBytes +
+  5 * maximumAssessmentRequestFixedStringCharacters +
+  6 * maximumAssessmentNoteUtf8Bytes;
 
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });

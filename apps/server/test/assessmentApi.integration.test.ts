@@ -131,6 +131,12 @@ function body(note: unknown = { state: "absent" }) {
   });
 }
 
+function escapeEveryJsonTokenCharacter(value: string): string {
+  return [...value].map((character) =>
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`
+  ).join("");
+}
+
 async function rawPut(
   origin: string,
   path: string,
@@ -570,15 +576,61 @@ describe("Task 7.8 conditional assessment API", () => {
     });
   });
 
-  it("derives the assessment request envelope from worst-case closed DTO escaping", () => {
-    const worstCaseEnvelope = JSON.stringify({
+  it("keeps the compact worst-case note representation inside the request envelope", () => {
+    const compactEnvelope = JSON.stringify({
       schemaVersion: 1,
       verdict: "unreviewed",
       taskCompleted: "uncertain",
       note: { state: "text", text: "\0".repeat(16 * 1024) }
     });
-    expect(Buffer.byteLength(worstCaseEnvelope, "utf8"))
+    expect(Buffer.byteLength(compactEnvelope, "utf8"))
+      .toBeLessThanOrEqual(maximumAssessmentRequestBytes);
+  });
+
+  it("accepts fully escaped fixed tokens with an exact-limit escaped note", async () => {
+    const setup = await fixture();
+    const eventId = "assessment-http-escaped-token-boundary";
+    const note = "\0".repeat(16 * 1024);
+    const token = escapeEveryJsonTokenCharacter;
+    const escapedWire =
+      `{"${token("schemaVersion")}":1,` +
+      `"${token("verdict")}":"${token("unreviewed")}",` +
+      `"${token("taskCompleted")}":"${token("uncertain")}",` +
+      `"${token("note")}":{` +
+      `"${token("state")}":"${token("text")}",` +
+      `"${token("text")}":"${"\\u0000".repeat(16 * 1024)}"}}`;
+    expect(Buffer.byteLength(escapedWire, "utf8")).toBe(98_753);
+    expect(JSON.parse(escapedWire)).toEqual({
+      schemaVersion: 1,
+      verdict: "unreviewed",
+      taskCompleted: "uncertain",
+      note: { state: "text", text: note }
+    });
+
+    const evidence = createEvidenceService({
+      databasePath: setup.databasePath,
+      artifactRoot: setup.artifactRoot
+    });
+    const origin = await serve(createAssessmentService({
+      dataRoot: setup.dataRoot,
+      now: () => new Date("2026-08-31T18:22:30.000Z"),
+      eventId: () => eventId
+    }), evidence);
+    const update = await fetch(`${origin}/api/v1/runs/${setup.runId}/assessment`, {
+      method: "PUT",
+      headers: requestHeaders(origin, '"assessment:projected"'),
+      body: escapedWire
+    });
+    expect(update.status).toBe(200);
+    expect(Buffer.byteLength(escapedWire, "utf8"))
       .toBe(maximumAssessmentRequestBytes);
+
+    const read = await fetch(
+      `${origin}/api/v1/runs/${setup.runId}/events/${eventId}/assessment-note`,
+      { headers: { Authorization: authorization } }
+    );
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({ schemaVersion: 1, eventId, content: note });
   });
 
   it("keeps decoded note validation inside the enlarged envelope and bounds raw bytes first", async () => {
