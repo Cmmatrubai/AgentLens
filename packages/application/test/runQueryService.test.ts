@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 
 import { codexExecCapabilities, type TraceEventV1 } from "@agentlens/core";
 import {
@@ -20,6 +21,15 @@ import {
 
 const roots: string[] = [];
 const receivedAt = "2026-08-31T12:00:00.000Z";
+const storageRequire = createRequire(new URL("../../storage/package.json", import.meta.url));
+
+interface FixtureSqlite {
+  prepare(sql: string): { run(...parameters: unknown[]): unknown };
+  exec(sql: string): void;
+  close(): void;
+}
+
+const FixtureDatabase = storageRequire("better-sqlite3") as new (path: string) => FixtureSqlite;
 
 function run(id: string, startedAt: number): CreateRunInput {
   return {
@@ -76,17 +86,21 @@ async function fixture() {
   return { root, artifactRoot, databasePath, database, repository, create };
 }
 
-function service(databasePath: string, artifactRoot: string) {
+function service(
+  databasePath: string,
+  artifactRoot: string,
+  processIdentityInspector = {
+    captureStartToken: async () => null,
+    inspect: async () => "same" as const,
+    inspectGroup: () => "alive" as const
+  }
+) {
   return createRunQueryService({
     databasePath,
     artifactRoot,
     cursorCodec: createCursorCodec(Buffer.alloc(32, 0x31)),
     sourceRefProjector: createSourceRefProjector(Buffer.alloc(32, 0x32)),
-    processIdentityInspector: {
-      captureStartToken: async () => null,
-      inspect: async () => "same",
-      inspectGroup: () => "alive"
-    },
+    processIdentityInspector,
     providerCapabilities: { forProvider: () => codexExecCapabilities }
   });
 }
@@ -101,6 +115,34 @@ afterEach(async () => {
 });
 
 describe("RunQueryService", () => {
+  it("uses the run row for existence when recorder ownership is missing", async () => {
+    const setup = await fixture();
+    setup.create("ownership-missing", 1);
+    setup.repository.appendEvent(event("ownership-missing", "ownership-event", 0));
+    const writable = new FixtureDatabase(setup.databasePath);
+    writable.prepare("DELETE FROM run_ownership WHERE run_id = ?").run("ownership-missing");
+    writable.close();
+    setup.database.close();
+
+    const query = service(setup.databasePath, setup.artifactRoot);
+    await expect(query.getRun("ownership-missing")).resolves.toMatchObject({
+      runId: "ownership-missing",
+      ownership: { storedCondition: null, diagnosis: "unavailable" }
+    });
+    await expect(query.getEvents("ownership-missing", { limit: 10 })).resolves.toMatchObject({
+      items: [{ eventId: "ownership-event" }]
+    });
+    await expect(query.getEvent("ownership-missing", "ownership-event")).resolves.toMatchObject({
+      eventId: "ownership-event"
+    });
+    await expect(query.listRuns({ limit: 10 })).resolves.toMatchObject({
+      items: [{
+        runId: "ownership-missing",
+        ownership: { storedCondition: null, diagnosis: "unavailable" }
+      }]
+    });
+  });
+
   it("preserves every frozen run lifecycle status and conservative provider limitations", async () => {
     const setup = await fixture();
     const create = (id: string, startedAt: number) => setup.create(id, startedAt);
@@ -215,13 +257,27 @@ describe("RunQueryService", () => {
       verdict: "success",
       taskCompleted: "yes"
     });
+    const writable = new FixtureDatabase(setup.databasePath);
+    writable.prepare("UPDATE runs SET status = 'completed', ended_at = 200 WHERE id <> ?")
+      .run("run-099");
+    writable.prepare("UPDATE run_ownership SET condition = 'released' WHERE run_id <> ?")
+      .run("run-099");
+    writable.close();
     setup.database.close();
 
     const list = vi.spyOn(RunRepository.prototype, "listRunPage");
     const summaries = vi.spyOn(RunRepository.prototype, "getRunSummaryBatch");
     const details = vi.spyOn(RunRepository.prototype, "getRunDetail");
+    const ownership = vi.spyOn(RunRepository.prototype, "getOwnership");
+    const ownershipBatch = vi.spyOn(RunRepository.prototype, "getOwnershipBatch");
+    const inspector = {
+      captureStartToken: vi.fn(async () => null),
+      inspect: vi.fn(async () => "same" as const),
+      inspectGroup: vi.fn(() => "alive" as const)
+    };
     const before = await digest(setup.databasePath);
-    const page = await service(setup.databasePath, setup.artifactRoot).listRuns({ limit: 100 });
+    const page = await service(setup.databasePath, setup.artifactRoot, inspector)
+      .listRuns({ limit: 100 });
 
     expect(page.items).toHaveLength(100);
     expect(page.items[0]).toMatchObject({
@@ -239,6 +295,9 @@ describe("RunQueryService", () => {
     expect(list).toHaveBeenCalledTimes(1);
     expect(summaries).toHaveBeenCalledTimes(1);
     expect(details).not.toHaveBeenCalled();
+    expect(ownership).not.toHaveBeenCalled();
+    expect(ownershipBatch).toHaveBeenCalledTimes(1);
+    expect(inspector.inspect).toHaveBeenCalledTimes(1);
     expect(await digest(setup.databasePath)).toBe(before);
   });
 
@@ -452,5 +511,108 @@ describe("RunQueryService", () => {
     const failure = service(setup.databasePath, setup.artifactRoot).listRuns({ limit: 1 });
     await expect(failure).rejects.toMatchObject({ code: "active_snapshot_unavailable" });
     await expect(failure).rejects.not.toThrow(setup.databasePath);
+  });
+
+  it("holds one SQLite snapshot across run status, default mode, and event rows", async () => {
+    const setup = await fixture();
+    setup.create("snapshot-request", 1);
+    setup.repository.appendEvent(event("snapshot-request", "before-0", 0));
+    setup.repository.appendEvent(event("snapshot-request", "before-1", 1));
+    await Promise.all([
+      chmod(setup.databasePath, 0o600),
+      chmod(`${setup.databasePath}-wal`, 0o600),
+      chmod(`${setup.databasePath}-shm`, 0o600)
+    ]);
+
+    const original = RunRepository.prototype.getEventWindow;
+    let writerCommitted = false;
+    vi.spyOn(RunRepository.prototype, "getEventWindow").mockImplementation(function (...args) {
+      if (!writerCommitted) {
+        writerCommitted = true;
+        setup.repository.appendEvent(event("snapshot-request", "after-failure", 2, {
+          kind: "error",
+          status: "failed",
+          provenance: "recorder",
+          source: { provider: "codex-exec", correlationId: "snapshot-request" },
+          normalizedPayload: { recorderFailure: true }
+        }));
+        setup.repository.reconcileRun("snapshot-request", {
+          eventId: "after-reconciled",
+          receivedAt,
+          endedAt: 20,
+          recorderFailureEventId: "after-failure"
+        });
+      }
+      return original.apply(this, args);
+    });
+
+    const page = await service(setup.databasePath, setup.artifactRoot)
+      .getEvents("snapshot-request", { limit: 10 });
+    expect(writerCommitted).toBe(true);
+    expect(page.mode).toBe("tail");
+    expect(page.items.map(({ eventId }) => eventId)).toEqual(["before-0", "before-1"]);
+    expect(page.window.latestCommittedSequence).toBe(1);
+    setup.database.close();
+  });
+
+  it("rejects a cursor whose captured snapshot is ahead of durable latest", async () => {
+    const setup = await fixture();
+    setup.create("cursor-rewind", 1);
+    for (let sequence = 0; sequence < 4; sequence += 1) {
+      setup.repository.appendEvent(event("cursor-rewind", `rewind-${sequence}`, sequence));
+    }
+    setup.database.close();
+
+    const query = service(setup.databasePath, setup.artifactRoot);
+    const first = await query.getEvents("cursor-rewind", { limit: 2, aroundSequence: 0 });
+    if (first.window.state !== "nonempty" || first.window.laterCursor === null) {
+      throw new Error("expected rewind fixture cursor");
+    }
+    expect(first.window.latestCommittedSequence).toBe(3);
+
+    const writable = new FixtureDatabase(setup.databasePath);
+    writable.exec("PRAGMA foreign_keys = ON");
+    writable.prepare(`
+      DELETE FROM event_sources
+      WHERE run_id = ? AND event_id IN (
+        SELECT id FROM events WHERE run_id = ? AND sequence > ?
+      )
+    `).run("cursor-rewind", "cursor-rewind", 1);
+    writable.prepare("DELETE FROM events WHERE run_id = ? AND sequence > ?")
+      .run("cursor-rewind", 1);
+    writable.close();
+
+    await expect(query.getEvents("cursor-rewind", {
+      limit: 2,
+      cursor: first.window.laterCursor
+    })).rejects.toMatchObject({ code: "invalid_cursor" });
+  });
+
+  it("uses bounded metadata and exact-event reads without hydrating RunDetail", async () => {
+    const setup = await fixture();
+    setup.create("bounded-read", 1);
+    for (let sequence = 0; sequence < 10; sequence += 1) {
+      setup.repository.appendEvent(event("bounded-read", `bounded-${sequence}`, sequence));
+    }
+    setup.database.close();
+
+    const getRunDetail = vi.spyOn(RunRepository.prototype, "getRunDetail");
+    const readEvents = vi.spyOn(RunRepository.prototype, "readEvents");
+    const getArtifactForRun = vi.spyOn(RunRepository.prototype, "getArtifactForRun");
+    const query = service(setup.databasePath, setup.artifactRoot);
+
+    await expect(query.getRun("bounded-read")).resolves.toMatchObject({
+      runId: "bounded-read",
+      eventCount: 10,
+      anchors: { latestEvent: { eventId: "bounded-9", sequence: 9 } }
+    });
+    await expect(query.getEvents("bounded-read", { limit: 1, aroundSequence: 5 }))
+      .resolves.toMatchObject({ items: [{ eventId: "bounded-5" }] });
+    await expect(query.getEvent("bounded-read", "bounded-5"))
+      .resolves.toMatchObject({ eventId: "bounded-5" });
+
+    expect(getRunDetail).not.toHaveBeenCalled();
+    expect(readEvents).not.toHaveBeenCalled();
+    expect(getArtifactForRun).not.toHaveBeenCalled();
   });
 });

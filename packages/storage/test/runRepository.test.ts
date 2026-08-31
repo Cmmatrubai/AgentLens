@@ -911,6 +911,49 @@ describe("storage schema capabilities", () => {
 });
 
 describe("bounded Task 7 storage reads", () => {
+  it("reads run existence, bounded detail metadata, anchors, and ownership batches without RunDetail", () => {
+    const { repository, databasePath, close } = setup();
+    try {
+      repository.appendEvent(event("bounded-failure", 0, "failed"));
+      repository.appendEvent(event("bounded-latest", 1, "completed", {
+        kind: "future.provider.kind"
+      }));
+      const detail = vi.spyOn(repository, "getRunDetail");
+      const events = vi.spyOn(repository, "readEvents");
+
+      expect(repository.getRun(runId)).toMatchObject({ id: runId, status: "starting" });
+      expect(repository.getRun("missing-run")).toBeNull();
+      expect(repository.getRunReadModel(runId)).toMatchObject({
+        run: { id: runId },
+        eventCount: 2,
+        anchors: {
+          firstFailure: { eventId: "bounded-failure", sequence: 0 },
+          latestEvent: { eventId: "bounded-latest", sequence: 1 }
+        },
+        untrackedMetadataArtifact: null
+      });
+      expect(repository.getOwnershipBatch([runId, "missing-run"]).map(({ runId: id }) => id))
+        .toEqual([runId]);
+      expect(repository.getOwnershipBatch([])).toEqual([]);
+      expect(() => repository.getOwnershipBatch(
+        Array.from({ length: 101 }, (_, index) => `run-${index}`)
+      )).toThrow(/100/);
+      expect(detail).not.toHaveBeenCalled();
+      expect(events).not.toHaveBeenCalled();
+
+      const writable = new Database(databasePath);
+      try {
+        writable.prepare("DELETE FROM run_ownership WHERE run_id = ?").run(runId);
+      } finally {
+        writable.close();
+      }
+      expect(repository.getRun(runId)?.id).toBe(runId);
+      expect(repository.getRunReadModel(runId)?.ownership).toBeNull();
+    } finally {
+      close();
+    }
+  });
+
   it("paginates duplicate timestamps by descending (startedAt, id) and applies every run filter", async () => {
     const { repository, databasePath, close } = setup({ id: "run-a", startedAt: 100 });
     try {

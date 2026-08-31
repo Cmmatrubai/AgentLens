@@ -1,6 +1,16 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  readlink,
+  rm,
+  writeFile
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,15 +26,21 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { TraceEventV1 } from "../../../packages/core/src/index.js";
 import {
   RunRepository,
-  openDatabase
+  openDatabase,
+  type AgentLensDatabase
 } from "../../../packages/storage/src/index.js";
-import { RunQueryServiceError, type RunQueryService } from "../../../packages/application/src/index.js";
+import {
+  RunQueryServiceError,
+  projectEventDetailV1,
+  type RunQueryService
+} from "../../../packages/application/src/index.js";
 import { createAgentLensRouter } from "../src/router.js";
 import { startAgentLensServer, type AgentLensServerHandle } from "../src/startServer.js";
 
 const fixtureWebRoot = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "web");
 const roots: string[] = [];
 const handles: AgentLensServerHandle[] = [];
+const databases: AgentLensDatabase[] = [];
 
 function authorization(seed = 1): { Authorization: string } {
   return { Authorization: `Bearer ${Buffer.alloc(32, seed).toString("base64url")}` };
@@ -57,7 +73,7 @@ function trace(runId: string, id: string, sequence: number): TraceEventV1 {
   };
 }
 
-async function createDataRoot() {
+async function createDataRoot(active = false) {
   const root = await mkdtemp(join(tmpdir(), "agentlens-read-api-"));
   roots.push(root);
   const dataRoot = join(root, "data");
@@ -88,12 +104,92 @@ async function createDataRoot() {
   });
   repository.appendEvent(trace("run-http", "event-http-0", 0));
   repository.appendEvent(trace("run-http", "event-http-1", 1));
-  database.close();
-  return { root, dataRoot, databasePath };
+  if (active) {
+    databases.push(database);
+    await Promise.all([
+      chmod(databasePath, 0o600),
+      chmod(`${databasePath}-wal`, 0o600),
+      chmod(`${databasePath}-shm`, 0o600)
+    ]);
+  } else {
+    database.close();
+  }
+  return { root, dataRoot, databasePath, repository };
 }
 
 async function hash(path: string): Promise<string> {
   return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+type PathSnapshot = Readonly<{
+  path: string;
+  type: "file" | "directory" | "symlink" | "other";
+  linkTarget?: string;
+  uid: bigint;
+  gid: bigint;
+  mode: bigint;
+  device: bigint;
+  inode: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+  sha256?: string;
+}>;
+
+async function snapshotDataRoot(root: string): Promise<readonly PathSnapshot[]> {
+  const entries: PathSnapshot[] = [];
+  const visit = async (path: string): Promise<void> => {
+    const stat = await lstat(path, { bigint: true });
+    const type = stat.isFile()
+      ? "file"
+      : stat.isDirectory()
+        ? "directory"
+        : stat.isSymbolicLink()
+          ? "symlink"
+          : "other";
+    entries.push(Object.freeze({
+      path: path === root ? "." : path.slice(root.length + 1),
+      type,
+      ...(type === "symlink" ? { linkTarget: await readlink(path) } : {}),
+      uid: stat.uid,
+      gid: stat.gid,
+      mode: stat.mode,
+      device: stat.dev,
+      inode: stat.ino,
+      size: stat.size,
+      mtimeNs: stat.mtimeNs,
+      ctimeNs: stat.ctimeNs,
+      ...(type === "file" ? { sha256: await hash(path) } : {})
+    }));
+    if (type !== "directory") return;
+    for (const name of (await readdir(path)).sort()) await visit(join(path, name));
+  };
+  await visit(root);
+  return Object.freeze(entries);
+}
+
+function withAllowedShmCoordination(snapshot: readonly PathSnapshot[]): readonly object[] {
+  return snapshot.map((entry) => {
+    if (entry.path !== "agentlens.sqlite-shm") return entry;
+    const {
+      sha256: _allowedShmBytes,
+      mtimeNs: _allowedShmMtime,
+      ctimeNs: _allowedShmCtime,
+      ...metadata
+    } = entry;
+    return metadata;
+  });
+}
+
+function lifecycleCounts(repository: RunRepository): Readonly<{
+  runs: number;
+  events: number;
+}> {
+  const runs = repository.listRuns({ limit: 500 });
+  return Object.freeze({
+    runs: runs.length,
+    events: runs.reduce((count, run) => count + repository.readEvents(run.id).length, 0)
+  });
 }
 
 async function start(dataRoot: string): Promise<AgentLensServerHandle> {
@@ -113,6 +209,7 @@ async function body(response: Response): Promise<unknown> {
 
 afterEach(async () => {
   await Promise.all(handles.splice(0).map((handle) => handle.close()));
+  for (const database of databases.splice(0)) database.close();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -169,6 +266,42 @@ describe("authenticated read API", () => {
       fixture.dataRoot
     ]) expect(serialized).not.toContain(sentinel);
     expect(await hash(fixture.databasePath)).toBe(before);
+  });
+
+  it("keeps the complete active data root and lifecycle row counts pure across every read route", async () => {
+    const fixture = await createDataRoot(true);
+    const artifactPath = join(fixture.dataRoot, "artifacts", "sha256", "route-purity-artifact");
+    await writeFile(artifactPath, "route purity artifact bytes\n", { mode: 0o600 });
+    const handle = await start(fixture.dataRoot);
+    const headers = authorization();
+    const beforeCounts = lifecycleCounts(fixture.repository);
+    const beforeStorage = await snapshotDataRoot(fixture.dataRoot);
+
+    for (const path of [
+      "/api/v1/runs?limit=100",
+      "/api/v1/runs/run-http",
+      "/api/v1/runs/run-http/events?limit=1&aroundSequence=1",
+      "/api/v1/runs/run-http/events/event-http-0"
+    ]) {
+      expect((await fetch(`${handle.origin}${path}`, { headers })).status, path).toBe(200);
+    }
+
+    const afterCounts = lifecycleCounts(fixture.repository);
+    const afterStorage = await snapshotDataRoot(fixture.dataRoot);
+    expect(withAllowedShmCoordination(afterStorage))
+      .toEqual(withAllowedShmCoordination(beforeStorage));
+    expect(afterCounts).toEqual(beforeCounts);
+    const beforeShm = beforeStorage.find(({ path }) => path === "agentlens.sqlite-shm");
+    const afterShm = afterStorage.find(({ path }) => path === "agentlens.sqlite-shm");
+    expect(beforeShm).toBeDefined();
+    expect(afterShm).toMatchObject({
+      type: "file",
+      uid: beforeShm?.uid,
+      gid: beforeShm?.gid,
+      mode: beforeShm?.mode,
+      inode: beforeShm?.inode,
+      size: beforeShm?.size
+    });
   });
 
   it("strictly rejects unknown, duplicate, oversized, and mutually exclusive query values", async () => {
@@ -239,6 +372,50 @@ describe("authenticated read API", () => {
       schemaVersion: 1,
       error: { code: "invalid_cursor", message: "Cursor is invalid.", retryable: false }
     });
+  });
+
+  it("serves a supported future-status wrapper without leaking its raw spelling", async () => {
+    const bearer = Buffer.alloc(32, 8);
+    const rawStatus = "Future Status / RAW_SENTINEL";
+    const projected = projectEventDetailV1({
+      ...trace("run-http", "future-status", 2),
+      status: rawStatus as never
+    }, "standard");
+    const queries = {
+      listRuns: async () => { throw new Error("not used"); },
+      getRun: async () => { throw new Error("not used"); },
+      getEvents: async () => { throw new Error("not used"); },
+      getEvent: async () => projected
+    } satisfies RunQueryService;
+    const server = createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("server address missing");
+    const origin = `http://127.0.0.1:${address.port}`;
+    const router = createAgentLensRouter({
+      origin,
+      expectedHost: new URL(origin).host,
+      bearer,
+      bootstrapCode: "bootstrap",
+      staticAssets: { entryUrl: "/assets/fixture.js", read: async () => null },
+      health: () => ({ schemaVersion: 1, ready: true, readModel: "ready" }),
+      runQueries: queries
+    });
+    server.on("request", (request, response) => { void router(request, response); });
+    try {
+      const response = await fetch(`${origin}/api/v1/runs/run-http/events/future-status`, {
+        headers: { Authorization: `Bearer ${bearer.toString("base64url")}` }
+      });
+      expect(response.status).toBe(200);
+      const responseBody = eventDetailV1Schema.parse(await body(response));
+      expect(responseBody.status).toEqual({
+        state: "unsupported",
+        safeToken: "future_status_raw_sentinel"
+      });
+      expect(JSON.stringify(responseBody)).not.toContain(rawStatus);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("maps temporary active snapshot failures to a sanitized retryable 503", async () => {

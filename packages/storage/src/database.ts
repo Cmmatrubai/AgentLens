@@ -2,7 +2,7 @@ import { lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
-import { registerConnection, releaseConnection } from "./databaseInternal.js";
+import { connectionFor, registerConnection, releaseConnection } from "./databaseInternal.js";
 
 const MIGRATIONS = [
   {
@@ -415,4 +415,30 @@ export function openDatabaseForServerRead(path: string): ServerReadDatabase {
   });
   registerConnection(database, connection);
   return Object.freeze({ database, mode: "active_wal" });
+}
+
+export async function withServerReadSnapshot<T>(
+  database: AgentLensDatabase,
+  operation: () => Promise<T> | T
+): Promise<T> {
+  const connection = connectionFor(database);
+  connection.exec("BEGIN");
+  let operationError: unknown;
+  let result: T | undefined;
+  try {
+    // BEGIN is deferred. This read pins the snapshot before application code
+    // can yield or a later repository statement observes a different commit.
+    connection.prepare("SELECT rootpage FROM sqlite_schema ORDER BY name LIMIT 1").get();
+    result = await operation();
+  } catch (error) {
+    operationError = error;
+  }
+
+  try {
+    if (connection.inTransaction) connection.exec("ROLLBACK");
+  } catch (rollbackError) {
+    if (operationError === undefined) throw rollbackError;
+  }
+  if (operationError !== undefined) throw operationError;
+  return result as T;
 }

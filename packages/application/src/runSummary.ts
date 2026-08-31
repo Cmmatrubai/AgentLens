@@ -1,13 +1,20 @@
 import { TextDecoder } from "node:util";
 
-import type { AdapterCapabilities, NativeSourceV1 } from "@agentlens/core";
+import type { AdapterCapabilities, NativeSourceV1, TraceEventV1 } from "@agentlens/core";
 import {
   summarizeRun,
   type CurrentAssessmentProjection,
   type RunSummary,
   type RunSummaryGitEvidenceInput
 } from "@agentlens/derivations";
-import type { CurrentAssessment, RunDetail, RunRepository } from "@agentlens/storage";
+import type {
+  CurrentAssessment,
+  RunDetail,
+  RunGitEvidence,
+  RunRecord,
+  RunRepository,
+  StoredArtifact
+} from "@agentlens/storage";
 
 import { readValidatedArtifact } from "./artifacts/readValidatedArtifact.js";
 
@@ -29,8 +36,7 @@ function currentAssessment(
   };
 }
 
-function gitEvidence(detail: RunDetail): RunSummaryGitEvidenceInput | null {
-  const git = detail.gitEvidence;
+function gitEvidence(git: RunGitEvidence | null): RunSummaryGitEvidenceInput | null {
   if (git === null) return null;
   return {
     trackedFinalDiff: { ...git.trackedFinalDiff },
@@ -65,13 +71,14 @@ function untrackedEntry(value: unknown): boolean {
 }
 
 async function validatedUntrackedFileCount(
-  detail: RunDetail,
+  runId: string,
+  gitEvidence: RunGitEvidence | null,
+  artifact: StoredArtifact | null,
   artifactRoot: string
 ): Promise<{ count: number; artifactId: string } | null> {
-  const reference = detail.gitEvidence?.untrackedMetadata;
+  const reference = gitEvidence?.untrackedMetadata;
   if (reference?.state !== "artifact") return null;
-  const artifact = detail.artifacts.find(({ id }) => id === reference.artifactId);
-  if (!artifact || artifact.runId !== detail.run.id) {
+  if (!artifact || artifact.id !== reference.artifactId || artifact.runId !== runId) {
     throw new Error("Untracked metadata artifact is unavailable.");
   }
   const read = await readValidatedArtifact(artifact, artifactRoot, {
@@ -86,6 +93,45 @@ async function validatedUntrackedFileCount(
   return { count: value.length, artifactId: artifact.id };
 }
 
+export async function projectRunSummaryFromEvidence(input: {
+  readonly run: RunRecord;
+  readonly events: readonly TraceEventV1[];
+  readonly gitEvidence: RunGitEvidence | null;
+  readonly currentAssessment: CurrentAssessment;
+  readonly untrackedMetadataArtifact: StoredArtifact | null;
+  readonly artifactRoot: string;
+  readonly providerCapabilities: ProviderCapabilitiesLookup;
+}): Promise<RunSummary> {
+  const {
+    run,
+    events,
+    gitEvidence: storedGitEvidence,
+    currentAssessment: storedAssessment,
+    untrackedMetadataArtifact,
+    artifactRoot,
+    providerCapabilities
+  } = input;
+  return summarizeRun({
+    run: {
+      id: run.id,
+      provider: run.provider,
+      capturePolicy: run.capturePolicy,
+      startedAt: run.startedAt,
+      endedAt: run.endedAt
+    },
+    events,
+    gitEvidence: gitEvidence(storedGitEvidence),
+    validatedUntrackedFileCount: await validatedUntrackedFileCount(
+      run.id,
+      storedGitEvidence,
+      untrackedMetadataArtifact,
+      artifactRoot
+    ),
+    currentAssessment: currentAssessment(storedAssessment),
+    providerCapabilities: providerCapabilities.forProvider(run.provider)
+  });
+}
+
 export async function projectRunSummary(input: {
   readonly detail: RunDetail;
   readonly repository: Pick<RunRepository, "getCurrentAssessment">;
@@ -93,18 +139,16 @@ export async function projectRunSummary(input: {
   readonly providerCapabilities: ProviderCapabilitiesLookup;
 }): Promise<RunSummary> {
   const { detail, repository, artifactRoot, providerCapabilities } = input;
-  return summarizeRun({
-    run: {
-      id: detail.run.id,
-      provider: detail.run.provider,
-      capturePolicy: detail.run.capturePolicy,
-      startedAt: detail.run.startedAt,
-      endedAt: detail.run.endedAt
-    },
+  const untrackedReference = detail.gitEvidence?.untrackedMetadata;
+  return projectRunSummaryFromEvidence({
+    run: detail.run,
     events: detail.events,
-    gitEvidence: gitEvidence(detail),
-    validatedUntrackedFileCount: await validatedUntrackedFileCount(detail, artifactRoot),
-    currentAssessment: currentAssessment(repository.getCurrentAssessment(detail.run.id)),
-    providerCapabilities: providerCapabilities.forProvider(detail.run.provider)
+    gitEvidence: detail.gitEvidence,
+    currentAssessment: repository.getCurrentAssessment(detail.run.id),
+    untrackedMetadataArtifact: untrackedReference?.state === "artifact"
+      ? detail.artifacts.find(({ id }) => id === untrackedReference.artifactId) ?? null
+      : null,
+    artifactRoot,
+    providerCapabilities
   });
 }

@@ -308,6 +308,28 @@ export interface RunSummaryBatchRecord {
   readonly currentAssessment: CurrentAssessment;
 }
 
+export interface RunEventAnchorRecord {
+  readonly eventId: string;
+  readonly sequence: number;
+}
+
+export interface RunEventAnchorsRecord {
+  readonly firstFailure: RunEventAnchorRecord | null;
+  readonly recorderRecovery: RunEventAnchorRecord | null;
+  readonly latestLikelyTest: RunEventAnchorRecord | null;
+  readonly finalGitEvidence: RunEventAnchorRecord | null;
+  readonly latestEvent: RunEventAnchorRecord | null;
+}
+
+export interface RunReadModelRecord {
+  readonly run: RunListRecord;
+  readonly ownership: RecorderOwnership | null;
+  readonly summary: RunSummaryBatchRecord;
+  readonly eventCount: number;
+  readonly anchors: RunEventAnchorsRecord;
+  readonly untrackedMetadataArtifact: StoredArtifact | null;
+}
+
 export class Task7StorageCapabilityError extends Error {
   readonly code = "task7_storage_capability_unavailable";
 
@@ -1970,6 +1992,20 @@ export class RunRepository {
     return rows.map(runListFromRow);
   }
 
+  getRun(runId: string): RunListRecord | null {
+    validateNonEmptyString(runId, "Run ID");
+    const row = this.#connection.prepare(`
+      SELECT runs.*, git_evidence.head_changed AS git_head_changed,
+        git_evidence.branch_changed AS git_branch_changed,
+        run_ownership.condition AS ownership_condition
+      FROM runs
+      LEFT JOIN git_evidence ON git_evidence.run_id = runs.id
+      LEFT JOIN run_ownership ON run_ownership.run_id = runs.id
+      WHERE runs.id = ?
+    `).get(runId) as RunListRow | undefined;
+    return row === undefined ? null : runListFromRow(row);
+  }
+
   listRunPage(input: ListRunPageInput): RunPageRecord {
     validateBoundedLimit(input?.limit, 100, "Run page");
     const conditions: string[] = [];
@@ -2102,6 +2138,51 @@ export class RunRepository {
     })] : []);
   }
 
+  getRunReadModel(runId: string): RunReadModelRecord | null {
+    validateNonEmptyString(runId, "Run ID");
+    const run = this.getRun(runId);
+    if (run === null) return null;
+    const summary = this.getRunSummaryBatch([runId])[0];
+    if (summary === undefined) throw new Error("Run summary evidence is unavailable.");
+    const count = this.#connection.prepare(`
+      SELECT COUNT(*) AS event_count FROM events WHERE run_id = ?
+    `).get(runId) as { event_count: number };
+    const anchor = (
+      condition: string,
+      ordering: "ASC" | "DESC"
+    ): RunEventAnchorRecord | null => {
+      const row = this.#connection.prepare(`
+        SELECT id AS event_id, sequence
+        FROM events
+        WHERE run_id = ? AND ${condition}
+        ORDER BY sequence ${ordering}, id ${ordering}
+        LIMIT 1
+      `).get(runId) as { event_id: string; sequence: number } | undefined;
+      return row === undefined ? null : Object.freeze({
+        eventId: row.event_id,
+        sequence: row.sequence
+      });
+    };
+    const untrackedReference = summary.gitEvidence?.untrackedMetadata;
+    const untrackedMetadataArtifact = untrackedReference?.state === "artifact"
+      ? this.getArtifactForRun(runId, untrackedReference.artifactId)
+      : null;
+    return Object.freeze({
+      run,
+      ownership: this.getOwnership(runId),
+      summary,
+      eventCount: count.event_count,
+      anchors: Object.freeze({
+        firstFailure: anchor("status = 'failed'", "ASC"),
+        recorderRecovery: anchor("kind = 'recorder.recovery'", "ASC"),
+        latestLikelyTest: anchor("kind = 'test.result'", "DESC"),
+        finalGitEvidence: anchor("kind = 'git.final_evidence'", "DESC"),
+        latestEvent: anchor("1 = 1", "DESC")
+      }),
+      untrackedMetadataArtifact
+    });
+  }
+
   getEventWindow(runId: string, input: EventWindowInput): EventWindowRecord {
     validateNonEmptyString(runId, "Run ID");
     validateBoundedLimit(input?.limit, 250, "Event window");
@@ -2228,6 +2309,21 @@ export class RunRepository {
     const row = this.#connection.prepare("SELECT * FROM run_ownership WHERE run_id = ?")
       .get(runId) as OwnershipRow | undefined;
     return row ? ownershipFromRow(row) : null;
+  }
+
+  getOwnershipBatch(runIds: readonly string[]): readonly RecorderOwnership[] {
+    if (!Array.isArray(runIds) || runIds.length > 100) {
+      throw new Error("Ownership batch accepts at most 100 run IDs.");
+    }
+    for (const id of runIds) validateNonEmptyString(id, "Ownership batch run ID");
+    const uniqueIds = [...new Set(runIds)];
+    if (uniqueIds.length === 0) return [];
+    const rows = this.#connection.prepare(`
+      SELECT * FROM run_ownership
+      WHERE run_id IN (${placeholders(uniqueIds.length)})
+      ORDER BY run_id
+    `).all(...uniqueIds) as OwnershipRow[];
+    return rows.map(ownershipFromRow);
   }
 
   listNonterminalOwnership(): RecorderOwnership[] {

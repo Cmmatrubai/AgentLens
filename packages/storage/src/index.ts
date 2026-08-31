@@ -3,7 +3,8 @@ export {
   openDatabaseForServerRead,
   openDatabaseReadOnly,
   ReadOnlyDatabaseError,
-  ServerReadDatabaseError
+  ServerReadDatabaseError,
+  withServerReadSnapshot
 } from "./database.js";
 export type {
   AgentLensDatabase,

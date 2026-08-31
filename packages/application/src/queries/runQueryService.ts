@@ -13,10 +13,10 @@ import {
   RunRepository,
   ServerReadDatabaseError,
   openDatabaseForServerRead,
+  withServerReadSnapshot,
   type CurrentAssessment,
   type EventWindowRecord,
   type ListRunPageInput,
-  type RunDetail,
   type RunListRecord,
   type RunSummaryBatchRecord
 } from "@agentlens/storage";
@@ -30,8 +30,10 @@ import {
 import type { SourceRefProjector } from "../api/sourceRefs.js";
 import { diagnoseOwnership } from "../ownership.js";
 import type { ProcessIdentityInspector } from "../processIdentity.js";
-import { projectRunSummary, type ProviderCapabilitiesLookup } from "../runSummary.js";
-import { projectRunAnchors } from "./anchors.js";
+import {
+  projectRunSummaryFromEvidence,
+  type ProviderCapabilitiesLookup
+} from "../runSummary.js";
 
 export interface RunListQueryV1 {
   readonly limit: number;
@@ -126,15 +128,6 @@ function summaryFromBatch(
   });
 }
 
-function listRecord(detail: RunDetail): RunListRecord {
-  return {
-    ...detail.run,
-    headChanged: detail.gitEvidence?.headChanged ?? null,
-    branchChanged: detail.gitEvidence?.branchChanged ?? null,
-    ownershipCondition: detail.ownership?.condition ?? null
-  };
-}
-
 function runFilters(input: RunListQueryV1): RunCursorFilters {
   return {
     ...(input.status === undefined ? {} : { status: input.status }),
@@ -158,6 +151,9 @@ function boundedCursorWindow(
     sequence: boundarySequence,
     limit
   });
+  if (raw.latestCommittedSequence === null || raw.latestCommittedSequence < snapshot) {
+    throw new RunQueryServiceError("invalid_cursor");
+  }
   const events = raw.events.filter(({ sequence }) => sequence <= snapshot);
   const first = events[0];
   const last = events.at(-1);
@@ -187,7 +183,7 @@ export function createRunQueryService(input: CreateRunQueryServiceInput): RunQue
     try {
       opened = openDatabaseForServerRead(input.databasePath);
       const repository = new RunRepository(opened.database, { artifactRoot: input.artifactRoot });
-      return await operation(repository);
+      return await withServerReadSnapshot(opened.database, () => operation(repository));
     } catch (error) {
       if (error instanceof ServerReadDatabaseError) {
         throw new RunQueryServiceError("active_snapshot_unavailable");
@@ -220,12 +216,16 @@ export function createRunQueryService(input: CreateRunQueryServiceInput): RunQue
         });
         const batches = repository.getRunSummaryBatch(page.items.map(({ id }) => id));
         const byRun = new Map(batches.map((batch) => [batch.runId, batch]));
+        const ownershipByRun = new Map(
+          repository.getOwnershipBatch(page.items.map(({ id }) => id))
+            .map((ownership) => [ownership.runId, ownership])
+        );
         const items = await Promise.all(page.items.map(async (run) => {
           const batch = byRun.get(run.id);
           if (batch === undefined) throw new Error("Run summary batch omitted a listed run.");
           const ownership = await diagnoseOwnership(
             run,
-            repository.getOwnership(run.id),
+            ownershipByRun.get(run.id) ?? null,
             input.processIdentityInspector
           );
           return projectRunListItemV1({
@@ -249,26 +249,27 @@ export function createRunQueryService(input: CreateRunQueryServiceInput): RunQue
     async getRun(runId: string): Promise<RunDetailV1 | null> {
       return read(async (repository) => {
         if (!validId(runId)) throw new RunQueryServiceError("invalid_request");
-        const ownershipRecord = repository.getOwnership(runId);
-        if (ownershipRecord === null) return null;
-        const detail = repository.getRunDetail(runId);
-        const summary = await projectRunSummary({
-          detail,
-          repository,
+        const model = repository.getRunReadModel(runId);
+        if (model === null) return null;
+        const summary = await projectRunSummaryFromEvidence({
+          run: model.run,
+          events: model.summary.summaryEvents,
+          gitEvidence: model.summary.gitEvidence,
+          currentAssessment: model.summary.currentAssessment,
+          untrackedMetadataArtifact: model.untrackedMetadataArtifact,
           artifactRoot: input.artifactRoot,
           providerCapabilities: input.providerCapabilities
         });
-        const run = listRecord(detail);
         const ownership = await diagnoseOwnership(
-          detail.run,
-          detail.ownership,
+          model.run,
+          model.ownership,
           input.processIdentityInspector
         );
-        const projected = projectRunListItemV1({ run, summary, ownership });
+        const projected = projectRunListItemV1({ run: model.run, summary, ownership });
         return runDetailV1Schema.parse({
           ...projected,
-          eventCount: detail.events.length,
-          anchors: projectRunAnchors(detail.events)
+          eventCount: model.eventCount,
+          anchors: model.anchors
         });
       });
     },
@@ -281,10 +282,10 @@ export function createRunQueryService(input: CreateRunQueryServiceInput): RunQue
         const selectorCount = [query.cursor, query.afterSequence, query.aroundSequence]
           .filter((value) => value !== undefined).length;
         if (selectorCount > 1) throw new RunQueryServiceError("invalid_request");
-        if (repository.getOwnership(runId) === null) {
+        const run = repository.getRun(runId);
+        if (run === null) {
           throw new RunQueryServiceError("run_not_found");
         }
-        const detail = repository.getRunDetail(runId);
         let window: EventWindowRecord;
         let mode: "head" | "tail" | "after" | "around" | "cursor";
         if (query.cursor !== undefined) {
@@ -320,7 +321,7 @@ export function createRunQueryService(input: CreateRunQueryServiceInput): RunQue
           });
           mode = "around";
         } else {
-          const active = detail.run.status === "starting" || detail.run.status === "running";
+          const active = run.status === "starting" || run.status === "running";
           window = repository.getEventWindow(runId, {
             mode: active ? "tail" : "head",
             limit: query.limit
@@ -332,7 +333,7 @@ export function createRunQueryService(input: CreateRunQueryServiceInput): RunQue
           mode,
           sourceRefs: input.sourceRefProjector,
           cursors: input.cursorCodec,
-          capturePolicy: detail.run.capturePolicy
+          capturePolicy: run.capturePolicy
         });
       });
     },
@@ -342,12 +343,12 @@ export function createRunQueryService(input: CreateRunQueryServiceInput): RunQue
         if (!validId(runId) || !validId(eventId)) {
           throw new RunQueryServiceError("invalid_request");
         }
-        if (repository.getOwnership(runId) === null) return null;
-        const detail = repository.getRunDetail(runId);
+        const run = repository.getRun(runId);
+        if (run === null) return null;
         const event = repository.getEvent(runId, eventId);
         return event === null
           ? null
-          : eventDetailV1Schema.parse(projectEventDetailV1(event, detail.run.capturePolicy));
+          : eventDetailV1Schema.parse(projectEventDetailV1(event, run.capturePolicy));
       });
     }
   });

@@ -22,7 +22,8 @@ import Database from "better-sqlite3";
 import {
   openDatabase,
   openDatabaseForServerRead,
-  openDatabaseReadOnly
+  openDatabaseReadOnly,
+  withServerReadSnapshot
 } from "../src/index.js";
 import { connectionFor } from "../src/databaseInternal.js";
 import { RunRepository } from "../src/runRepository.js";
@@ -550,6 +551,31 @@ describe("openDatabaseReadOnly", () => {
 });
 
 describe("openDatabaseForServerRead", () => {
+  it("rolls back a server snapshot after both success and failure", async () => {
+    const path = temporaryDatabasePath();
+    const writable = openDatabase(path);
+    new RunRepository(writable, {
+      artifactRoot: join(dirname(path), "artifacts", "sha256")
+    }).createRun(validRun("snapshot-rollback-run"), validOwnership());
+    writable.close();
+    const opened = openDatabaseForServerRead(path);
+    try {
+      await expect(withServerReadSnapshot(opened.database, () =>
+        new RunRepository(opened.database, {
+          artifactRoot: join(dirname(path), "artifacts", "sha256")
+        }).getRun("snapshot-rollback-run")?.id
+      )).resolves.toBe("snapshot-rollback-run");
+      await expect(withServerReadSnapshot(opened.database, () => {
+        throw new Error("snapshot operation failed");
+      })).rejects.toThrow("snapshot operation failed");
+      await expect(withServerReadSnapshot(opened.database, () => "reusable"))
+        .resolves.toBe("reusable");
+      expect(connectionFor(opened.database).inTransaction).toBe(false);
+    } finally {
+      opened.database.close();
+    }
+  });
+
   it("uses the immutable path when the WAL is genuinely absent", () => {
     const path = temporaryDatabasePath();
     const writable = openDatabase(path);
