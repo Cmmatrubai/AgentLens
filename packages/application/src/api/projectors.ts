@@ -2,6 +2,7 @@ import {
   currentAssessmentV1Schema,
   eventDetailV1Schema,
   eventStatusV1Schema,
+  normalizedContentV1Schema,
   runListItemV1Schema,
   runSummaryV1Schema,
   runStatusV1Schema,
@@ -11,6 +12,7 @@ import {
   type EventDetailV1,
   type EventStatusV1,
   type EventStatusFieldV1,
+  type NormalizedContentV1,
   type PresentationClassV1,
   type ProviderIdV1,
   type ProviderFieldV1,
@@ -21,7 +23,7 @@ import {
   type TrajectoryEventV1,
   type TrajectoryPageV1
 } from "@agentlens/api-contract";
-import type { TraceEventV1 } from "@agentlens/core";
+import type { CapturePolicy, TraceEventV1 } from "@agentlens/core";
 import type {
   HumanAssessmentSummary,
   RunSummary,
@@ -143,13 +145,209 @@ function payloadRecord(event: TraceEventV1): Record<string, unknown> | null {
     : null;
 }
 
-function contentAvailability(event: TraceEventV1) {
-  return event.normalizedPayload === undefined
-    ? { state: "unavailable", reason: "not_captured" } as const
-    : { state: "available" } as const;
+function normalizedContentCandidate(event: TraceEventV1): NormalizedContentV1 | null {
+  const payload = payloadRecord(event);
+  if (payload === null) return null;
+  const presentationClass = presentationClassForEvent(event.kind);
+  let candidate: unknown;
+  switch (presentationClass) {
+    case "message": {
+      if (typeof payload.text !== "string") return null;
+      const role = event.kind === "message.agent" ? "agent" :
+        event.kind === "message.user" ? "user" :
+          event.kind === "message.system" ? "system" : "unknown";
+      candidate = { kind: "message", role, text: payload.text };
+      break;
+    }
+    case "reasoning":
+      if (typeof payload.text !== "string") return null;
+      candidate = { kind: "reasoning", text: payload.text };
+      break;
+    case "command": {
+      if (typeof payload.command !== "string") return null;
+      const rawExitCode = payload.exitCode;
+      if (!(rawExitCode === undefined || rawExitCode === null ||
+          (typeof rawExitCode === "number" && Number.isInteger(rawExitCode)))) return null;
+      candidate = {
+        kind: "command",
+        command: payload.command,
+        exitCode: rawExitCode === undefined ? null : rawExitCode
+      };
+      break;
+    }
+    case "file_change": {
+      if (!Array.isArray(payload.changes)) return null;
+      const changes: Array<{ path: string; kind: "add" | "modify" | "delete" | "rename" | "unknown" }> = [];
+      for (const change of payload.changes) {
+        if (change === null || typeof change !== "object" || Array.isArray(change)) return null;
+        const record = change as Record<string, unknown>;
+        if (typeof record.path !== "string") return null;
+        const kind = record.kind === "add" || record.kind === "modify" ||
+          record.kind === "delete" || record.kind === "rename"
+          ? record.kind
+          : "unknown";
+        changes.push({ path: record.path, kind });
+      }
+      candidate = { kind: "file_change", changes };
+      break;
+    }
+    case "tool": {
+      let name: string;
+      let input: string | undefined;
+      let result: string | undefined;
+      if (event.source.itemType === "web_search") {
+        name = "web_search";
+        if (typeof payload.query !== "string") return null;
+        input = payload.query;
+      } else {
+        if (typeof payload.tool !== "string") return null;
+        name = payload.tool;
+        if (Object.prototype.hasOwnProperty.call(payload, "arguments")) {
+          if (typeof payload.arguments !== "string") return null;
+          input = payload.arguments;
+        }
+        if (Object.prototype.hasOwnProperty.call(payload, "result")) {
+          if (typeof payload.result !== "string") return null;
+          result = payload.result;
+        } else if (Object.prototype.hasOwnProperty.call(payload, "error")) {
+          if (typeof payload.error !== "string") return null;
+          result = payload.error;
+        }
+      }
+      candidate = {
+        kind: "tool",
+        name,
+        ...(input === undefined ? {} : { input }),
+        ...(result === undefined ? {} : { result })
+      };
+      break;
+    }
+    case "plan": {
+      if (!Array.isArray(payload.items)) return null;
+      const items: Array<{
+        text: string;
+        status: "pending" | "in_progress" | "completed" | "failed" | "unknown";
+      }> = [];
+      for (const item of payload.items) {
+        if (item === null || typeof item !== "object" || Array.isArray(item)) return null;
+        const record = item as Record<string, unknown>;
+        if (typeof record.text !== "string") return null;
+        const status = record.status === "pending" || record.status === "in_progress" ||
+          record.status === "completed" || record.status === "failed"
+          ? record.status
+          : "unknown";
+        items.push({ text: record.text, status });
+      }
+      candidate = { kind: "plan", items };
+      break;
+    }
+    case "recorder": {
+      const message = typeof payload.message === "string" ? payload.message :
+        typeof payload.reason === "string" ? payload.reason : null;
+      if (message === null) return null;
+      candidate = {
+        kind: "recorder",
+        diagnosticClass: safeKind(event.kind.slice("recorder.".length) || "recorder"),
+        message
+      };
+      break;
+    }
+    case "test": {
+      const families = new Set([
+        "pytest", "jest", "vitest", "npm", "pnpm", "yarn", "cargo", "go", "maven", "gradle"
+      ]);
+      if (typeof payload.family !== "string" || !families.has(payload.family) ||
+          (payload.outcome !== "passed" && payload.outcome !== "failed" && payload.outcome !== "unknown")) {
+        return null;
+      }
+      candidate = { kind: "test", family: payload.family, outcome: payload.outcome };
+      break;
+    }
+    case "assessment": {
+      const verdict = payload.verdict;
+      const taskCompleted = payload.taskCompleted;
+      if (verdict !== "unreviewed" && verdict !== "success" && verdict !== "partial" && verdict !== "failure") {
+        return null;
+      }
+      if (taskCompleted !== "yes" && taskCompleted !== "no" && taskCompleted !== "uncertain") return null;
+      const note = typeof payload.note === "string" ? payload.note : undefined;
+      candidate = {
+        kind: "assessment",
+        verdict,
+        taskCompleted,
+        ...(note === undefined ? {} : { note })
+      };
+      break;
+    }
+    case "error": {
+      const message = typeof payload.message === "string" ? payload.message :
+        typeof payload.error === "string" ? payload.error : null;
+      if (message === null) return null;
+      candidate = { kind: "error", errorClass: "provider_error", message };
+      break;
+    }
+    case "lifecycle":
+    case "git":
+    case "recorder_recovery":
+    case "unknown":
+      return null;
+    default:
+      return assertNever(presentationClass);
+  }
+  const parsed = normalizedContentV1Schema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
 }
 
-function nativePayloadAvailability(event: TraceEventV1) {
+export function projectNormalizedContentV1(
+  event: TraceEventV1,
+  capturePolicy: CapturePolicy
+): NormalizedContentV1 | null {
+  if (capturePolicy !== "standard") return null;
+  return normalizedContentCandidate(event);
+}
+
+function normalizedContentAvailability(event: TraceEventV1, capturePolicy: CapturePolicy) {
+  const candidate = normalizedContentCandidate(event);
+  if (candidate === null) return { state: "unavailable", reason: "not_captured" } as const;
+  return capturePolicy === "standard"
+    ? { state: "available" } as const
+    : { state: "unavailable", reason: "capture_policy" } as const;
+}
+
+function commandOutputCandidate(event: TraceEventV1): NormalizedContentV1 | null {
+  if (presentationClassForEvent(event.kind) !== "command") return null;
+  const payload = payloadRecord(event);
+  if (payload === null || typeof payload.aggregatedOutput !== "string") return null;
+  const parsed = normalizedContentV1Schema.safeParse({
+    kind: "command_output",
+    output: payload.aggregatedOutput
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+export function projectCommandOutputContentV1(
+  event: TraceEventV1,
+  capturePolicy: CapturePolicy
+): NormalizedContentV1 | null {
+  if (capturePolicy !== "standard") return null;
+  return commandOutputCandidate(event);
+}
+
+function commandOutputAvailability(event: TraceEventV1, capturePolicy: CapturePolicy) {
+  const candidate = commandOutputCandidate(event);
+  if (candidate === null) return { state: "unavailable", reason: "not_captured" } as const;
+  return capturePolicy === "standard"
+    ? { state: "available" } as const
+    : { state: "unavailable", reason: "capture_policy" } as const;
+}
+
+function nativePayloadAvailability(event: TraceEventV1, capturePolicy: CapturePolicy) {
+  if (event.provenance !== "observed") {
+    return { state: "unavailable", reason: "not_captured" } as const;
+  }
+  if (capturePolicy !== "standard") {
+    return { state: "unavailable", reason: "capture_policy" } as const;
+  }
   const native = event.nativePayload;
   if (native === undefined) return { state: "unavailable", reason: "not_captured" } as const;
   switch (native.storage) {
@@ -186,7 +384,8 @@ function relationships(event: TraceEventV1) {
 
 export function projectTrajectoryEventV1(
   event: TraceEventV1,
-  sourceRefs: SourceRefProjector
+  sourceRefs: SourceRefProjector,
+  capturePolicy: CapturePolicy
 ): TrajectoryEventV1 {
   const presentationClass = presentationClassForEvent(event.kind);
   return trajectoryEventV1Schema.parse({
@@ -206,14 +405,23 @@ export function projectTrajectoryEventV1(
     source: sourceRefs.project(event.source),
     relationships: relationships(event),
     derivation: derivation(event),
-    nativePayload: nativePayloadAvailability(event),
-    lifecycleGroupKey: presentationClass === "lifecycle"
-      ? sourceRefs.lifecycleGroup(event.source)
-      : null,
+    nativePayload: nativePayloadAvailability(event, capturePolicy),
+    lifecycleGroupKey: lifecycleGroupKey(event, sourceRefs),
     detail: presentationClass === "unknown"
       ? { state: "unavailable", reason: "unsupported_kind" }
       : { state: "available" }
   });
+}
+
+function lifecycleGroupKey(event: TraceEventV1, sourceRefs: SourceRefProjector): string | null {
+  if (event.provenance !== "observed") return null;
+  const { eventType, itemId, toolId, turnId, threadId } = event.source;
+  const hasItemIdentity = itemId !== undefined || toolId !== undefined;
+  const hasTurnIdentity = turnId !== undefined && eventType?.startsWith("turn.") === true;
+  const hasThreadIdentity = threadId !== undefined && eventType?.startsWith("thread.") === true;
+  return hasItemIdentity || hasTurnIdentity || hasThreadIdentity
+    ? sourceRefs.lifecycleGroup(event.source)
+    : null;
 }
 
 function detailBase(event: TraceEventV1) {
@@ -240,8 +448,6 @@ function nonnegativeCount(value: unknown): number {
 function testResult(event: TraceEventV1): "passed" | "failed" | "unknown" {
   const outcome = payloadRecord(event)?.outcome;
   if (outcome === "passed" || outcome === "failed" || outcome === "unknown") return outcome;
-  if (event.status === "completed") return "passed";
-  if (event.status === "failed") return "failed";
   return "unknown";
 }
 
@@ -255,10 +461,13 @@ function assessmentNote(value: unknown) {
   return { state: "absent" } as const;
 }
 
-export function projectEventDetailV1(event: TraceEventV1): EventDetailV1 {
+export function projectEventDetailV1(
+  event: TraceEventV1,
+  capturePolicy: CapturePolicy
+): EventDetailV1 {
   const base = detailBase(event);
   const payload = payloadRecord(event);
-  const content = contentAvailability(event);
+  const content = normalizedContentAvailability(event, capturePolicy);
   const presentationClass = presentationClassForEvent(event.kind);
   let candidate: unknown;
   switch (presentationClass) {
@@ -281,9 +490,7 @@ export function projectEventDetailV1(event: TraceEventV1): EventDetailV1 {
         presentationClass,
         lifecycle: eventStatusV1Schema.safeParse(event.status).success ? event.status : "unknown",
         exitCode: integer(payload?.exitCode),
-        output: payload && Object.prototype.hasOwnProperty.call(payload, "aggregatedOutput")
-          ? { state: "available" }
-          : { state: "unavailable", reason: "not_captured" },
+        output: commandOutputAvailability(event, capturePolicy),
         content
       };
       break;
@@ -642,10 +849,14 @@ export function projectTrajectoryPageV1(
     readonly mode: "head" | "tail" | "after" | "around" | "cursor";
     readonly sourceRefs: SourceRefProjector;
     readonly cursors: CursorCodec;
+    readonly capturePolicy: CapturePolicy;
   }
 ): TrajectoryPageV1 {
-  const items = window.events.map((event) => projectTrajectoryEventV1(event, context.sourceRefs));
   const snapshot = window.latestCommittedSequence;
+  validateEventWindow(window, context.runId);
+  const items = window.events.map((event) =>
+    projectTrajectoryEventV1(event, context.sourceRefs, context.capturePolicy)
+  );
   if (items.length === 0) {
     const earlierCursor = window.hasEarlier && snapshot !== null
       ? context.cursors.encodeEvent({
@@ -704,4 +915,23 @@ export function projectTrajectoryPageV1(
         : null
     }
   });
+}
+
+function validateEventWindow(window: EventWindowRecord, runId: string): void {
+  const snapshot = window.latestCommittedSequence;
+  if (!(snapshot === null || (Number.isSafeInteger(snapshot) && snapshot >= 0))) {
+    throw new Error("Event window snapshot is invalid.");
+  }
+  const eventIds = new Set<string>();
+  let previousSequence: number | null = null;
+  for (const event of window.events) {
+    if (event.runId !== runId || eventIds.has(event.id) ||
+        !Number.isSafeInteger(event.sequence) || event.sequence < 0 ||
+        (previousSequence !== null && event.sequence <= previousSequence) ||
+        snapshot === null || event.sequence > snapshot) {
+      throw new Error("Event window identity or chronology is invalid.");
+    }
+    eventIds.add(event.id);
+    previousSequence = event.sequence;
+  }
 }

@@ -228,7 +228,8 @@ export function createCursorCodec(cursorKey: Uint8Array = randomBytes(32)): Curs
       return { ok: true, value: { startedAt: payload.startedAt, runId: payload.runId } };
     },
     encodeEvent(input): string {
-      if (!validText(input.runId, 256) || !validInteger(input.boundarySequence) ||
+      if ((input.direction !== "earlier" && input.direction !== "later") ||
+          !validText(input.runId, 256) || !validInteger(input.boundarySequence) ||
           !validInteger(input.latestCommittedSequence) ||
           input.boundarySequence > input.latestCommittedSequence) {
         throw new Error("Event cursor boundary is invalid.");

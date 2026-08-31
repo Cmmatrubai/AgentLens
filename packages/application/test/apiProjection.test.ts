@@ -9,7 +9,9 @@ import {
   createCursorCodec,
   createSourceRefProjector,
   projectCurrentAssessmentV1,
+  projectCommandOutputContentV1,
   projectEventDetailV1,
+  projectNormalizedContentV1,
   projectRunListItemV1,
   projectRunSummaryV1,
   projectTrajectoryEventV1,
@@ -176,6 +178,12 @@ describe("opaque authenticated cursors", () => {
       filters: {},
       boundary: { startedAt: Number.NaN, runId: "run-1" }
     })).toThrow(/cursor/i);
+    expect(() => codec.encodeEvent({
+      runId: "run-1",
+      direction: "sideways" as never,
+      boundarySequence: 4,
+      latestCommittedSequence: 9
+    })).toThrow(/cursor/i);
   });
 });
 
@@ -199,7 +207,7 @@ describe("browser-safe projectors", () => {
         confidence: "high",
         identity: "exact-derivation-identity"
       }
-    }), sourceRefs);
+    }), sourceRefs, "standard");
     expect(projected.relationships).toEqual([
       { type: "derived_from", eventId: "exact-source-event" }
     ]);
@@ -211,12 +219,130 @@ describe("browser-safe projectors", () => {
 
   it("maps only the exact recovery kind to recorder_recovery", () => {
     const sourceRefs = createSourceRefProjector(SOURCE_KEY);
-    expect(projectTrajectoryEventV1(event({ kind: "recorder.recovery" }), sourceRefs)
+    expect(projectTrajectoryEventV1(event({ kind: "recorder.recovery" }), sourceRefs, "standard")
       .presentationClass).toBe("recorder_recovery");
-    expect(projectTrajectoryEventV1(event({ kind: "recorder.process_exit" }), sourceRefs)
+    expect(projectTrajectoryEventV1(event({ kind: "recorder.process_exit" }), sourceRefs, "standard")
       .presentationClass).toBe("recorder");
-    expect(projectTrajectoryEventV1(event({ kind: "recorder.stream_diagnostic" }), sourceRefs)
+    expect(projectTrajectoryEventV1(event({ kind: "recorder.stream_diagnostic" }), sourceRefs, "standard")
       .presentationClass).toBe("recorder");
+  });
+
+  it("reports content available only when a closed normalized projector can serve it", () => {
+    const unavailable = { state: "unavailable", reason: "not_captured" } as const;
+    for (const normalizedPayload of [
+      null,
+      { arbitrary: "value" },
+      { command: undefined, exitCode: 0 },
+      { command: 42, exitCode: 0 }
+    ]) {
+      expect(projectEventDetailV1(event({ normalizedPayload }), "standard"))
+        .toMatchObject({ presentationClass: "command", content: unavailable });
+    }
+
+    for (const aggregatedOutput of [undefined, null, 42, { arbitrary: true }]) {
+      const projected = projectEventDetailV1(event({
+        normalizedPayload: {
+          command: "pnpm test",
+          exitCode: 0,
+          aggregatedOutput
+        }
+      }), "standard");
+      expect(projected).toMatchObject({
+        presentationClass: "command",
+        content: { state: "available" },
+        output: unavailable
+      });
+    }
+
+    expect(projectEventDetailV1(event({
+      normalizedPayload: { command: "pnpm test", exitCode: 0, aggregatedOutput: "passed" }
+    }), "standard")).toMatchObject({
+      content: { state: "available" },
+      output: { state: "available" }
+    });
+    expect(projectNormalizedContentV1(event({ normalizedPayload: { arbitrary: true } }), "standard"))
+      .toBeNull();
+    expect(projectCommandOutputContentV1(event({
+      normalizedPayload: { command: "pnpm test", aggregatedOutput: "passed" }
+    }), "standard")).toEqual({ kind: "command_output", output: "passed" });
+    expect(projectEventDetailV1(event({ kind: "turn.completed" }), "standard"))
+      .toMatchObject({ presentationClass: "lifecycle", content: unavailable });
+    expect(projectEventDetailV1(event({ kind: "command" }), "metadata-only"))
+      .toMatchObject({ content: { state: "unavailable", reason: "capture_policy" } });
+  });
+
+  it("reports native payload availability only for eligible standard observed evidence", () => {
+    const sourceRefs = createSourceRefProjector(SOURCE_KEY);
+    expect(projectTrajectoryEventV1(event(), sourceRefs, "standard").nativePayload)
+      .toEqual({ state: "available", storage: "inline" });
+    expect(projectTrajectoryEventV1(event({
+      provenance: "derived",
+      derivation: {
+        name: "test-command",
+        version: "1",
+        sourceEventIds: ["source-event"]
+      }
+    }), sourceRefs, "standard").nativePayload)
+      .toEqual({ state: "unavailable", reason: "not_captured" });
+    for (const capturePolicy of ["metadata-only", "strict"] as const) {
+      expect(projectTrajectoryEventV1(event(), sourceRefs, capturePolicy).nativePayload)
+        .toEqual({ state: "unavailable", reason: "capture_policy" });
+    }
+  });
+
+  it("groups exact lifecycle siblings across presentation classes only with durable identity", () => {
+    const sourceRefs = createSourceRefProjector(SOURCE_KEY);
+    const started = projectTrajectoryEventV1(event({
+      id: "command-started",
+      status: "in_progress",
+      source: {
+        ...event().source,
+        eventType: "item.started"
+      }
+    }), sourceRefs, "standard");
+    const completed = projectTrajectoryEventV1(event({
+      id: "command-completed",
+      source: {
+        ...event().source,
+        eventType: "item.completed"
+      }
+    }), sourceRefs, "standard");
+    expect(started.presentationClass).toBe("command");
+    expect(started.lifecycleGroupKey).toMatch(/^grp_[a-f0-9]{64}$/);
+    expect(completed.lifecycleGroupKey).toBe(started.lifecycleGroupKey);
+
+    const insufficient = projectTrajectoryEventV1(event({
+      source: {
+        provider: "codex-exec",
+        eventType: "item.started",
+        itemType: "command_execution"
+      }
+    }), sourceRefs, "standard");
+    expect(insufficient.lifecycleGroupKey).toBeNull();
+  });
+
+  it("never infers a passed test result from event completion", () => {
+    const derived = {
+      kind: "test.result",
+      provenance: "derived",
+      relationships: [{ type: "derived_from", eventId: "source-event" }] as const,
+      derivation: {
+        name: "test-command",
+        version: "1",
+        sourceEventIds: ["source-event"],
+        identity: "test-id"
+      }
+    } as const;
+    expect(projectEventDetailV1(event({ ...derived, normalizedPayload: undefined }), "standard"))
+      .toMatchObject({ presentationClass: "test", result: "unknown" });
+    expect(projectEventDetailV1(event({
+      ...derived,
+      normalizedPayload: { family: "vitest", outcome: 42 }
+    }), "standard")).toMatchObject({ presentationClass: "test", result: "unknown" });
+    expect(projectEventDetailV1(event({
+      ...derived,
+      normalizedPayload: { family: "vitest", outcome: "passed" }
+    }), "standard")).toMatchObject({ presentationClass: "test", result: "passed" });
   });
 
   it("projects every frozen presentation class without copying canonical objects", () => {
@@ -237,7 +363,7 @@ describe("browser-safe projectors", () => {
       ["unknown", { kind: "future.kind" }, "unknown"]
     ];
     for (const [label, overrides, expected] of fixtures) {
-      const detail = projectEventDetailV1(event(overrides));
+      const detail = projectEventDetailV1(event(overrides), "standard");
       expect(detail.presentationClass, label).toBe(expected);
     }
   });
@@ -247,7 +373,7 @@ describe("browser-safe projectors", () => {
       kind: "future.kind",
       normalizedPayload: { sentinel: "MUST_NOT_CROSS_HTTP" },
       nativePayload: { storage: "inline", redacted: { sentinel: "NATIVE_MUST_NOT_CROSS_HTTP" } }
-    }));
+    }), "standard");
     expect(projected).toEqual({
       schemaVersion: 1,
       presentationClass: "unknown",
@@ -414,7 +540,8 @@ describe("browser-safe projectors", () => {
       runId: "run-1",
       mode: "around",
       sourceRefs,
-      cursors
+      cursors,
+      capturePolicy: "standard"
     });
     expect(page.window).toMatchObject({
       state: "nonempty",
@@ -432,7 +559,7 @@ describe("browser-safe projectors", () => {
       latestCommittedSequence: 9,
       hasEarlier: true,
       hasLater: false
-    }, { runId: "run-1", mode: "after", sourceRefs, cursors });
+    }, { runId: "run-1", mode: "after", sourceRefs, cursors, capturePolicy: "standard" });
     expect(empty.window).toEqual({
       state: "empty",
       latestCommittedSequence: 9,
@@ -443,18 +570,65 @@ describe("browser-safe projectors", () => {
     });
   });
 
+  it("fails closed on contradictory event-window identity and chronology", () => {
+    const sourceRefs = createSourceRefProjector(SOURCE_KEY);
+    const cursors = createCursorCodec(CURSOR_KEY);
+    const context = {
+      runId: "run-1",
+      mode: "head" as const,
+      sourceRefs,
+      cursors,
+      capturePolicy: "standard" as const
+    };
+    const invalidWindows: EventWindowRecord[] = [
+      {
+        events: [event({ runId: "other-run" })],
+        latestCommittedSequence: 4,
+        hasEarlier: false,
+        hasLater: false
+      },
+      {
+        events: [event({ id: "duplicate", sequence: 3 }), event({ id: "duplicate", sequence: 4 })],
+        latestCommittedSequence: 4,
+        hasEarlier: false,
+        hasLater: false
+      },
+      {
+        events: [event({ id: "first", sequence: 4 }), event({ id: "second", sequence: 4 })],
+        latestCommittedSequence: 4,
+        hasEarlier: false,
+        hasLater: false
+      },
+      {
+        events: [event({ id: "first", sequence: 4 }), event({ id: "second", sequence: 3 })],
+        latestCommittedSequence: 4,
+        hasEarlier: false,
+        hasLater: false
+      },
+      {
+        events: [event({ sequence: 5 })],
+        latestCommittedSequence: 4,
+        hasEarlier: false,
+        hasLater: false
+      }
+    ];
+    for (const window of invalidWindows) {
+      expect(() => projectTrajectoryPageV1(window, context)).toThrow(/window/i);
+    }
+  });
+
   it("serializes no raw IDs, canonical payloads, paths, native content, or key material", () => {
     const sourceRefs = createSourceRefProjector(SOURCE_KEY);
     const cursors = createCursorCodec(CURSOR_KEY);
     const projected = [
-      projectTrajectoryEventV1(event(), sourceRefs),
-      projectEventDetailV1(event()),
+      projectTrajectoryEventV1(event(), sourceRefs, "standard"),
+      projectEventDetailV1(event(), "standard"),
       projectTrajectoryPageV1({
         events: [event()],
         latestCommittedSequence: 4,
         hasEarlier: false,
         hasLater: false
-      }, { runId: "run-1", mode: "head", sourceRefs, cursors })
+      }, { runId: "run-1", mode: "head", sourceRefs, cursors, capturePolicy: "standard" })
     ];
     const serialized = JSON.stringify(projected);
     for (const forbidden of [
