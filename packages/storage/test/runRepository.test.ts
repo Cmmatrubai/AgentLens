@@ -1007,6 +1007,40 @@ describe("bounded Task 7 storage reads", () => {
     }
   });
 
+  it("rejects every malformed Task 7.3 public ID and fingerprint before querying", () => {
+    const { repository, close } = setup();
+    try {
+      const malformed = [42, null, {}, []] as const;
+      for (const value of malformed) {
+        expect(() => repository.listRunPage({
+          limit: 1,
+          before: { startedAt: 1, runId: value } as never
+        })).toThrow(/run page boundary run ID must be a non-empty string/i);
+        expect(() => repository.listRunPage({
+          limit: 1,
+          repositoryFingerprint: value
+        } as never)).toThrow(/repository fingerprint must be a non-empty string/i);
+
+        expect(() => repository.getEvent(value as never, "event-id"))
+          .toThrow(/run ID must be a non-empty string/i);
+        expect(() => repository.getEvent(runId, value as never))
+          .toThrow(/event ID must be a non-empty string/i);
+        expect(() => repository.getEventArtifactBinding(
+          value as never, "event-id", "assessment_note"
+        )).toThrow(/run ID must be a non-empty string/i);
+        expect(() => repository.getEventArtifactBinding(
+          runId, value as never, "assessment_note"
+        )).toThrow(/event ID must be a non-empty string/i);
+        expect(() => repository.getArtifactForRun(value as never, "artifact-id"))
+          .toThrow(/run ID must be a non-empty string/i);
+        expect(() => repository.getArtifactForRun(runId, value as never))
+          .toThrow(/artifact ID must be a non-empty string/i);
+      }
+    } finally {
+      close();
+    }
+  });
+
   it("preserves null empty-window semantics and same-run event lookup", () => {
     const { repository, close } = setup();
     try {

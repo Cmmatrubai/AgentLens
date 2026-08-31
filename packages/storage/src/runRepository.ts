@@ -558,6 +558,15 @@ function validateBoundedLimit(limit: number, maximum: number, label: string): vo
   }
 }
 
+function validateNonEmptyString(
+  value: unknown,
+  label: string
+): asserts value is string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`${label} must be a non-empty string.`);
+  }
+}
+
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => "?").join(", ");
 }
@@ -1966,8 +1975,12 @@ export class RunRepository {
     const conditions: string[] = [];
     const parameters: unknown[] = [];
     if (input.before) {
-      if (!Number.isInteger(input.before.startedAt) || input.before.runId.length === 0) {
-        throw new Error("Run page boundary requires an integer startedAt and non-empty runId.");
+      if (typeof input.before !== "object") {
+        throw new Error("Run page boundary must be an object.");
+      }
+      validateNonEmptyString(input.before.runId, "Run page boundary run ID");
+      if (!Number.isInteger(input.before.startedAt)) {
+        throw new Error("Run page boundary startedAt must be an integer.");
       }
       conditions.push("(runs.started_at < ? OR (runs.started_at = ? AND runs.id < ?))");
       parameters.push(input.before.startedAt, input.before.startedAt, input.before.runId);
@@ -1981,9 +1994,7 @@ export class RunRepository {
       parameters.push(input.status);
     }
     if (input.repositoryFingerprint !== undefined) {
-      if (input.repositoryFingerprint.length === 0) {
-        throw new Error("Run page repository fingerprint must not be empty.");
-      }
+      validateNonEmptyString(input.repositoryFingerprint, "Run page repository fingerprint");
       conditions.push("runs.repository_fingerprint = ?");
       parameters.push(input.repositoryFingerprint);
     }
@@ -2033,9 +2044,7 @@ export class RunRepository {
         !this.schemaCapabilities.derivationIdentities) {
       throw new Task7StorageCapabilityError();
     }
-    if (runIds.some((id) => typeof id !== "string" || id.length === 0)) {
-      throw new Error("Run summary batch IDs must be non-empty strings.");
-    }
+    for (const id of runIds) validateNonEmptyString(id, "Run summary batch run ID");
     const uniqueIds = [...new Set(runIds)];
     if (uniqueIds.length === 0) return [];
 
@@ -2094,7 +2103,7 @@ export class RunRepository {
   }
 
   getEventWindow(runId: string, input: EventWindowInput): EventWindowRecord {
-    if (typeof runId !== "string" || runId.length === 0) throw new Error("Run ID must not be empty.");
+    validateNonEmptyString(runId, "Run ID");
     validateBoundedLimit(input?.limit, 250, "Event window");
     if ("sequence" in input && (!Number.isInteger(input.sequence) || input.sequence < 0)) {
       throw new Error("Event window sequence must be a non-negative integer.");
@@ -2146,7 +2155,8 @@ export class RunRepository {
   }
 
   getEvent(runId: string, eventId: string): TraceEventV1 | null {
-    if (runId.length === 0 || eventId.length === 0) throw new Error("Run and event IDs must not be empty.");
+    validateNonEmptyString(runId, "Run ID");
+    validateNonEmptyString(eventId, "Event ID");
     const rows = this.eventRows("events.run_id = ? AND events.id = ?", [runId, eventId], "events.sequence, events.id", 1);
     return this.eventsFromRows(rows)[0] ?? null;
   }
@@ -2156,8 +2166,10 @@ export class RunRepository {
     eventId: string,
     role: "assessment_note"
   ): EventArtifactBinding | null {
-    if (!this.schemaCapabilities.eventArtifactBindings) throw new Task7StorageCapabilityError();
+    validateNonEmptyString(runId, "Run ID");
+    validateNonEmptyString(eventId, "Event ID");
     if (role !== "assessment_note") throw new Error("Unsupported event artifact binding role.");
+    if (!this.schemaCapabilities.eventArtifactBindings) throw new Task7StorageCapabilityError();
     const row = this.#connection.prepare(`
       SELECT artifacts.*
       FROM event_artifact_bindings AS bindings
@@ -2177,7 +2189,8 @@ export class RunRepository {
   }
 
   getArtifactForRun(runId: string, artifactId: string): StoredArtifact | null {
-    if (runId.length === 0 || artifactId.length === 0) throw new Error("Run and artifact IDs must not be empty.");
+    validateNonEmptyString(runId, "Run ID");
+    validateNonEmptyString(artifactId, "Artifact ID");
     const row = this.#connection.prepare("SELECT * FROM artifacts WHERE run_id = ? AND id = ?")
       .get(runId, artifactId) as ArtifactRow | undefined;
     return row ? artifactFromRow(row) : null;
