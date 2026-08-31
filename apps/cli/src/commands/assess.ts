@@ -1,22 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { join } from "node:path";
-import {
-  ArtifactStore,
-  loadOrCreateRedactionKey,
-  redactText,
-  redactedTextBytes,
-  type RedactionAudit
-} from "@agentlens/core";
-import {
-  openDatabase,
-  openDatabaseReadOnly,
-  RunRepository,
-  type AssessmentNoteRef,
-  type ExplicitCurrentAssessment
-} from "@agentlens/storage";
+import { createAssessmentService } from "@agentlens/application";
+import type { ExplicitCurrentAssessment } from "@agentlens/storage";
 import type { AssessCommand } from "../args.js";
-import { ownerOnlyDatabaseFiles, prepareDataRoot } from "../dataRoot.js";
-import { locateReadOnlyDataRoot } from "../readOnlyDataRoot.js";
 
 interface OutputWriter {
   write(chunk: string | Uint8Array): unknown;
@@ -35,10 +19,6 @@ export interface AssessJsonOutput {
   readonly updatedAt: number;
 }
 
-const assessmentVerdicts = new Set(["unreviewed", "success", "partial", "failure"]);
-const taskCompletionValues = new Set(["yes", "no", "uncertain"]);
-const maximumAssessmentNoteBytes = 16 * 1024;
-
 function validateCommand(command: unknown): asserts command is AssessCommand {
   if (typeof command !== "object" || command === null || Array.isArray(command)) {
     throw new Error("Assessment command must be an object.");
@@ -47,37 +27,11 @@ function validateCommand(command: unknown): asserts command is AssessCommand {
   if (candidate.name !== "assess") {
     throw new Error("Assessment command name must be assess.");
   }
-  if (typeof candidate.runId !== "string" || candidate.runId === "") {
-    throw new Error("Assessment run ID must be a non-empty string.");
-  }
-  if (typeof candidate.verdict !== "string") {
-    throw new Error("Invalid assessment verdict.");
-  }
-  if (typeof candidate.taskCompleted !== "string") {
-    throw new Error("Invalid assessment task-completed value.");
-  }
-  if (candidate.note !== undefined && typeof candidate.note !== "string") {
-    throw new Error("Assessment note must be a string when provided.");
-  }
   if (typeof candidate.dataRoot !== "string" || candidate.dataRoot === "") {
     throw new Error("Assessment data root must be a non-empty string.");
   }
   if (typeof candidate.json !== "boolean") {
     throw new Error("Assessment json flag must be a boolean.");
-  }
-
-  if (!assessmentVerdicts.has(candidate.verdict)) {
-    throw new Error("Invalid assessment verdict.");
-  }
-  if (!taskCompletionValues.has(candidate.taskCompleted)) {
-    throw new Error("Invalid assessment task-completed value.");
-  }
-  if (candidate.verdict === "unreviewed" && candidate.taskCompleted !== "uncertain") {
-    throw new Error("The unreviewed verdict requires task completion uncertain.");
-  }
-  if (candidate.note !== undefined &&
-      Buffer.byteLength(candidate.note, "utf8") > maximumAssessmentNoteBytes) {
-    throw new Error("Assessment note exceeds the 16 KiB UTF-8 limit.");
   }
 }
 
@@ -110,66 +64,16 @@ export async function runAssessCommand(
 ): Promise<AssessJsonOutput> {
   validateCommand(command);
 
-  const located = await locateReadOnlyDataRoot(command.dataRoot);
-  if (located.state === "missing") {
-    throw new Error("assess requires an existing AgentLens data root and database.");
-  }
-  const validationDatabase = openDatabaseReadOnly(located.databasePath);
-  try {
-    const validationRepository = new RunRepository(validationDatabase, {
-      artifactRoot: join(located.dataRoot, "artifacts", "sha256")
-    });
-    validationRepository.getRunDetail(command.runId).run.capturePolicy;
-  } finally {
-    validationDatabase.close();
-  }
-
-  const databasePath = await prepareDataRoot(located.dataRoot);
-  const database = openDatabase(databasePath);
-  try {
-    const repository = new RunRepository(database, {
-      artifactRoot: join(located.dataRoot, "artifacts", "sha256")
-    });
-    const run = repository.getRunDetail(command.runId).run;
-    let note: AssessmentNoteRef = { state: "absent" };
-    let noteAudits: readonly RedactionAudit[] = [];
-
-    if (command.note !== undefined && command.note !== "") {
-      if (run.capturePolicy === "standard") {
-        const key = await loadOrCreateRedactionKey(located.dataRoot);
-        const redacted = redactText(command.note, {
-          policy: run.capturePolicy,
-          key,
-          contentClass: "message"
-        });
-        const artifact = await new ArtifactStore(located.dataRoot).writeRedacted({
-          runId: command.runId,
-          kind: "assessment-note",
-          redactedBytes: redactedTextBytes(redacted),
-          mediaType: "text/plain; charset=utf-8"
-        });
-        note = { state: "artifact", artifact };
-        noteAudits = redacted.audits;
-      } else {
-        note = { state: "omitted", reason: run.capturePolicy };
-      }
-    }
-
-    const current = await repository.updateAssessment({
-      runId: command.runId,
-      eventId: randomUUID(),
-      receivedAt: new Date(Date.now()).toISOString(),
-      verdict: command.verdict,
-      taskCompleted: command.taskCompleted,
-      note
-    }, noteAudits);
-    const output = projectAssessment(current);
-    (dependencies.stdout ?? process.stdout).write(
-      command.json ? `${JSON.stringify(output, null, 2)}\n` : assessmentText(output)
-    );
-    return output;
-  } finally {
-    database.close();
-    await ownerOnlyDatabaseFiles(databasePath);
-  }
+  const current = await createAssessmentService({ dataRoot: command.dataRoot }).assess({
+    runId: command.runId,
+    verdict: command.verdict,
+    taskCompleted: command.taskCompleted,
+    ...(command.note === undefined ? {} : { note: command.note }),
+    expectedRevision: { state: "unconditional" }
+  });
+  const output = projectAssessment(current);
+  (dependencies.stdout ?? process.stdout).write(
+    command.json ? `${JSON.stringify(output, null, 2)}\n` : assessmentText(output)
+  );
+  return output;
 }

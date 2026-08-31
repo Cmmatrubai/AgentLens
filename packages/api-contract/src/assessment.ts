@@ -55,10 +55,37 @@ export const assessmentUpdateRequestV1Schema = z.object({
     z.object({ state: z.literal("absent") }).strict(),
     z.object({ state: z.literal("text"), text: z.string().max(16_384) }).strict()
   ])
-}).strict();
+}).strict().superRefine((value, context) => {
+  if (value.verdict === "unreviewed" && value.taskCompleted !== "uncertain") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["taskCompleted"],
+      message: "Explicit unreviewed requires uncertain task completion."
+    });
+  }
+  if (value.note.state === "text" &&
+      new TextEncoder().encode(value.note.text).byteLength > 16 * 1024) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["note", "text"],
+      message: "Assessment note exceeds the UTF-8 byte limit."
+    });
+  }
+});
 
 export const assessmentResponseV1Schema = z.object({
   schemaVersion: z.literal(1),
+  assessment: currentAssessmentV1Schema,
+  etag: z.string().min(1).max(256)
+}).strict();
+
+export const assessmentConflictResponseV1Schema = z.object({
+  schemaVersion: z.literal(1),
+  error: z.object({
+    code: z.literal("assessment_conflict"),
+    message: z.string().max(256),
+    retryable: z.literal(false)
+  }).strict(),
   assessment: currentAssessmentV1Schema,
   etag: z.string().min(1).max(256)
 }).strict();
@@ -75,4 +102,5 @@ export type AssessmentNoteAvailabilityV1 = z.infer<typeof assessmentNoteAvailabi
 export type CurrentAssessmentV1 = z.infer<typeof currentAssessmentV1Schema>;
 export type AssessmentUpdateRequestV1 = z.infer<typeof assessmentUpdateRequestV1Schema>;
 export type AssessmentResponseV1 = z.infer<typeof assessmentResponseV1Schema>;
+export type AssessmentConflictResponseV1 = z.infer<typeof assessmentConflictResponseV1Schema>;
 export type AssessmentNoteContentV1 = z.infer<typeof assessmentNoteContentV1Schema>;

@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   apiErrorCodeV1Schema,
   apiErrorV1Schema,
+  assessmentConflictResponseV1Schema,
   assessmentResponseV1Schema,
+  assessmentUpdateRequestV1Schema,
   currentAssessmentV1Schema,
   eventDetailV1Schema,
   eventStatusFieldV1Schema,
@@ -504,5 +506,44 @@ describe("closed v1 browser schemas", () => {
       assessment: explicit,
       etag: '"assessment-event"'
     })).toMatchObject({ schemaVersion: 1, assessment: explicit });
+    expect(assessmentConflictResponseV1Schema.parse({
+      schemaVersion: 1,
+      error: {
+        code: "assessment_conflict",
+        message: "Assessment changed.",
+        retryable: false
+      },
+      assessment: explicit,
+      etag: '"assessment:ZXZlbnQ"'
+    })).toMatchObject({
+      error: { code: "assessment_conflict", retryable: false },
+      assessment: explicit
+    });
+    expect(() => assessmentConflictResponseV1Schema.parse({
+      schemaVersion: 1,
+      error: {
+        code: "assessment_conflict",
+        message: "Assessment changed.",
+        retryable: false,
+        databasePath: "/private/agentlens.sqlite"
+      },
+      assessment: explicit,
+      etag: '"assessment:ZXZlbnQ"'
+    })).toThrow();
+  });
+
+  it("keeps assessment updates closed and enforces the UTF-8 and explicit-unreviewed rules", () => {
+    const valid = {
+      schemaVersion: 1,
+      verdict: "partial",
+      taskCompleted: "uncertain",
+      note: { state: "text", text: "é".repeat(8 * 1024) }
+    } as const;
+    expect(assessmentUpdateRequestV1Schema.parse(valid)).toEqual(valid);
+    for (const invalid of [
+      { ...valid, note: { state: "text", text: `${"é".repeat(8 * 1024)}a` } },
+      { ...valid, verdict: "unreviewed", taskCompleted: "yes" },
+      { ...valid, rawNote: "must-not-cross" }
+    ]) expect(() => assessmentUpdateRequestV1Schema.parse(invalid)).toThrow();
   });
 });

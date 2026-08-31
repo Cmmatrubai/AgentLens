@@ -251,6 +251,7 @@ describe("RunQueryService", () => {
       capturedAt: 100
     });
     await setup.repository.updateAssessment({
+      expectedRevision: { state: "unconditional" },
       runId: "run-099",
       eventId: "assessment-099",
       receivedAt,

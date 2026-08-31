@@ -1,4 +1,5 @@
 export * from "./artifacts/readValidatedArtifact.js";
+export * from "./assessmentService.js";
 export * from "./evidence/contentProjector.js";
 export * from "./evidence/evidenceService.js";
 export * from "./evidence/gitDiffParser.js";

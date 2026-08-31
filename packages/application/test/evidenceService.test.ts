@@ -202,6 +202,7 @@ async function artifactEvidenceFixture(
 
   const note = await make("note");
   await setup.repository.updateAssessment({
+    expectedRevision: { state: "unconditional" },
     runId,
     eventId: "matrix-note",
     receivedAt,
@@ -875,11 +876,13 @@ describe("Task 7.7 evidence projection", () => {
       "current redacted note"
     );
     await setup.repository.updateAssessment({
+      expectedRevision: { state: "unconditional" },
       runId: "run-evidence", eventId: "assessment-old", receivedAt,
       verdict: "partial", taskCompleted: "uncertain",
       note: { state: "artifact", artifact: olderNote }
     });
     await setup.repository.updateAssessment({
+      expectedRevision: { state: "unconditional" },
       runId: "run-evidence", eventId: "assessment-current",
       receivedAt: "2026-08-31T12:00:01.000Z",
       verdict: "success", taskCompleted: "yes",
@@ -1119,6 +1122,7 @@ describe("Task 7.7 evidence projection", () => {
       Buffer.from([0xff, 0xfe])
     );
     await setup.repository.updateAssessment({
+      expectedRevision: { state: "unconditional" },
       runId: "invalid-evidence",
       eventId: "invalid-note",
       receivedAt,

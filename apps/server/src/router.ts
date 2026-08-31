@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ApiErrorCodeV1, ApiErrorV1 } from "@agentlens/api-contract";
-import type { EvidenceService, RunQueryService } from "@agentlens/application";
+import type { AssessmentService, EvidenceService, RunQueryService } from "@agentlens/application";
 import { createBootstrapHtml, createReloadHtml } from "./bootstrap.js";
 import { createResponseNonce, noStoreSecurityHeaders, staticSecurityHeaders } from "./security/headers.js";
 import {
@@ -12,6 +12,7 @@ import {
 import { matchesBearer } from "./security/tokens.js";
 import type { StaticAssets } from "./staticAssets.js";
 import { handleEventRoutes } from "./routes/events.js";
+import { handleAssessmentRoute, maximumAssessmentRequestBytes } from "./routes/assessment.js";
 import { handleEvidenceRoutes } from "./routes/evidence.js";
 import { handleHealthRoute } from "./routes/health.js";
 import { handleRunRoutes } from "./routes/runs.js";
@@ -26,6 +27,7 @@ export interface AgentLensRouterOptions {
   readonly health: () => Readonly<{ schemaVersion: 1; ready: true; readModel: "ready" }>;
   readonly runQueries: RunQueryService;
   readonly evidence: EvidenceService;
+  readonly assessment: AssessmentService;
 }
 
 function endJson(response: ServerResponse, status: number, value: object): void {
@@ -81,15 +83,24 @@ export function createAgentLensRouter(options: AgentLensRouterOptions) {
           endError(response, 403, "forbidden_origin", "Request origin is not allowed.");
           return;
         }
-        if (isMutationMethod(request.method)) await readBoundedRequestBody(request);
+        const assessmentMutation = request.method === "PUT" &&
+          /^\/api\/v1\/runs\/[^/]+\/assessment$/.test(url.pathname);
+        const requestBody = isMutationMethod(request.method)
+          ? await readBoundedRequestBody(
+              request,
+              assessmentMutation ? maximumAssessmentRequestBytes : undefined
+            )
+          : undefined;
 
         const routeContext = {
           runQueries: options.runQueries,
           evidence: options.evidence,
+          assessment: options.assessment,
           health: options.health
         };
         try {
           if (handleHealthRoute(request, response, url, routeContext)) return;
+          if (await handleAssessmentRoute(request, response, url, routeContext, requestBody)) return;
           if (await handleEvidenceRoutes(request, response, url, routeContext)) return;
           if (await handleEventRoutes(request, response, url, routeContext)) return;
           if (await handleRunRoutes(request, response, url, routeContext)) return;

@@ -5,8 +5,10 @@ import {
   type ApiErrorCodeV1
 } from "@agentlens/api-contract";
 import {
+  AssessmentServiceError,
   EvidenceServiceError,
   RunQueryServiceError,
+  type AssessmentService,
   type EvidenceService,
   type RunQueryService
 } from "@agentlens/application";
@@ -17,6 +19,7 @@ import { createResponseNonce, noStoreSecurityHeaders } from "../security/headers
 export interface RouteContext {
   readonly runQueries: RunQueryService;
   readonly evidence: EvidenceService;
+  readonly assessment: AssessmentService;
   readonly health: () => Readonly<{ schemaVersion: 1; ready: true; readModel: "ready" }>;
 }
 
@@ -27,11 +30,17 @@ export class RouteRequestError extends Error {
   }
 }
 
-export function endJson(response: ServerResponse, status: number, value: object): void {
+export function endJson(
+  response: ServerResponse,
+  status: number,
+  value: object,
+  headers: Readonly<Record<string, string>> = {}
+): void {
   const nonce = createResponseNonce();
   response.writeHead(status, {
     ...noStoreSecurityHeaders(nonce),
-    "Content-Type": "application/json; charset=utf-8"
+    "Content-Type": "application/json; charset=utf-8",
+    ...headers
   });
   response.end(`${JSON.stringify(value)}\n`);
 }
@@ -119,6 +128,10 @@ export function handleRouteError(response: ServerResponse, error: unknown): void
         );
         return;
     }
+  }
+  if (error instanceof AssessmentServiceError) {
+    endError(response, 404, "run_not_found", "Run was not found.");
+    return;
   }
   if (error instanceof EvidenceServiceError) {
     switch (error.code) {

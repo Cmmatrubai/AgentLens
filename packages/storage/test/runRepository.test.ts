@@ -19,6 +19,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openDatabase, openDatabaseReadOnly } from "../src/database.js";
 import {
+  AssessmentConflictError,
   RunRepository,
   Task7StorageCapabilityError,
   type AppendDerivedEventInput,
@@ -974,9 +975,11 @@ describe("bounded Task 7 storage reads", () => {
         writable.close();
       }
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId: "run-b", eventId: "assessment-b", receivedAt, verdict: "success"
       });
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId: "run-c", eventId: "assessment-c", receivedAt, verdict: "failure"
       });
 
@@ -1109,6 +1112,7 @@ describe("bounded Task 7 storage reads", () => {
     try {
       const note = completedAssessmentNote(artifactRoot, "bound note");
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId, eventId: "bound-assessment", receivedAt, verdict: "partial",
         note: { state: "artifact", artifact: note }
       });
@@ -1161,6 +1165,7 @@ describe("bounded Task 7 storage reads", () => {
       const testCommand = repository.appendDerivedEvent(derivedInput("test.command"));
       const testResult = repository.appendDerivedEvent(derivedInput("test.result"));
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId, eventId: "summary-assessment", receivedAt: "2026-08-26T20:10:00.000Z", verdict: "success"
       });
       repository.saveGitEvidence(runId, {
@@ -1206,6 +1211,96 @@ describe("bounded Task 7 storage reads", () => {
 });
 
 describe("append-only human assessment storage", () => {
+  it("atomically allows exactly one writer from the same projected assessment revision", async () => {
+    const { repository: firstRepository, databasePath, artifactRoot, close } = setup();
+    const secondDatabase = openDatabase(databasePath);
+    const secondRepository = new RunRepository(secondDatabase, { artifactRoot });
+    try {
+      expect(firstRepository.getCurrentAssessment(runId).currentEventId).toBeNull();
+      expect(secondRepository.getCurrentAssessment(runId).currentEventId).toBeNull();
+      const firstNote = completedAssessmentNote(artifactRoot, "conditional first note");
+      const secondNote = completedAssessmentNote(artifactRoot, "conditional second note");
+
+      const results = await Promise.allSettled([
+        firstRepository.updateAssessment({
+          runId,
+          eventId: "conditional-first",
+          receivedAt: "2026-08-26T20:10:00.000Z",
+          verdict: "success",
+          taskCompleted: "yes",
+          note: { state: "artifact", artifact: firstNote },
+          expectedRevision: { state: "match", currentEventId: null }
+        }),
+        secondRepository.updateAssessment({
+          runId,
+          eventId: "conditional-second",
+          receivedAt: "2026-08-26T20:10:01.000Z",
+          verdict: "failure",
+          taskCompleted: "no",
+          note: { state: "artifact", artifact: secondNote },
+          expectedRevision: { state: "match", currentEventId: null }
+        })
+      ]);
+
+      const fulfilled = results.filter((result) => result.status === "fulfilled");
+      const rejected = results.filter((result) => result.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(AssessmentConflictError);
+      expect((rejected[0] as PromiseRejectedResult).reason.current).toMatchObject({
+        state: "explicit",
+        currentEventId: (fulfilled[0] as PromiseFulfilledResult<unknown>).value.currentEventId
+      });
+      expect(queryRows(databasePath, "SELECT id FROM events WHERE kind = 'assessment.updated'"))
+        .toHaveLength(1);
+      expect(queryRows(databasePath, "SELECT run_id FROM current_assessments")).toEqual([{ run_id: runId }]);
+      expect(queryRows(databasePath, "SELECT id FROM artifacts WHERE kind = 'assessment-note'"))
+        .toHaveLength(1);
+      expect(queryRows(databasePath, "SELECT event_id FROM event_artifact_bindings"))
+        .toHaveLength(1);
+    } finally {
+      secondDatabase.close();
+      close();
+    }
+  });
+
+  it("rejects a stale revision before committing note metadata, audit, event, binding, or projection", async () => {
+    const { repository, databasePath, artifactRoot, close } = setup();
+    try {
+      await repository.updateAssessment({
+        runId,
+        eventId: "conditional-current",
+        receivedAt: "2026-08-26T20:10:00.000Z",
+        verdict: "partial",
+        expectedRevision: { state: "unconditional" }
+      });
+      const before = repository.getCurrentAssessment(runId);
+      const orphan = completedAssessmentNote(artifactRoot, "safely redacted orphan note");
+
+      const error = await repository.updateAssessment({
+        runId,
+        eventId: "conditional-stale",
+        receivedAt: "2026-08-26T20:11:00.000Z",
+        verdict: "success",
+        taskCompleted: "yes",
+        note: { state: "artifact", artifact: orphan },
+        expectedRevision: { state: "match", currentEventId: null }
+      }, [{ reason: "assignment-secret", count: 1 }]).then(() => null, (cause: unknown) => cause);
+
+      expect(error).toBeInstanceOf(AssessmentConflictError);
+      expect((error as AssessmentConflictError).current).toEqual(before);
+      expect(existsSync(orphan.path)).toBe(true);
+      expect(queryRows(databasePath, "SELECT id FROM events WHERE kind = 'assessment.updated'"))
+        .toEqual([{ id: "conditional-current" }]);
+      expect(queryRows(databasePath, "SELECT * FROM artifacts")).toEqual([]);
+      expect(queryRows(databasePath, "SELECT * FROM redaction_audits")).toEqual([]);
+      expect(queryRows(databasePath, "SELECT * FROM event_artifact_bindings")).toEqual([]);
+      expect(repository.getCurrentAssessment(runId)).toEqual(before);
+    } finally {
+      close();
+    }
+  });
+
   it("projects a Task 5-schema run as unreviewed without querying Task 6 tables", () => {
     const { repository, close } = setupMigration003();
     try {
@@ -1230,6 +1325,7 @@ describe("append-only human assessment storage", () => {
     try {
       const assessedAt = "2026-08-26T20:10:00.000Z";
       const current = await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-first",
         receivedAt: assessedAt,
@@ -1296,6 +1392,7 @@ describe("append-only human assessment storage", () => {
       const secondAt = "2026-08-26T20:11:00.000Z";
       const thirdAt = "2026-08-26T20:12:00.000Z";
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-with-note",
         receivedAt: firstAt,
@@ -1304,6 +1401,7 @@ describe("append-only human assessment storage", () => {
         note: { state: "artifact", artifact: note }
       });
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-without-note",
         receivedAt: secondAt,
@@ -1311,6 +1409,7 @@ describe("append-only human assessment storage", () => {
         taskCompleted: "yes"
       });
       const current = await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-identical-repeat",
         receivedAt: thirdAt,
@@ -1353,6 +1452,7 @@ describe("append-only human assessment storage", () => {
     try {
       const firstAt = "2026-08-26T20:10:00.000Z";
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-timestamp-first",
         receivedAt: firstAt,
@@ -1362,6 +1462,7 @@ describe("append-only human assessment storage", () => {
       const note = completedAssessmentNote(artifactRoot, "rejected-earlier-timestamp-note");
 
       await expect(repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-timestamp-earlier",
         receivedAt: "2026-08-26T20:09:00.000Z",
@@ -1387,12 +1488,14 @@ describe("append-only human assessment storage", () => {
     try {
       const sharedAt = "2026-08-26T20:10:00.000Z";
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-equal-first",
         receivedAt: sharedAt,
         verdict: "partial"
       });
       const current = await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-equal-second",
         receivedAt: sharedAt,
@@ -1424,12 +1527,14 @@ describe("append-only human assessment storage", () => {
       const firstAt = "2026-08-26T20:10:00.000Z";
       const laterAt = "2026-08-26T20:11:00.000Z";
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-later-first",
         receivedAt: firstAt,
         verdict: "partial"
       });
       const current = await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-later-second",
         receivedAt: laterAt,
@@ -1456,6 +1561,7 @@ describe("append-only human assessment storage", () => {
     try {
       for (const taskCompleted of ["yes", "no"] as const) {
         await expect(repository.updateAssessment({
+          expectedRevision: { state: "unconditional" },
           runId,
           eventId: `invalid-unreviewed-${taskCompleted}`,
           receivedAt,
@@ -1468,6 +1574,7 @@ describe("append-only human assessment storage", () => {
       const rawNote = "review-note-sentinel-7ee5197b";
       const note = completedAssessmentNote(artifactRoot, rawNote);
       const current = await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "explicit-unreviewed",
         receivedAt,
@@ -1509,6 +1616,7 @@ describe("append-only human assessment storage", () => {
       const { repository, databasePath, close } = setup({ capturePolicy: reason });
       try {
         const current = await repository.updateAssessment({
+          expectedRevision: { state: "unconditional" },
           runId,
           eventId: `assessment-${reason}`,
           receivedAt,
@@ -1537,6 +1645,7 @@ describe("append-only human assessment storage", () => {
       const { repository, close } = setup({ capturePolicy });
       try {
         const current = await repository.updateAssessment({
+          expectedRevision: { state: "unconditional" },
           runId,
           eventId: `assessment-${capturePolicy}-absent`,
           receivedAt,
@@ -1560,6 +1669,7 @@ describe("append-only human assessment storage", () => {
       const { repository, databasePath, close } = setup({ capturePolicy });
       try {
         await expect(repository.updateAssessment({
+          expectedRevision: { state: "unconditional" },
           runId,
           eventId: `assessment-${capturePolicy}-${note.reason}`,
           receivedAt,
@@ -1582,6 +1692,7 @@ describe("append-only human assessment storage", () => {
         const note = completedAssessmentNote(artifactRoot, `${capturePolicy}-forbidden-note`);
         unlinkSync(note.path);
         await expect(repository.updateAssessment({
+          expectedRevision: { state: "unconditional" },
           runId,
           eventId: `assessment-${capturePolicy}-artifact`,
           receivedAt,
@@ -1626,6 +1737,7 @@ describe("append-only human assessment storage", () => {
       const before = repository.getRunDetail(runId);
 
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-after-evidence",
         receivedAt: "2026-08-26T20:13:00.000Z",
@@ -1650,6 +1762,7 @@ describe("append-only human assessment storage", () => {
       const note = completedAssessmentNote(artifactRoot, "same redacted note");
       const audits = [{ reason: "assignment-secret", count: 2 }];
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-reuse-one",
         receivedAt: "2026-08-26T20:14:00.000Z",
@@ -1657,6 +1770,7 @@ describe("append-only human assessment storage", () => {
         note: { state: "artifact", artifact: note }
       }, audits);
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-reuse-two",
         receivedAt: "2026-08-26T20:15:00.000Z",
@@ -1681,6 +1795,7 @@ describe("append-only human assessment storage", () => {
       unlinkSync(note.path);
       const beforeFailedReuse = repository.getCurrentAssessment(runId);
       await expect(repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-reuse-missing-file",
         receivedAt: "2026-08-26T20:16:00.000Z",
@@ -1708,6 +1823,7 @@ describe("append-only human assessment storage", () => {
       const audits = [{ reason: "assignment-secret", count: 2 }];
 
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-shared-run-one",
         receivedAt: "2026-08-26T20:14:00.000Z",
@@ -1715,6 +1831,7 @@ describe("append-only human assessment storage", () => {
         note: { state: "artifact", artifact: note }
       }, audits);
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId: otherRunId,
         eventId: "assessment-shared-run-two",
         receivedAt: "2026-08-26T20:15:00.000Z",
@@ -1793,6 +1910,7 @@ describe("append-only human assessment storage", () => {
       });
       await repository.commitArtifactMetadata(crossRunNote);
       await expect(repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-cross-run-artifact",
         receivedAt,
@@ -1804,6 +1922,7 @@ describe("append-only human assessment storage", () => {
         runId: "run-other"
       }));
       await expect(repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "event-owned-by-other-run",
         receivedAt,
@@ -1827,6 +1946,7 @@ describe("append-only human assessment storage", () => {
     const { repository, databasePath, artifactRoot, close } = setup();
     try {
       await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-before-failure",
         receivedAt: "2026-08-26T20:17:00.000Z",
@@ -1849,6 +1969,7 @@ describe("append-only human assessment storage", () => {
       }
 
       await expect(repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-rolled-back",
         receivedAt: "2026-08-26T20:18:00.000Z",
@@ -1881,6 +2002,7 @@ describe("append-only human assessment storage", () => {
       ] as const;
       for (const [index, candidate] of malformed.entries()) {
         await expect(repository.updateAssessment({
+          expectedRevision: { state: "unconditional" },
           runId,
           eventId: `malformed-structured-${index}`,
           receivedAt,
@@ -1896,6 +2018,7 @@ describe("append-only human assessment storage", () => {
       ];
       for (const [index, note] of invalidNotes.entries()) {
         await expect(repository.updateAssessment({
+          expectedRevision: { state: "unconditional" },
           runId,
           eventId: `malformed-note-${index}`,
           receivedAt,
@@ -1974,6 +2097,7 @@ describe("append-only human assessment storage", () => {
         artifactRoot
       );
       await expect(repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-invalid-artifact",
         receivedAt,
@@ -2038,6 +2162,7 @@ describe("append-only human assessment storage", () => {
     try {
       const artifact = mutate(completedAssessmentNote(artifactRoot, "length metadata fixture"));
       await expect(repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: "assessment-invalid-length-metadata",
         receivedAt,
@@ -2070,6 +2195,7 @@ describe("append-only human assessment storage", () => {
     try {
       const artifact = mutate(completedAssessmentNote(artifactRoot, `${name} length fixture`));
       const current = await repository.updateAssessment({
+        expectedRevision: { state: "unconditional" },
         runId,
         eventId: `assessment-valid-length-${name}`,
         receivedAt,
@@ -2097,6 +2223,7 @@ describe("append-only human assessment storage", () => {
       try {
         const note = completedAssessmentNote(artifactRoot, `audit-count-${String(count)}`);
         await expect(repository.updateAssessment({
+          expectedRevision: { state: "unconditional" },
           runId,
           eventId: `assessment-invalid-audit-${String(count)}`,
           receivedAt,

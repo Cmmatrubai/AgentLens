@@ -264,6 +264,10 @@ export type AssessmentNoteProjection =
   | Readonly<{ state: "artifact"; artifactId: string }>
   | Readonly<{ state: "omitted"; reason: EvidenceOmissionReason }>;
 
+export type AssessmentRevisionPrecondition =
+  | Readonly<{ state: "unconditional" }>
+  | Readonly<{ state: "match"; currentEventId: string | null }>;
+
 export interface UpdateAssessmentInput {
   readonly runId: string;
   readonly eventId: string;
@@ -271,6 +275,7 @@ export interface UpdateAssessmentInput {
   readonly verdict: AssessmentVerdict;
   readonly taskCompleted?: TaskCompletion;
   readonly note?: AssessmentNoteRef;
+  readonly expectedRevision: AssessmentRevisionPrecondition;
 }
 
 export interface ProjectedCurrentAssessment {
@@ -300,6 +305,16 @@ export interface ExplicitCurrentAssessment {
 export type CurrentAssessment =
   | ProjectedCurrentAssessment
   | ExplicitCurrentAssessment;
+
+export class AssessmentConflictError extends Error {
+  readonly current: CurrentAssessment;
+
+  constructor(current: CurrentAssessment) {
+    super("Assessment revision does not match the current assessment.");
+    this.name = "AssessmentConflictError";
+    this.current = current;
+  }
+}
 
 export interface RunSummaryBatchRecord {
   readonly runId: string;
@@ -803,6 +818,23 @@ function validateAssessmentInput(
   }
   if (input.verdict === "unreviewed" && taskCompleted !== "uncertain") {
     throw new Error("An explicit unreviewed assessment requires uncertain task completion.");
+  }
+  if (typeof input.expectedRevision !== "object" || input.expectedRevision === null) {
+    throw new Error("Assessment revision precondition is required.");
+  }
+  if (input.expectedRevision.state === "unconditional") {
+    if (!hasExactKeys(input.expectedRevision, ["state"])) {
+      throw new Error("Assessment revision precondition is invalid.");
+    }
+  } else if (input.expectedRevision.state === "match") {
+    if (!hasExactKeys(input.expectedRevision, ["currentEventId", "state"]) ||
+        !(input.expectedRevision.currentEventId === null ||
+          (typeof input.expectedRevision.currentEventId === "string" &&
+            input.expectedRevision.currentEventId.length > 0))) {
+      throw new Error("Assessment revision precondition is invalid.");
+    }
+  } else {
+    throw new Error("Assessment revision precondition is invalid.");
   }
   const note: AssessmentNoteRef = input.note ?? Object.freeze({ state: "absent" });
   validateAssessmentNote(note);
@@ -1593,6 +1625,13 @@ export class RunRepository {
         const existingCurrent = this.#connection.prepare(`
           SELECT * FROM current_assessments WHERE run_id = ?
         `).get(input.runId) as CurrentAssessmentRow | undefined;
+        const transactionCurrent = existingCurrent
+          ? currentAssessmentFromRow(existingCurrent)
+          : projectedAssessment(input.runId);
+        if (input.expectedRevision.state === "match" &&
+            transactionCurrent.currentEventId !== input.expectedRevision.currentEventId) {
+          throw new AssessmentConflictError(transactionCurrent);
+        }
         if (existingCurrent && validated.receivedAt < existingCurrent.updated_at) {
           throw new Error("Assessment timestamp cannot regress behind the current assessment timestamp.");
         }
