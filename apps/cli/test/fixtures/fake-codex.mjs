@@ -6,6 +6,7 @@ import { execFileSync, spawn } from "node:child_process";
 const args = process.argv.slice(2);
 const modeArg = args.find((argument) => argument.startsWith("--fake-mode="));
 const mode = modeArg?.slice("--fake-mode=".length) ?? "success";
+const startupDelayMs = Number(process.env.AGENTLENS_FAKE_STARTUP_DELAY_MS ?? 0);
 
 if (process.env.AGENTLENS_FAKE_STARTED_FILE && mode !== "hang") {
   appendFileSync(process.env.AGENTLENS_FAKE_STARTED_FILE, "child-started\n");
@@ -44,6 +45,9 @@ const terminal = () => emit({
 if (mode !== "hang") {
   emit({ type: "thread.started", thread_id: "fixture-thread" });
   emit({ type: "turn.started", thread_id: "fixture-thread", turn_id: "fixture-turn" });
+}
+if (startupDelayMs > 0) {
+  await new Promise((resolve) => setTimeout(resolve, startupDelayMs));
 }
 
 switch (mode) {

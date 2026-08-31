@@ -33,7 +33,10 @@ const receivedAt = "2026-08-26T20:00:00.000Z";
 const execFile = promisify(execFileCallback);
 
 const appendDerivedRaceScript = `
+  const { createRequire } = await import("node:module");
   const { existsSync, writeFileSync } = await import("node:fs");
+  const raceRequire = createRequire(process.env.AGENTLENS_RACE_STORAGE_MODULE);
+  const coreModule = raceRequire.resolve("@agentlens/core");
   const storage = await import(process.env.AGENTLENS_RACE_STORAGE_MODULE);
   const database = storage.openDatabase(process.env.AGENTLENS_RACE_DATABASE);
   const repository = new storage.RunRepository(database, {
@@ -47,7 +50,7 @@ const appendDerivedRaceScript = `
     const event = repository.appendDerivedEvent(
       JSON.parse(process.env.AGENTLENS_RACE_INPUT)
     );
-    process.stdout.write(JSON.stringify(event));
+    process.stdout.write(JSON.stringify({ event, coreModule }));
   } finally {
     database.close();
   }
@@ -1914,7 +1917,12 @@ describe("derived event identity storage", () => {
       )).href;
       const race = (readyPath: string) => execFile(
         process.execPath,
-        ["--import", "tsx", "--input-type=module", "--eval", appendDerivedRaceScript],
+        [
+          "--conditions=development",
+          "--import", "tsx",
+          "--input-type=module",
+          "--eval", appendDerivedRaceScript
+        ],
         {
           cwd: process.cwd(),
           env: {
@@ -1935,7 +1943,15 @@ describe("derived event identity storage", () => {
         writeFileSync(start, "start");
       }
       const results = await Promise.all(racers);
-      const winners = results.map(({ stdout }) => JSON.parse(stdout) as TraceEventV1);
+      const raced = results.map(({ stdout }) => JSON.parse(stdout) as {
+        event: TraceEventV1;
+        coreModule: string;
+      });
+      expect(raced.map(({ coreModule }) => coreModule)).toEqual([
+        join(process.cwd(), "packages/core/src/index.ts"),
+        join(process.cwd(), "packages/core/src/index.ts")
+      ]);
+      const winners = raced.map(({ event: winner }) => winner);
 
       expect(winners[1]).toEqual(winners[0]);
       expect(repository.getRunDetail(runId).events.filter(({ kind }) =>

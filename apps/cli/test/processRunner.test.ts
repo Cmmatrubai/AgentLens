@@ -28,7 +28,8 @@ describe("process runner", () => {
       env: {
         ...process.env,
         PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
-        AGENTLENS_FAKE_GRANDCHILD_FILE: grandchildFile
+        AGENTLENS_FAKE_GRANDCHILD_FILE: grandchildFile,
+        AGENTLENS_FAKE_STARTUP_DELAY_MS: "900"
       }
     };
   }
@@ -51,12 +52,18 @@ describe("process runner", () => {
         childPid = pid;
         safetyTimer = setTimeout(() => {
           try { process.kill(-pid, "SIGKILL"); } catch { /* production may already have killed it */ }
-        }, 800);
+        }, 4_000);
       },
       onLine: (_stream, line) => {
         if (interruptedAt === 0 && line.includes("term-resistant-command")) {
           interruptedAt = Date.now();
           controller.abort();
+          if (safetyTimer !== undefined) clearTimeout(safetyTimer);
+          safetyTimer = setTimeout(() => {
+            try {
+              if (childPid !== undefined) process.kill(-childPid, "SIGKILL");
+            } catch { /* production may already have killed it */ }
+          }, 800);
         }
       },
       onDiagnostic: () => undefined,
@@ -103,10 +110,18 @@ describe("process runner", () => {
           processGroupId = groupId ?? undefined;
           safetyTimer = setTimeout(() => {
             try { process.kill(-pid, "SIGKILL"); } catch { /* production may already have killed it */ }
-          }, 1_000);
+          }, 4_000);
         },
         onLine: (_stream, line) => {
-          if (line.includes("cooperative-parent-command")) controller.abort();
+          if (line.includes("cooperative-parent-command")) {
+            controller.abort();
+            if (safetyTimer !== undefined) clearTimeout(safetyTimer);
+            safetyTimer = setTimeout(() => {
+              try {
+                if (processGroupId !== undefined) process.kill(-processGroupId, "SIGKILL");
+              } catch { /* production may already have killed it */ }
+            }, 1_000);
+          }
         },
         onDiagnostic: () => undefined,
         signal: controller.signal,
@@ -141,6 +156,7 @@ describe("process runner", () => {
     const context = await termResistantFixture();
     const controller = new AbortController();
     const forceController = new AbortController();
+    let childPid: number | undefined;
     let interruptedAt = 0;
     let safetyTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -150,15 +166,22 @@ describe("process runner", () => {
       env: context.env,
       promptInput: { mode: "buffered", source: "stdin", bytes: Buffer.alloc(0) },
       onSpawn: (pid) => {
+        childPid = pid;
         safetyTimer = setTimeout(() => {
           try { process.kill(-pid, "SIGKILL"); } catch { /* force escalation may already have killed it */ }
-        }, 800);
+        }, 4_000);
       },
       onLine: (_stream, line) => {
         if (interruptedAt === 0 && line.includes("term-resistant-command")) {
           interruptedAt = Date.now();
           controller.abort();
           setTimeout(() => forceController.abort(), 25);
+          if (safetyTimer !== undefined) clearTimeout(safetyTimer);
+          safetyTimer = setTimeout(() => {
+            try {
+              if (childPid !== undefined) process.kill(-childPid, "SIGKILL");
+            } catch { /* force escalation may already have killed it */ }
+          }, 800);
         }
       },
       onDiagnostic: () => undefined,
