@@ -1,0 +1,228 @@
+import { TextDecoder } from "node:util";
+
+import { gitDiffContentV1Schema, type GitDiffContentV1 } from "@agentlens/api-contract";
+
+const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$/;
+const EXCLUSION = /^\[\[EXCLUDED:[a-z0-9._-]{1,128}\]\]$/;
+const UTF8 = new TextDecoder("utf-8", { fatal: true });
+
+function decodeGitQuoted(value: string): string {
+  if (!value.startsWith('"')) return value;
+  if (!value.endsWith('"')) throw new Error("Malformed quoted Git path.");
+  const output: Buffer[] = [];
+  for (let index = 1; index < value.length - 1; index += 1) {
+    const character = value[index]!;
+    if (character !== "\\") {
+      const codePoint = value.codePointAt(index)!;
+      output.push(Buffer.from(String.fromCodePoint(codePoint), "utf8"));
+      if (codePoint > 0xffff) index += 1;
+      continue;
+    }
+    const escaped = value[++index];
+    if (escaped === undefined || index >= value.length - 1) throw new Error("Malformed quoted Git path.");
+    const simple: Readonly<Record<string, string>> = {
+      a: "\u0007", b: "\b", t: "\t", n: "\n", v: "\u000b", f: "\f", r: "\r",
+      '"': '"', "\\": "\\"
+    };
+    if (simple[escaped] !== undefined) {
+      output.push(Buffer.from(simple[escaped], "utf8"));
+      continue;
+    }
+    if (/^[0-7]$/.test(escaped)) {
+      let octal = escaped;
+      while (octal.length < 3 && /^[0-7]$/.test(value[index + 1] ?? "")) octal += value[++index]!;
+      output.push(Buffer.from([Number.parseInt(octal, 8)]));
+      continue;
+    }
+    throw new Error("Malformed quoted Git path.");
+  }
+  try {
+    return UTF8.decode(Buffer.concat(output));
+  } catch {
+    throw new Error("Malformed quoted Git path.");
+  }
+}
+
+function tokens(value: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let quoted = false;
+  let escaped = false;
+  for (const character of value) {
+    if (!quoted && character === " ") {
+      if (current.length > 0) result.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+    if (quoted && escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted && character === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (character === '"') quoted = !quoted;
+  }
+  if (quoted) throw new Error("Malformed quoted Git path.");
+  if (current.length > 0) result.push(current);
+  return result;
+}
+
+function pathToken(value: string): string {
+  const decoded = decodeGitQuoted(value);
+  return decoded.startsWith("a/") || decoded.startsWith("b/") ? decoded.slice(2) : decoded;
+}
+
+type MetadataType = GitDiffContentV1["files"][number]["metadata"][number]["type"];
+
+function metadataType(line: string): MetadataType | null {
+  if (line.startsWith("Binary files ") || line.startsWith("GIT binary patch")) return "binary";
+  if (line.startsWith("rename from ")) return "rename_from";
+  if (line.startsWith("rename to ")) return "rename_to";
+  if (line.startsWith("copy from ")) return "copy_from";
+  if (line.startsWith("copy to ")) return "copy_to";
+  if (line.startsWith("similarity index ")) return "similarity";
+  if (line.startsWith("dissimilarity index ")) return "dissimilarity";
+  if (/^(?:old|new|deleted file|new file) mode /.test(line)) return "mode";
+  if (line.startsWith("index ")) return "index";
+  if (EXCLUSION.test(line)) return "excluded";
+  return null;
+}
+
+export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1 {
+  if (text.length === 0) return gitDiffContentV1Schema.parse({
+    schemaVersion: 1, kind: "diff", files: [], preamble: [], truncated, malformed: false
+  });
+  const files: Array<{
+    oldPath: string;
+    newPath: string;
+    headers: string[];
+    metadata: Array<{ type: MetadataType; text: string }>;
+    hunks: Array<{
+      header: string;
+      oldStart: number;
+      oldCount: number;
+      newStart: number;
+      newCount: number;
+      lines: Array<{
+        type: "context" | "add" | "delete" | "excluded" | "no_newline";
+        oldLineNumber: number | null;
+        newLineNumber: number | null;
+        text: string;
+      }>;
+    }>;
+  }> = [];
+  const preamble: string[] = [];
+  let current: typeof files[number] | undefined;
+  let hunk: typeof files[number]["hunks"][number] | undefined;
+  let oldLine = 0;
+  let newLine = 0;
+  let malformed = false;
+
+  for (const line of text.split("\n")) {
+    if (line.length === 0) continue;
+    if (line.startsWith("diff --git ")) {
+      try {
+        const pair = tokens(line.slice("diff --git ".length));
+        if (pair.length !== 2) throw new Error("Malformed diff header.");
+        const oldPath = pathToken(pair[0]!);
+        const newPath = pathToken(pair[1]!);
+        if (line.length > 8_192 || oldPath.length === 0 || oldPath.length > 4_096 ||
+            newPath.length === 0 || newPath.length > 4_096) {
+          throw new Error("Diff header exceeds response bounds.");
+        }
+        current = {
+          oldPath,
+          newPath,
+          headers: [line],
+          metadata: [],
+          hunks: []
+        };
+        files.push(current);
+        hunk = undefined;
+      } catch {
+        malformed = true;
+        preamble.push(line);
+        current = undefined;
+      }
+      continue;
+    }
+    if (current === undefined) {
+      preamble.push(line);
+      if (!EXCLUSION.test(line)) malformed = true;
+      continue;
+    }
+    if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+      current.headers.push(line);
+      try {
+        const parsed = pathToken(line.slice(4));
+        if (line.startsWith("--- ")) current.oldPath = parsed;
+        else current.newPath = parsed;
+      } catch {
+        malformed = true;
+      }
+      continue;
+    }
+    const header = HUNK.exec(line);
+    if (header !== null) {
+      hunk = {
+        header: line,
+        oldStart: Number(header[1]),
+        oldCount: Number(header[2] ?? "1"),
+        newStart: Number(header[3]),
+        newCount: Number(header[4] ?? "1"),
+        lines: []
+      };
+      current.hunks.push(hunk);
+      oldLine = hunk.oldStart;
+      newLine = hunk.newStart;
+      continue;
+    }
+    const type = metadataType(line);
+    if (type !== null && hunk === undefined) {
+      current.metadata.push({ type, text: line });
+      continue;
+    }
+    if (hunk !== undefined && line.startsWith("\\ No newline")) {
+      hunk.lines.push({
+        type: "no_newline", oldLineNumber: null, newLineNumber: null,
+        text: line.replace(/^\\\s*/, "")
+      });
+      continue;
+    }
+    if (hunk !== undefined && [" ", "+", "-"].includes(line[0] ?? "")) {
+      const prefix = line[0]!;
+      const content = line.slice(1);
+      if (prefix === " ") {
+        hunk.lines.push({ type: "context", oldLineNumber: oldLine++, newLineNumber: newLine++, text: content });
+      } else if (prefix === "+") {
+        hunk.lines.push({
+          type: EXCLUSION.test(content) ? "excluded" : "add",
+          oldLineNumber: null,
+          newLineNumber: newLine++,
+          text: content
+        });
+      } else {
+        hunk.lines.push({ type: "delete", oldLineNumber: oldLine++, newLineNumber: null, text: content });
+      }
+      continue;
+    }
+    const fallback = metadataType(line);
+    if (fallback !== null) current.metadata.push({ type: fallback, text: line });
+    else {
+      current.metadata.push({ type: "other", text: line });
+      malformed = true;
+    }
+  }
+
+  return gitDiffContentV1Schema.parse({
+    schemaVersion: 1,
+    kind: "diff",
+    files,
+    preamble,
+    truncated,
+    malformed
+  });
+}

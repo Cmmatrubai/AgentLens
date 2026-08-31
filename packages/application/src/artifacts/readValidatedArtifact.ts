@@ -9,6 +9,7 @@ export interface ArtifactReadRequirements {
   readonly expectedKind: string;
   readonly expectedMediaType: string;
   readonly requireComplete: boolean;
+  readonly requireOwnerOnly?: boolean;
 }
 
 export interface ValidatedArtifactRead {
@@ -99,6 +100,12 @@ export async function readValidatedArtifact(
       stat.dev !== pathStat.dev ||
       stat.ino !== pathStat.ino
     ) throw artifactError("file_identity");
+    if (requirements.requireOwnerOnly) {
+      const effectiveUserId = process.geteuid?.() ?? process.getuid?.();
+      if (effectiveUserId === undefined || stat.uid !== effectiveUserId || (stat.mode & 0o077) !== 0) {
+        throw artifactError("owner_only");
+      }
+    }
     if (stat.size !== artifact.byteLength) throw artifactError("byte_length");
     const bytes = await handle.readFile();
     if (bytes.byteLength !== artifact.byteLength) throw artifactError("byte_length");

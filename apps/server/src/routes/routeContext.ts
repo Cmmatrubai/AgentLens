@@ -4,13 +4,19 @@ import {
   apiErrorV1Schema,
   type ApiErrorCodeV1
 } from "@agentlens/api-contract";
-import { RunQueryServiceError, type RunQueryService } from "@agentlens/application";
+import {
+  EvidenceServiceError,
+  RunQueryServiceError,
+  type EvidenceService,
+  type RunQueryService
+} from "@agentlens/application";
 import { z } from "zod";
 
 import { createResponseNonce, noStoreSecurityHeaders } from "../security/headers.js";
 
 export interface RouteContext {
   readonly runQueries: RunQueryService;
+  readonly evidence: EvidenceService;
   readonly health: () => Readonly<{ schemaVersion: 1; ready: true; readModel: "ready" }>;
 }
 
@@ -102,6 +108,34 @@ export function handleRouteError(response: ServerResponse, error: unknown): void
         return;
       case "run_not_found":
         endError(response, 404, "run_not_found", "Run was not found.");
+        return;
+      case "active_snapshot_unavailable":
+        endError(
+          response,
+          503,
+          "active_snapshot_unavailable",
+          "The active run snapshot is temporarily unavailable.",
+          true
+        );
+        return;
+    }
+  }
+  if (error instanceof EvidenceServiceError) {
+    switch (error.code) {
+      case "invalid_request":
+        endError(response, 400, "invalid_request", "Request parameters are invalid.");
+        return;
+      case "run_not_found":
+        endError(response, 404, "run_not_found", "Run was not found.");
+        return;
+      case "event_not_found":
+        endError(response, 404, "event_not_found", "Event was not found.");
+        return;
+      case "content_unavailable":
+        endError(response, 404, "content_unavailable", "Requested content is unavailable.");
+        return;
+      case "evidence_binding_mismatch":
+        endError(response, 409, "evidence_binding_mismatch", "Evidence binding could not be validated.");
         return;
       case "active_snapshot_unavailable":
         endError(

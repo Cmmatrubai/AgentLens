@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ApiErrorCodeV1, ApiErrorV1 } from "@agentlens/api-contract";
-import type { RunQueryService } from "@agentlens/application";
+import type { EvidenceService, RunQueryService } from "@agentlens/application";
 import { createBootstrapHtml, createReloadHtml } from "./bootstrap.js";
 import { createResponseNonce, noStoreSecurityHeaders, staticSecurityHeaders } from "./security/headers.js";
 import {
@@ -12,6 +12,7 @@ import {
 import { matchesBearer } from "./security/tokens.js";
 import type { StaticAssets } from "./staticAssets.js";
 import { handleEventRoutes } from "./routes/events.js";
+import { handleEvidenceRoutes } from "./routes/evidence.js";
 import { handleHealthRoute } from "./routes/health.js";
 import { handleRunRoutes } from "./routes/runs.js";
 import { handleRouteError } from "./routes/routeContext.js";
@@ -24,6 +25,7 @@ export interface AgentLensRouterOptions {
   readonly staticAssets: StaticAssets;
   readonly health: () => Readonly<{ schemaVersion: 1; ready: true; readModel: "ready" }>;
   readonly runQueries: RunQueryService;
+  readonly evidence: EvidenceService;
 }
 
 function endJson(response: ServerResponse, status: number, value: object): void {
@@ -81,9 +83,14 @@ export function createAgentLensRouter(options: AgentLensRouterOptions) {
         }
         if (isMutationMethod(request.method)) await readBoundedRequestBody(request);
 
-        const routeContext = { runQueries: options.runQueries, health: options.health };
+        const routeContext = {
+          runQueries: options.runQueries,
+          evidence: options.evidence,
+          health: options.health
+        };
         try {
           if (handleHealthRoute(request, response, url, routeContext)) return;
+          if (await handleEvidenceRoutes(request, response, url, routeContext)) return;
           if (await handleEventRoutes(request, response, url, routeContext)) return;
           if (await handleRunRoutes(request, response, url, routeContext)) return;
         } catch (error) {

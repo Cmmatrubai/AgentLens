@@ -107,6 +107,18 @@ describe("readValidatedArtifact", () => {
     }
   );
 
+  it("rejects artifact files readable by group or other users", async () => {
+    const fixture = await artifactFixture();
+    await chmod(fixture.artifact.path, 0o644);
+
+    await expect(readValidatedArtifact(fixture.artifact, fixture.artifactRoot, {
+      expectedKind: "native-payload",
+      expectedMediaType: "application/json",
+      requireComplete: true,
+      requireOwnerOnly: true
+    })).rejects.toThrow(/artifact validation failed \(owner_only\)/i);
+  });
+
   it.each(["alternate", "colliding"] as const)(
     "rejects a %s metadata path even when it stays inside the artifact root",
     async (tamper) => {

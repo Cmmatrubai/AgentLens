@@ -9,7 +9,7 @@ import {
 import { assessmentNoteAvailabilityV1Schema, assessmentVerdictV1Schema, taskCompletionV1Schema } from "./assessment.js";
 
 const boundedId = z.string().min(1).max(256);
-const boundedText = z.string().max(65_536);
+const boundedText = z.string().max(262_144);
 const boundedSummary = z.string().max(512);
 const nonnegativeInteger = z.number().int().nonnegative();
 

@@ -8,6 +8,7 @@ import {
   eventDetailV1Schema,
   eventStatusFieldV1Schema,
   evidenceValueV1Schema,
+  gitDiffContentV1Schema,
   nativeContentResponseV1Schema,
   normalizedContentV1Schema,
   normalizedContentResponseV1Schema,
@@ -323,6 +324,52 @@ describe("closed v1 browser schemas", () => {
       schemaVersion: 1,
       eventId: "event-1",
       content: { format: "json", value: { arbitrary: true }, truncated: false }
+    })).toThrow();
+  });
+
+  it("keeps structured Git diff evidence closed and markup-free", () => {
+    const diff = {
+      schemaVersion: 1,
+      kind: "diff",
+      files: [{
+        oldPath: "src/old.ts",
+        newPath: "src/new.ts",
+        headers: ["diff --git a/src/old.ts b/src/new.ts"],
+        metadata: [{ type: "rename_from", text: "rename from src/old.ts" }],
+        hunks: [{
+          header: "@@ -1,2 +1,2 @@",
+          oldStart: 1,
+          oldCount: 2,
+          newStart: 1,
+          newCount: 2,
+          lines: [
+            { type: "context", oldLineNumber: 1, newLineNumber: 1, text: "same" },
+            { type: "delete", oldLineNumber: 2, newLineNumber: null, text: "old" },
+            { type: "add", oldLineNumber: null, newLineNumber: 2, text: "new" }
+          ]
+        }]
+      }],
+      preamble: [],
+      truncated: false,
+      malformed: false
+    } as const;
+    expect(gitDiffContentV1Schema.parse(diff)).toEqual(diff);
+    expect(() => gitDiffContentV1Schema.parse({
+      ...diff,
+      files: [{ ...diff.files[0], html: "<script>unsafe()</script>" }]
+    })).toThrow();
+    expect(() => gitDiffContentV1Schema.parse({
+      ...diff,
+      files: [{
+        ...diff.files[0],
+        hunks: [{
+          ...diff.files[0].hunks[0],
+          lines: [{
+            ...diff.files[0].hunks[0].lines[0],
+            oldLineNumber: null
+          }]
+        }]
+      }]
     })).toThrow();
   });
 

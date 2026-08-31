@@ -63,9 +63,16 @@ export const assessmentResponseV1Schema = z.object({
   etag: z.string().min(1).max(256)
 }).strict();
 
+export const assessmentNoteContentV1Schema = z.object({
+  schemaVersion: z.literal(1),
+  eventId: z.string().min(1).max(256),
+  content: z.string().max(16_384)
+}).strict();
+
 export type AssessmentVerdictV1 = z.infer<typeof assessmentVerdictV1Schema>;
 export type TaskCompletionV1 = z.infer<typeof taskCompletionV1Schema>;
 export type AssessmentNoteAvailabilityV1 = z.infer<typeof assessmentNoteAvailabilityV1Schema>;
 export type CurrentAssessmentV1 = z.infer<typeof currentAssessmentV1Schema>;
 export type AssessmentUpdateRequestV1 = z.infer<typeof assessmentUpdateRequestV1Schema>;
 export type AssessmentResponseV1 = z.infer<typeof assessmentResponseV1Schema>;
+export type AssessmentNoteContentV1 = z.infer<typeof assessmentNoteContentV1Schema>;

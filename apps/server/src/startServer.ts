@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createCursorCodec,
+  createEvidenceService,
   createRunQueryService,
   createSourceRefProjector,
   systemProcessIdentityInspector
@@ -107,6 +108,10 @@ export async function startAgentLensServer(
         : unavailableProviderCapabilities
     }
   });
+  const evidence = createEvidenceService({
+    databasePath: join(options.dataRoot, "agentlens.sqlite"),
+    artifactRoot: join(options.dataRoot, "artifacts", "sha256")
+  });
   listener = createAgentLensRouter({
     origin,
     expectedHost,
@@ -114,7 +119,8 @@ export async function startAgentLensServer(
     bootstrapCode,
     staticAssets,
     health: () => ({ schemaVersion: 1, ready: true, readModel: "ready" }),
-    runQueries
+    runQueries,
+    evidence
   });
 
   let closePromise: Promise<void> | undefined;
