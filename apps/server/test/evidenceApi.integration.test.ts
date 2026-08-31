@@ -12,7 +12,11 @@ import {
   type EvidenceService
 } from "../../../packages/application/src/index.js";
 import { normalizeCodexRecord } from "../../../packages/codex/src/index.js";
-import { ArtifactStore } from "../../../packages/core/src/index.js";
+import {
+  ArtifactStore,
+  RedactedBytes,
+  redactText
+} from "../../../packages/core/src/index.js";
 import { RunRepository, openDatabase } from "../../../packages/storage/src/index.js";
 import { persistEventDraft } from "../../cli/src/persistEvent.js";
 import { createAgentLensRouter } from "../src/router.js";
@@ -378,12 +382,46 @@ describe("Task 7.7 evidence API", () => {
         storage: event.nativePayload.storage
       });
     }
+
+    const textSessionId = "TEXT_HTTP_SOURCE_SESSION";
+    const textItemId = "TEXT_HTTP_SOURCE_ITEM";
+    const redactedText = redactText(
+      `before ${textSessionId} nested-${textItemId} after TEXT_HTTP_INSPECTABLE_CONTENT`,
+      { policy: "standard", key: Buffer.alloc(32, 7), contentClass: "native" }
+    );
+    const textArtifact = await artifactStore.writeRedacted({
+      runId: "native-source-run",
+      kind: "native-payload",
+      redactedBytes: RedactedBytes.fromText(redactedText),
+      mediaType: "text/plain; charset=utf-8"
+    });
+    await repository.commitArtifactMetadata(textArtifact, redactedText.audits);
+    repository.appendEvent({
+      id: "native-text",
+      runId: "native-source-run",
+      sequence: sequence++,
+      receivedAt: "2026-08-31T12:00:00.000Z",
+      kind: "tool",
+      status: "completed",
+      provenance: "observed",
+      source: {
+        provider: "codex-exec",
+        sessionId: textSessionId,
+        itemId: textItemId,
+        eventType: "item.completed",
+        itemType: "mcp_tool_call"
+      },
+      relationships: [],
+      summary: "redacted native text fixture",
+      nativePayload: { storage: "artifact", artifactId: textArtifact.id }
+    });
     database.close();
 
     const evidence = createEvidenceService({ databasePath, artifactRoot });
     const directResponses = await Promise.all(persisted.map(({ eventId }) =>
       evidence.eventNative("native-source-run", eventId)
     ));
+    const directTextResponse = await evidence.eventNative("native-source-run", "native-text");
 
     let seed = 11;
     const handle = await startAgentLensServer({
@@ -400,6 +438,11 @@ describe("Task 7.7 evidence API", () => {
       expect(response.status).toBe(200);
       return response.json();
     }));
+    const textHttpResponse = await fetch(
+      `${handle.origin}/api/v1/runs/native-source-run/events/native-text/native`, { headers }
+    );
+    expect(textHttpResponse.status).toBe(200);
+    const httpTextResponseBody = await textHttpResponse.json();
 
     for (const [index, { sourceValues, storage }] of persisted.entries()) {
       expect(storage).toBe(index === 0 ? "inline" : "artifact");
@@ -416,5 +459,19 @@ describe("Task 7.7 evidence API", () => {
     expect(JSON.stringify(httpResponses[1])).not.toContain(
       "[[AGENTLENS_RESPONSE_REDACTED:THREAD_ID]]"
     );
+    for (const response of [directTextResponse, httpTextResponseBody]) {
+      expect(response).toEqual({
+        schemaVersion: 1,
+        eventId: "native-text",
+        content: {
+          format: "text",
+          text: "before [[AGENTLENS_RESPONSE_REDACTED:SESSION_ID]] nested-[[AGENTLENS_RESPONSE_REDACTED:ITEM_ID]] after TEXT_HTTP_INSPECTABLE_CONTENT",
+          truncated: false
+        }
+      });
+      const serialized = JSON.stringify(response);
+      expect(serialized).not.toContain(textSessionId);
+      expect(serialized).not.toContain(textItemId);
+    }
   });
 });

@@ -174,6 +174,7 @@ async function artifactEvidenceFixture(
   options: Readonly<{
     targetContent?: string | Buffer;
     targetOverrides?: Partial<CompletedArtifact>;
+    nativeSource?: TraceEventV1["source"];
   }> = {}
 ) {
   const setup = await fixture();
@@ -192,6 +193,7 @@ async function artifactEvidenceFixture(
   const native = await make("native");
   await setup.repository.commitArtifactMetadata(native);
   setup.repository.appendEvent(trace(runId, "matrix-native", 0, {
+    ...(options.nativeSource === undefined ? {} : { source: options.nativeSource }),
     nativePayload: { storage: "artifact", artifactId: native.id }
   }));
   setup.repository.appendEvent(trace(runId, "matrix-message", 1, {
@@ -234,12 +236,15 @@ async function artifactEvidenceFixture(
     capturedAt: 2
   });
   setup.createRun("matrix-other", "standard");
+  const otherMediaType = targetRoute === "native" && options.targetOverrides?.mediaType !== undefined
+    ? options.targetOverrides.mediaType
+    : artifactRouteMedia[targetRoute];
   const otherArtifact = await completedArtifact(
     setup.artifactRoot,
     "matrix-other",
     artifactRouteKinds[targetRoute],
-    artifactRouteMedia[targetRoute],
-    targetRoute === "native" || targetRoute === "diff-check" || targetRoute === "untracked"
+    otherMediaType,
+    otherMediaType === "application/json"
       ? JSON.stringify({ other: targetRoute })
       : `other ${targetRoute}\n`
   );
@@ -617,6 +622,76 @@ describe("Task 7.7 evidence projection", () => {
     ].join("\n");
     expect(parseGitDiff(text, true)).toMatchObject({ truncated: true, malformed: false });
     expect(parseGitDiff(text, false)).toMatchObject({ truncated: false, malformed: true });
+  });
+
+  it("parses header-looking deleted and added content inside an active hunk", () => {
+    const parsed = parseGitDiff([
+      "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts",
+      "@@ -1 +1 @@", "--- old marker", "+++ new marker", ""
+    ].join("\n"), false);
+    expect(parsed).toMatchObject({
+      malformed: false,
+      files: [{
+        oldPath: "a.ts",
+        newPath: "a.ts",
+        hunks: [{
+          lines: [
+            { type: "delete", oldLineNumber: 1, newLineNumber: null, text: "-- old marker" },
+            { type: "add", oldLineNumber: null, newLineNumber: 1, text: "++ new marker" }
+          ]
+        }]
+      }]
+    });
+  });
+
+  it("keeps a bounded Git binary patch block as opaque binary metadata", () => {
+    const parsed = parseGitDiff([
+      "diff --git a/blob.bin b/blob.bin",
+      "new file mode 100644",
+      "index 0000000..0123456",
+      "GIT binary patch",
+      "literal 3",
+      "KcmZQzU|?VbYybcN",
+      "literal 0",
+      "HcmV?d00001",
+      ""
+    ].join("\n"), false);
+    expect(parsed).toMatchObject({
+      malformed: false,
+      files: [{
+        oldPath: "blob.bin",
+        newPath: "blob.bin",
+        hunks: [],
+        metadata: [
+          { type: "mode", text: "new file mode 100644" },
+          { type: "index", text: "index 0000000..0123456" },
+          { type: "binary", text: "GIT binary patch" },
+          { type: "binary", text: "literal 3" },
+          { type: "binary", text: "KcmZQzU|?VbYybcN" },
+          { type: "binary", text: "literal 0" },
+          { type: "binary", text: "HcmV?d00001" }
+        ]
+      }]
+    });
+  });
+
+  it.each([
+    ["an unpaired old header", ["--- a/a.ts"]],
+    ["an unpaired new header", ["+++ b/a.ts"]],
+    ["reversed text headers", ["+++ b/a.ts", "--- a/a.ts"]],
+    ["duplicate old headers", ["--- a/a.ts", "--- a/a.ts", "+++ b/a.ts"]]
+  ] as const)("marks a non-truncated file with %s malformed", (_name, headers) => {
+    const parsed = parseGitDiff(["diff --git a/a.ts b/a.ts", ...headers, ""].join("\n"), false);
+    expect(parsed.malformed).toBe(true);
+  });
+
+  it("bounds an oversized Git binary patch metadata block as malformed", () => {
+    const payload = Array.from({ length: 1_001 }, (_, index) => `opaque-${index}`);
+    const parsed = parseGitDiff([
+      "diff --git a/blob.bin b/blob.bin", "GIT binary patch", ...payload, ""
+    ].join("\n"), false);
+    expect(parsed.malformed).toBe(true);
+    expect(parsed.files[0]?.metadata).toHaveLength(1_000);
   });
 
   it("exposes a typed unavailable error instead of accepting invalid service identifiers", async () => {
@@ -1309,6 +1384,88 @@ describe("Task 7.7 bound artifact route matrix", () => {
     expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(artifactRouteLimits[route]);
     const setup = await artifactEvidenceFixture(route, { targetContent: content });
     await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+});
+
+describe("Task 7.7 native UTF-8 text evidence", () => {
+  const textSource = {
+    provider: "codex-exec" as const,
+    sessionId: "TEXT_SOURCE_SESSION",
+    itemId: "TEXT_SOURCE_ITEM",
+    eventType: "item.completed"
+  };
+  const textMediaType = "text/plain; charset=utf-8";
+
+  it.each([
+    ["complete", false],
+    ["truncated", true]
+  ] as const)("reads and source-masks %s native text evidence", async (_name, truncated) => {
+    const setup = await artifactEvidenceFixture("native", {
+      targetContent: "before TEXT_SOURCE_SESSION nested-TEXT_SOURCE_ITEM after inspectable text",
+      targetOverrides: {
+        mediaType: textMediaType,
+        ...(truncated ? { truncated: true, originalByteLength: 1_000_000 } : {})
+      },
+      nativeSource: textSource
+    });
+    const result = await readMatrixRoute(setup, "native");
+    expect(result).toEqual({
+      schemaVersion: 1,
+      eventId: "matrix-native",
+      content: {
+        format: "text",
+        text: "before [[AGENTLENS_RESPONSE_REDACTED:SESSION_ID]] nested-[[AGENTLENS_RESPONSE_REDACTED:ITEM_ID]] after inspectable text",
+        truncated
+      }
+    });
+  });
+
+  it("rejects invalid UTF-8 native text", async () => {
+    const setup = await artifactEvidenceFixture("native", {
+      targetContent: Buffer.from([0xff, 0xfe]),
+      targetOverrides: { mediaType: textMediaType },
+      nativeSource: textSource
+    });
+    await expect(readMatrixRoute(setup, "native"))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it("rejects native text media outside the exact allowlist", async () => {
+    const setup = await artifactEvidenceFixture("native", {
+      targetContent: "inspectable text",
+      targetOverrides: { mediaType: "text/plain" },
+      nativeSource: textSource
+    });
+    await expect(readMatrixRoute(setup, "native"))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(["cross-run", "wrong-role"] as const)(
+    "rejects %s rebinding before reading native text",
+    async (tamper) => {
+      const setup = await artifactEvidenceFixture("native", {
+        targetContent: "inspectable text",
+        targetOverrides: { mediaType: textMediaType },
+        nativeSource: textSource
+      });
+      await rebindRouteArtifact(
+        setup,
+        "native",
+        tamper === "cross-run" ? setup.otherArtifact.id : setup.artifacts.note.id
+      );
+      await expect(readMatrixRoute(setup, "native"))
+        .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+    }
+  );
+
+  it("rejects native text whose source masking expands beyond the response bound", async () => {
+    const setup = await artifactEvidenceFixture("native", {
+      targetContent: "SRC".repeat(7_000),
+      targetOverrides: { mediaType: textMediaType },
+      nativeSource: { provider: "codex-exec", sessionId: "SRC" }
+    });
+    await expect(readMatrixRoute(setup, "native"))
       .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
   });
 });

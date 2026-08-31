@@ -5,6 +5,8 @@ import { gitDiffContentV1Schema, type GitDiffContentV1 } from "@agentlens/api-co
 const HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?:.*)$/;
 const EXCLUSION = /^\[\[EXCLUDED:[a-z0-9._-]{1,128}\]\]$/;
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
+const MAX_FILE_HEADERS = 64;
+const MAX_FILE_METADATA = 1_000;
 
 function decodeGitQuoted(value: string): string {
   if (!value.startsWith('"')) return value;
@@ -123,6 +125,7 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
   let consumedNew = 0;
   let hasOldHeader = false;
   let hasNewHeader = false;
+  let inBinaryPatch = false;
   let malformed = false;
 
   const closeHunk = (allowTruncatedIncomplete: boolean): void => {
@@ -135,10 +138,25 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
     consumedNew = 0;
   };
 
+  const closeFile = (allowTruncatedFinalHunk: boolean): void => {
+    closeHunk(allowTruncatedFinalHunk);
+    if (current !== undefined && hasOldHeader !== hasNewHeader) malformed = true;
+    inBinaryPatch = false;
+  };
+
+  const pushMetadata = (type: MetadataType, line: string): void => {
+    if (current === undefined) return;
+    if (current.metadata.length >= MAX_FILE_METADATA) {
+      malformed = true;
+      return;
+    }
+    current.metadata.push({ type, text: line });
+  };
+
   for (const line of text.split("\n")) {
     if (line.length === 0) continue;
     if (line.startsWith("diff --git ")) {
-      closeHunk(false);
+      closeFile(false);
       try {
         const pair = tokens(line.slice("diff --git ".length));
         if (pair.length !== 2) throw new Error("Malformed diff header.");
@@ -158,12 +176,14 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
         files.push(current);
         hasOldHeader = false;
         hasNewHeader = false;
+        inBinaryPatch = false;
       } catch {
         malformed = true;
         preamble.push(line);
         current = undefined;
         hasOldHeader = false;
         hasNewHeader = false;
+        inBinaryPatch = false;
       }
       continue;
     }
@@ -172,48 +192,8 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
       if (!EXCLUSION.test(line)) malformed = true;
       continue;
     }
-    if (line.startsWith("--- ") || line.startsWith("+++ ")) {
-      if (hunk !== undefined) {
-        closeHunk(false);
-        malformed = true;
-      }
-      current.headers.push(line);
-      try {
-        const parsed = pathToken(line.slice(4));
-        if (line.startsWith("--- ")) {
-          current.oldPath = parsed;
-          hasOldHeader = true;
-        } else {
-          current.newPath = parsed;
-          hasNewHeader = true;
-        }
-      } catch {
-        malformed = true;
-      }
-      continue;
-    }
-    const header = HUNK.exec(line);
-    if (header !== null) {
-      closeHunk(false);
-      if (!hasOldHeader || !hasNewHeader) malformed = true;
-      hunk = {
-        header: line,
-        oldStart: Number(header[1]),
-        oldCount: Number(header[2] ?? "1"),
-        newStart: Number(header[3]),
-        newCount: Number(header[4] ?? "1"),
-        lines: []
-      };
-      current.hunks.push(hunk);
-      oldLine = hunk.oldStart;
-      newLine = hunk.newStart;
-      consumedOld = 0;
-      consumedNew = 0;
-      continue;
-    }
-    const type = metadataType(line);
-    if (type !== null && hunk === undefined) {
-      current.metadata.push({ type, text: line });
+    if (inBinaryPatch) {
+      pushMetadata("binary", line);
       continue;
     }
     if (hunk !== undefined && line.startsWith("\\ No newline")) {
@@ -251,16 +231,61 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
       if (consumesNew) consumedNew += 1;
       continue;
     }
+
+    const header = HUNK.exec(line);
+    if (header !== null) {
+      closeHunk(false);
+      if (!hasOldHeader || !hasNewHeader) malformed = true;
+      hunk = {
+        header: line,
+        oldStart: Number(header[1]),
+        oldCount: Number(header[2] ?? "1"),
+        newStart: Number(header[3]),
+        newCount: Number(header[4] ?? "1"),
+        lines: []
+      };
+      current.hunks.push(hunk);
+      oldLine = hunk.oldStart;
+      newLine = hunk.newStart;
+      consumedOld = 0;
+      consumedNew = 0;
+      continue;
+    }
+
+    if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+      closeHunk(false);
+      if (current.headers.length >= MAX_FILE_HEADERS) malformed = true;
+      else current.headers.push(line);
+      try {
+        const parsed = pathToken(line.slice(4));
+        if (line.startsWith("--- ")) {
+          if (hasOldHeader || hasNewHeader) malformed = true;
+          current.oldPath = parsed;
+          hasOldHeader = true;
+        } else {
+          if (!hasOldHeader || hasNewHeader) malformed = true;
+          current.newPath = parsed;
+          hasNewHeader = true;
+        }
+      } catch {
+        malformed = true;
+      }
+      continue;
+    }
+
     closeHunk(false);
     const fallback = metadataType(line);
-    if (fallback !== null) current.metadata.push({ type: fallback, text: line });
+    if (fallback !== null) {
+      pushMetadata(fallback, line);
+      if (line.startsWith("GIT binary patch")) inBinaryPatch = true;
+    }
     else {
-      current.metadata.push({ type: "other", text: line });
+      pushMetadata("other", line);
       malformed = true;
     }
   }
 
-  closeHunk(truncated);
+  closeFile(truncated);
 
   return gitDiffContentV1Schema.parse({
     schemaVersion: 1,

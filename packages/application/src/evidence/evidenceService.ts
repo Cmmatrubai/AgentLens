@@ -42,6 +42,10 @@ const LIMITS = Object.freeze({
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 const EXCLUSION_STATUS = /^\[\[EXCLUDED:[a-z0-9._-]{1,128}\]\]$/;
 const GIT_STATUS_KINDS = new Set(["git-initial-status", "git-final-status"]);
+const NATIVE_ARTIFACT_FORMATS: Readonly<Record<string, "json" | "text">> = Object.freeze({
+  "application/json": "json",
+  "text/plain; charset=utf-8": "text"
+});
 const NATIVE_SOURCE_MARKERS = Object.freeze([
   ["sessionId", "[[AGENTLENS_RESPONSE_REDACTED:SESSION_ID]]"],
   ["threadId", "[[AGENTLENS_RESPONSE_REDACTED:THREAD_ID]]"],
@@ -388,28 +392,37 @@ export function createEvidenceService(input: CreateEvidenceServiceInput): Eviden
         if (native === undefined || native.storage === "omitted") {
           throw new EvidenceServiceError("content_unavailable");
         }
-        let parsed: unknown;
+        let format: "json" | "text" = "json";
+        let durableText: string;
         let truncated = false;
         if (native.storage === "inline") {
-          const durableText = JSON.stringify(native.redacted);
+          durableText = JSON.stringify(native.redacted);
           if (Buffer.byteLength(durableText, "utf8") > LIMITS.native) {
             throw new EvidenceServiceError("evidence_binding_mismatch");
           }
-          parsed = parseJson(durableText);
+          parseJson(durableText);
         } else {
           const artifact = boundArtifact(repository, runId, native.artifactId);
+          const artifactFormat = NATIVE_ARTIFACT_FORMATS[artifact.mediaType];
+          if (artifactFormat === undefined) {
+            throw new EvidenceServiceError("evidence_binding_mismatch");
+          }
           const value = await artifactBytes(artifact, input.artifactRoot, {
             maximum: LIMITS.native,
             expectedKind: "native-payload",
-            expectedMediaType: "application/json",
+            expectedMediaType: artifact.mediaType,
             requireComplete: false
           });
-          parsed = parseJson(decodeUtf8(value.bytes));
+          durableText = decodeUtf8(value.bytes);
+          format = artifactFormat;
+          if (format === "json") parseJson(durableText);
           truncated = value.truncated;
         }
         let text: string;
         try {
-          text = JSON.stringify(projectNativeJson(parsed, event.source));
+          text = format === "json"
+            ? JSON.stringify(projectNativeJson(parseJson(durableText), event.source))
+            : redactSourceString(durableText, sourceReplacements(event.source));
         } catch {
           throw new EvidenceServiceError("evidence_binding_mismatch");
         }
@@ -419,7 +432,7 @@ export function createEvidenceService(input: CreateEvidenceServiceInput): Eviden
         const value = nativeContentResponseV1Schema.parse({
           schemaVersion: 1,
           eventId,
-          content: { format: "json", text, truncated }
+          content: { format, text, truncated }
         });
         responseWithin(value, LIMITS.native);
         return value;
