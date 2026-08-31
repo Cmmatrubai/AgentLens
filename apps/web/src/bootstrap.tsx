@@ -5,6 +5,7 @@ import "@fontsource-variable/geist-mono/wght.css";
 import "./styles/tokens.css";
 import "./styles/global.css";
 import "./styles/run-list.css";
+import "./styles/trajectory.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";

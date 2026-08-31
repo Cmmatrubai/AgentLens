@@ -5,7 +5,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   maximumEcmaScriptTimestamp,
   type RunListItemV1,
-  type RunPageV1
+  type RunPageV1,
+  type TrajectoryEventV1
 } from "@agentlens/api-contract";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -386,7 +387,61 @@ describe("production run ledger", () => {
   it("renders every row as a semantic destination with independent evidence labels", async () => {
     const user = userEvent.setup();
     const item = run("semantic-run", { state: "known", value: "completed" });
-    renderApp(clientWithList(vi.fn(async () => page([item]))));
+    const client = clientWithList(vi.fn(async () => page([item])));
+    client.getRun = vi.fn(async () => ({
+      ...item,
+      eventCount: 1,
+      anchors: {
+        firstFailure: null,
+        recorderRecovery: null,
+        latestLikelyTest: null,
+        finalGitEvidence: null,
+        latestEvent: { eventId: "semantic-event", sequence: 1 }
+      }
+    }));
+    const trajectoryEvent = {
+      schemaVersion: 1,
+      eventId: "semantic-event",
+      runId: item.runId,
+      sequence: 1,
+      receivedAt: "2026-08-31T16:00:00.000Z",
+      sourceOccurredAt: { state: "unavailable", reason: "not_captured" },
+      kind: "message",
+      status: { state: "known", value: "completed" },
+      provenance: "observed",
+      presentationClass: "message",
+      safeSummary: "Safe semantic event",
+      source: {
+        opaqueRef: `src_${"a".repeat(64)}`,
+        provider: { state: "known", value: "codex-exec" },
+        hasSessionOrThread: true,
+        hasTurn: true,
+        hasItemOrTool: true,
+        hasCorrelation: false
+      },
+      relationships: [],
+      derivation: null,
+      nativePayload: { state: "unavailable", reason: "not_captured" },
+      lifecycleGroupKey: null,
+      detail: { state: "available" }
+    } satisfies TrajectoryEventV1;
+    client.getEvents = vi.fn().mockResolvedValueOnce({
+      schemaVersion: 1,
+      runId: item.runId,
+      mode: "head",
+      items: [trajectoryEvent],
+      window: {
+        state: "nonempty",
+        minSequence: 1,
+        maxSequence: 1,
+        latestCommittedSequence: 1,
+        hasEarlier: false,
+        hasLater: true,
+        earlierCursor: null,
+        laterCursor: "later-page"
+      }
+    }).mockRejectedValueOnce(new Error("private cursor failure"));
+    renderApp(client);
     const link = await screen.findByRole("link", { name: /Run semantic-run/ });
     expect(link).toHaveAttribute("href", "/runs/semantic-run");
     expect(link.closest("li")).not.toBeNull();
@@ -396,8 +451,14 @@ describe("production run ledger", () => {
     expect(screen.getByText("Git")).toBeVisible();
 
     await user.click(link);
-    expect(screen.getByRole("heading", { name: "Run detail" })).toBeVisible();
-    await user.click(screen.getByRole("link", { name: "Return to the run ledger" }));
+    expect(await screen.findByRole("heading", { name: "Run semantic-run" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Jump to latest event" }));
+    expect(screen.getByTestId("location")).toHaveTextContent("/runs/semantic-run?event=semantic-event");
+    expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", "semantic-event");
+    await user.click(screen.getByRole("button", { name: "Load later" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The next trajectory page could not be loaded.");
+    expect(screen.queryByText("private cursor failure")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "← Run ledger" }));
     expect(await screen.findByRole("heading", { name: "Run ledger" })).toBeVisible();
   });
 
