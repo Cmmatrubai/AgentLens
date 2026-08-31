@@ -217,6 +217,42 @@ describe("shared assessment application service", () => {
     expect((await durableBytes(setup.dataRoot)).includes(Buffer.from("API_KEY=x"))).toBe(false);
   });
 
+  it("rejects an invalid generated event ID before note processing or durable assessment mutation", async () => {
+    const setup = await fixture("standard");
+    const beforeFiles = await regularFiles(setup.dataRoot);
+    const before = current(setup.databasePath, setup.dataRoot, setup.runId);
+    const note = "INVALID_ID_NOTE_SENTINEL_7a918c";
+    let notePipelineCalls = 0;
+    const pipelineCalled = () => {
+      notePipelineCalls += 1;
+      throw new Error("note pipeline must not run for an invalid generated event ID");
+    };
+
+    const error = await createAssessmentService({
+      dataRoot: setup.dataRoot,
+      now: () => assessedAt,
+      eventId: () => "invalid\0assessment-event",
+      noteContent: {
+        loadKey: pipelineCalled,
+        redact: pipelineCalled,
+        write: pipelineCalled
+      } as never
+    }).assess({
+      runId: setup.runId,
+      verdict: "success",
+      taskCompleted: "yes",
+      note,
+      expectedRevision: { state: "unconditional" }
+    }).then(() => null, (cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(AssessmentServiceError);
+    expect(error).toMatchObject({ code: "invalid_request" });
+    expect(notePipelineCalls).toBe(0);
+    expect(current(setup.databasePath, setup.dataRoot, setup.runId)).toEqual(before);
+    expect(await regularFiles(setup.dataRoot)).toEqual(beforeFiles);
+    expect((await durableBytes(setup.dataRoot)).includes(Buffer.from(note))).toBe(false);
+  });
+
   it("rejects invalid explicit unreviewed input before creating a missing data root", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentlens-assessment-service-invalid-"));
     roots.push(root);

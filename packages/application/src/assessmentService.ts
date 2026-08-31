@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import { browserAddressableEventIdV1Schema } from "@agentlens/api-contract";
 import {
   ArtifactStore,
   loadOrCreateRedactionKey,
@@ -223,6 +224,13 @@ export function createAssessmentService(
   return Object.freeze({
     async assess(input: Parameters<AssessmentService["assess"]>[0]) {
       validateAssessmentInput(input);
+      const nextEventId = eventId();
+      if (!browserAddressableEventIdV1Schema.safeParse(nextEventId).success) {
+        throw new AssessmentServiceError(
+          "invalid_request",
+          "Assessment event ID is not browser-addressable."
+        );
+      }
       const located = await locateExistingDataRoot(dataRoot);
 
       const validationDatabase = openDatabaseReadOnly(located.databasePath);
@@ -276,10 +284,6 @@ export function createAssessmentService(
         const receivedAt = now();
         if (!(receivedAt instanceof Date) || !Number.isFinite(receivedAt.getTime())) {
           throw new Error("Assessment timestamp is invalid.");
-        }
-        const nextEventId = eventId();
-        if (typeof nextEventId !== "string" || nextEventId.length === 0) {
-          throw new Error("Assessment event ID must not be empty.");
         }
         return await repository.updateAssessment({
           runId: input.runId,

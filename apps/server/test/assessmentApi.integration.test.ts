@@ -4,12 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  createCursorCodec,
   createAssessmentService,
   createEvidenceService,
+  createRunQueryService,
+  createSourceRefProjector,
+  systemProcessIdentityInspector,
   type AssessmentService,
   type EvidenceService,
   type RunQueryService
 } from "@agentlens/application";
+import { codexExecCapabilities } from "@agentlens/core";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { openDatabase, RunRepository } from "../../../packages/storage/src/index.js";
@@ -83,7 +88,8 @@ async function durableBytes(root: string): Promise<Buffer> {
 
 async function serve(
   assessment: AssessmentService,
-  evidence: EvidenceService = {} as EvidenceService
+  evidence: EvidenceService = {} as EvidenceService,
+  runQueries: RunQueryService = {} as RunQueryService
 ) {
   const server = createServer();
   servers.push(server);
@@ -98,7 +104,7 @@ async function serve(
     bootstrapCode: "bootstrap",
     staticAssets: { entryUrl: "/assets/fixture.js", read: async () => null },
     health: () => ({ schemaVersion: 1, ready: true, readModel: "ready" }),
-    runQueries: {} as RunQueryService,
+    runQueries,
     evidence,
     assessment
   });
@@ -587,5 +593,55 @@ describe("Task 7.8 conditional assessment API", () => {
     expect(stored.artifacts).toEqual([]);
     expect(stored.current).toMatchObject({ state: "projected", currentEventId: null });
     expect((await durableBytes(setup.dataRoot)).includes(Buffer.from("API_KEY=x"))).toBe(false);
+  });
+
+  it("writes and reads a broadly addressable assessment event through encoded event routes", async () => {
+    const setup = await fixture();
+    const eventId = "assessment review !?/# ☃";
+    const note = "reachable reviewer note";
+    const evidence = createEvidenceService({
+      databasePath: setup.databasePath,
+      artifactRoot: setup.artifactRoot
+    });
+    const runQueries = createRunQueryService({
+      databasePath: setup.databasePath,
+      artifactRoot: setup.artifactRoot,
+      cursorCodec: createCursorCodec(),
+      sourceRefProjector: createSourceRefProjector(),
+      processIdentityInspector: systemProcessIdentityInspector,
+      providerCapabilities: { forProvider: () => codexExecCapabilities }
+    });
+    const origin = await serve(createAssessmentService({
+      dataRoot: setup.dataRoot,
+      now: () => new Date("2026-08-31T18:23:00.000Z"),
+      eventId: () => eventId
+    }), evidence, runQueries);
+    const update = await fetch(`${origin}/api/v1/runs/${setup.runId}/assessment`, {
+      method: "PUT",
+      headers: requestHeaders(origin, '"assessment:projected"'),
+      body: body({ state: "text", text: note })
+    });
+    expect(update.status).toBe(200);
+
+    const encodedEventId = encodeURIComponent(eventId);
+    expect(encodedEventId).toContain("%2F");
+    const detail = await fetch(
+      `${origin}/api/v1/runs/${setup.runId}/events/${encodedEventId}`,
+      { headers: { Authorization: authorization } }
+    );
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({
+      schemaVersion: 1,
+      eventId,
+      presentationClass: "assessment",
+      revision: eventId
+    });
+
+    const noteResponse = await fetch(
+      `${origin}/api/v1/runs/${setup.runId}/events/${encodedEventId}/assessment-note`,
+      { headers: { Authorization: authorization } }
+    );
+    expect(noteResponse.status).toBe(200);
+    expect(await noteResponse.json()).toEqual({ schemaVersion: 1, eventId, content: note });
   });
 });

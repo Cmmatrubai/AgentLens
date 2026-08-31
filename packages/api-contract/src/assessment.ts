@@ -17,10 +17,22 @@ function isCanonicalUtf8(value: string): boolean {
   }
 }
 
-export const assessmentEventIdV1Schema = z.string()
+function isBrowserAddressableEventId(value: string): boolean {
+  return isCanonicalUtf8(value) &&
+    !/\p{Cc}/u.test(value) &&
+    value !== "." &&
+    value !== "..";
+}
+
+export const browserAddressableEventIdV1Schema = z.string()
   .min(1)
   .max(maximumAssessmentEventIdCharacters)
-  .refine(isCanonicalUtf8, "Assessment event ID must round-trip through UTF-8.");
+  .refine(
+    isBrowserAddressableEventId,
+    "Event ID must be canonical UTF-8 without Unicode controls or URL dot segments."
+  );
+
+export const assessmentEventIdV1Schema = browserAddressableEventIdV1Schema;
 
 export const assessmentVerdictV1Schema = z.enum([
   "unreviewed",

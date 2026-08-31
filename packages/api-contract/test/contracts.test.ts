@@ -6,6 +6,7 @@ import {
   assessmentConflictResponseV1Schema,
   assessmentResponseV1Schema,
   assessmentUpdateRequestV1Schema,
+  browserAddressableEventIdV1Schema,
   currentAssessmentV1Schema,
   eventDetailV1Schema,
   eventStatusFieldV1Schema,
@@ -572,4 +573,33 @@ describe("closed v1 browser schemas", () => {
       ...explicit, currentEventId: "broken-\ud800-surrogate"
     })).toThrow();
   });
+
+  it.each(["\0", "\r", "\n", "\u007f", "\u0080", "\u009f"])(
+    "rejects Unicode control U+%s from browser-addressable event IDs",
+    (control) => {
+      const eventId = `event${control}id`;
+      expect(() => browserAddressableEventIdV1Schema.parse(eventId)).toThrow();
+      expect(() => currentAssessmentV1Schema.parse({
+        schemaVersion: 1,
+        state: "explicit",
+        verdict: "success",
+        taskCompleted: "yes",
+        note: { state: "absent" },
+        provenance: "human",
+        currentEventId: eventId,
+        reviewedAt: 1,
+        updatedAt: 1
+      })).toThrow();
+      expect(() => eventDetailV1Schema.parse({
+        ...detailBase,
+        eventId,
+        presentationClass: "assessment",
+        revision: eventId,
+        verdict: "success",
+        taskCompleted: "yes",
+        note: { state: "absent" },
+        content: availableContent
+      })).toThrow();
+    }
+  );
 });

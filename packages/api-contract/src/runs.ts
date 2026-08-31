@@ -1,6 +1,9 @@
 import { z } from "zod";
 
-import { currentAssessmentV1Schema } from "./assessment.js";
+import {
+  browserAddressableEventIdV1Schema,
+  currentAssessmentV1Schema
+} from "./assessment.js";
 import {
   evidenceValueV1Schema,
   providerFieldV1Schema,
@@ -30,7 +33,7 @@ export const providerCapabilityLimitationV1Schema = z.object({
 }).strict();
 
 const evidenceIds = {
-  supportingEventIds: z.array(boundedId).max(1_000),
+  supportingEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
   supportingArtifactIds: z.array(boundedId).max(1_000)
 };
 
@@ -63,8 +66,8 @@ export const likelyTestsV1Schema = z.discriminatedUnion("state", [
       latest: z.enum(["passed", "failed", "unknown"]),
       previousFailures: nonnegativeInteger
     }).strict(),
-    sourceEventIds: z.array(boundedId).max(1_000),
-    derivedEventIds: z.array(boundedId).max(1_000),
+    sourceEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
+    derivedEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
     derivationId: z.literal("test-command/1"),
     durability: z.enum(["complete", "incomplete"]),
     missingExpected: nonnegativeInteger,
@@ -149,7 +152,7 @@ export const runPageV1Schema = z.object({
 }).strict();
 
 export const eventAnchorV1Schema = z.object({
-  eventId: boundedId,
+  eventId: browserAddressableEventIdV1Schema,
   sequence: nonnegativeInteger
 }).strict();
 

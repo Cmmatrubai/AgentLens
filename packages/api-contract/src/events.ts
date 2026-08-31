@@ -6,7 +6,12 @@ import {
   provenanceV1Schema,
   safeTokenV1Schema
 } from "./evidence.js";
-import { assessmentNoteAvailabilityV1Schema, assessmentVerdictV1Schema, taskCompletionV1Schema } from "./assessment.js";
+import {
+  assessmentNoteAvailabilityV1Schema,
+  assessmentVerdictV1Schema,
+  browserAddressableEventIdV1Schema,
+  taskCompletionV1Schema
+} from "./assessment.js";
 
 const boundedId = z.string().min(1).max(256);
 const boundedText = z.string().max(262_144);
@@ -21,13 +26,13 @@ export const eventRelationshipTypeV1Schema = z.enum([
 
 export const eventRelationshipV1Schema = z.object({
   type: eventRelationshipTypeV1Schema,
-  eventId: boundedId
+  eventId: browserAddressableEventIdV1Schema
 }).strict();
 
 export const derivationV1Schema = z.object({
   name: safeTokenV1Schema,
   version: safeTokenV1Schema,
-  sourceEventIds: z.array(boundedId).min(1).max(1_000),
+  sourceEventIds: z.array(browserAddressableEventIdV1Schema).min(1).max(1_000),
   confidence: z.enum(["high", "medium", "low"]).optional(),
   identity: boundedId.optional()
 }).strict();
@@ -66,7 +71,7 @@ export const detailAvailabilityV1Schema = z.discriminatedUnion("state", [
 
 export const trajectoryEventV1Schema = z.object({
   schemaVersion: z.literal(1),
-  eventId: boundedId,
+  eventId: browserAddressableEventIdV1Schema,
   runId: boundedId,
   sequence: nonnegativeInteger,
   receivedAt: z.string().datetime(),
@@ -89,7 +94,7 @@ export const trajectoryEventV1Schema = z.object({
 
 const detailBase = {
   schemaVersion: z.literal(1),
-  eventId: boundedId,
+  eventId: browserAddressableEventIdV1Schema,
   runId: boundedId,
   sequence: nonnegativeInteger,
   kind: safeTokenV1Schema,
@@ -163,7 +168,7 @@ const recorderRecoveryDetailV1Schema = z.object({
   ...detailBase,
   presentationClass: z.literal("recorder_recovery"),
   recoveryClass: z.literal("interrupted_open_event"),
-  recoveredEventIds: z.array(boundedId).min(1).max(1_000),
+  recoveredEventIds: z.array(browserAddressableEventIdV1Schema).min(1).max(1_000),
   content: contentAvailabilityV1Schema
 }).strict();
 const testDetailV1Schema = z.object({
@@ -176,7 +181,7 @@ const testDetailV1Schema = z.object({
 const assessmentDetailV1Schema = z.object({
   ...detailBase,
   presentationClass: z.literal("assessment"),
-  revision: boundedId,
+  revision: browserAddressableEventIdV1Schema,
   verdict: assessmentVerdictV1Schema,
   taskCompleted: taskCompletionV1Schema,
   note: assessmentNoteAvailabilityV1Schema,
@@ -284,13 +289,13 @@ export const normalizedContentV1Schema = z.discriminatedUnion("kind", [
 
 export const normalizedContentResponseV1Schema = z.object({
   schemaVersion: z.literal(1),
-  eventId: boundedId,
+  eventId: browserAddressableEventIdV1Schema,
   content: normalizedContentV1Schema
 }).strict();
 
 export const nativeContentResponseV1Schema = z.object({
   schemaVersion: z.literal(1),
-  eventId: boundedId,
+  eventId: browserAddressableEventIdV1Schema,
   content: z.object({
     format: z.enum(["json", "text"]),
     text: boundedText,

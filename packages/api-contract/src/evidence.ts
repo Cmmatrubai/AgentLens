@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { browserAddressableEventIdV1Schema } from "./assessment.js";
+
 export const safeTokenV1Schema = z.string().regex(/^[a-z0-9._-]{1,64}$/);
 export const opaqueSourceRefV1Schema = z.string().regex(/^src_[a-f0-9]{64}$/);
 
@@ -94,14 +96,14 @@ export function evidenceValueV1Schema<T extends z.ZodTypeAny>(value: T) {
       state: z.literal("available"),
       value,
       origin: evidenceOriginV1Schema,
-      supportingEventIds: z.array(z.string().min(1).max(256)).max(1_000),
+      supportingEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
       supportingArtifactIds: z.array(z.string().min(1).max(256)).max(1_000)
     }).strict(),
     z.object({
       state: z.literal("unavailable"),
       reason: evidenceUnavailableReasonV1Schema,
       origin: z.null(),
-      supportingEventIds: z.array(z.string().min(1).max(256)).max(1_000),
+      supportingEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
       supportingArtifactIds: z.array(z.string().min(1).max(256)).max(1_000)
     }).strict()
   ]);

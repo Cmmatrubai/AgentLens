@@ -2,6 +2,7 @@ import { TextDecoder } from "node:util";
 
 import {
   assessmentNoteContentV1Schema,
+  browserAddressableEventIdV1Schema,
   gitDiffCheckContentV1Schema,
   gitStatusContentV1Schema,
   gitUntrackedContentV1Schema,
@@ -98,8 +99,12 @@ export interface CreateEvidenceServiceInput {
   readonly artifactRoot: string;
 }
 
-function validId(value: string): boolean {
+function validRunId(value: string): boolean {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value);
+}
+
+function validEventId(value: string): boolean {
+  return browserAddressableEventIdV1Schema.safeParse(value).success;
 }
 
 function responseWithin(value: object, maximum: number): void {
@@ -356,7 +361,7 @@ export function createEvidenceService(input: CreateEvidenceServiceInput): Eviden
   }
 
   function ids(runId: string, eventId?: string): void {
-    if (!validId(runId) || (eventId !== undefined && !validId(eventId))) {
+    if (!validRunId(runId) || (eventId !== undefined && !validEventId(eventId))) {
       throw new EvidenceServiceError("invalid_request");
     }
   }

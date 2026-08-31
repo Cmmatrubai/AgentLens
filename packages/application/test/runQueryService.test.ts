@@ -375,6 +375,8 @@ describe("RunQueryService", () => {
     expect(JSON.stringify([detail, recovery, unknown])).not.toContain("native-command");
     expect(await query.getRun("missing-run")).toBeNull();
     expect(await query.getEvent("run-detail", "missing-event")).toBeNull();
+    await expect(query.getEvent("run-detail", "invalid\0event"))
+      .rejects.toMatchObject({ code: "invalid_request" });
   });
 
   it("uses terminal head, active tail, polling, around, and snapshot-bound cursors", async () => {

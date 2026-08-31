@@ -43,4 +43,20 @@ describe("assessment revision ETag codec", () => {
     expect(() => encodeAssessmentRevisionEtag("broken-\ud800-surrogate"))
       .toThrow(/assessment event id/i);
   });
+
+  it.each([
+    ["NUL", "\0"],
+    ["CR", "\r"],
+    ["LF", "\n"],
+    ["DEL", "\u007f"],
+    ["C1 start", "\u0080"],
+    ["C1 end", "\u009f"]
+  ])("rejects the Unicode %s control character", (_name, control) => {
+    expect(() => encodeAssessmentRevisionEtag(`event${control}id`))
+      .toThrow(/assessment event id/i);
+  });
+
+  it.each([".", ".."])('rejects the URL dot-segment event ID "%s"', (eventId) => {
+    expect(() => encodeAssessmentRevisionEtag(eventId)).toThrow(/assessment event id/i);
+  });
 });

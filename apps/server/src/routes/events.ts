@@ -8,6 +8,7 @@ import {
   boundedInteger,
   endError,
   endJson,
+  eventRouteId,
   routeId,
   sequence,
   strictSearch,
@@ -47,7 +48,7 @@ export async function handleEventRoutes(
     if (url.search !== "") throw new RouteRequestError();
     const value = await context.runQueries.getEvent(
       routeId(detailMatch[1]!),
-      routeId(detailMatch[2]!)
+      eventRouteId(detailMatch[2]!)
     );
     if (value === null) {
       endError(response, 404, "event_not_found", "Event was not found.");

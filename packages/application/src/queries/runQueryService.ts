@@ -1,4 +1,5 @@
 import {
+  browserAddressableEventIdV1Schema,
   eventDetailV1Schema,
   runDetailV1Schema,
   runPageV1Schema,
@@ -88,6 +89,10 @@ function validLimit(value: number, maximum: number): boolean {
 
 function validId(value: string): boolean {
   return typeof value === "string" && value.length >= 1 && value.length <= 256;
+}
+
+function validEventId(value: string): boolean {
+  return browserAddressableEventIdV1Schema.safeParse(value).success;
 }
 
 function summaryAssessment(value: CurrentAssessment): CurrentAssessmentProjection | null {
@@ -340,7 +345,7 @@ export function createRunQueryService(input: CreateRunQueryServiceInput): RunQue
 
     async getEvent(runId: string, eventId: string): Promise<EventDetailV1 | null> {
       return read((repository) => {
-        if (!validId(runId) || !validId(eventId)) {
+        if (!validId(runId) || !validEventId(eventId)) {
           throw new RunQueryServiceError("invalid_request");
         }
         const run = repository.getRun(runId);

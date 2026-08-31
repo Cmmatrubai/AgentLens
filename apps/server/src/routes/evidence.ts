@@ -13,6 +13,7 @@ import {
 import {
   RouteRequestError,
   endJson,
+  eventRouteId,
   routeId,
   strictSearch,
   type RouteContext
@@ -32,7 +33,7 @@ export async function handleEvidenceRoutes(
   if (eventMatch !== null) {
     if (url.search !== "") throw new RouteRequestError();
     const runId = routeId(eventMatch[1]!);
-    const eventId = routeId(eventMatch[2]!);
+    const eventId = eventRouteId(eventMatch[2]!);
     switch (eventMatch[3]) {
       case "content":
         endJson(response, 200, normalizedContentResponseV1Schema.parse(

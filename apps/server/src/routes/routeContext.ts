@@ -2,6 +2,7 @@ import type { ServerResponse } from "node:http";
 
 import {
   apiErrorV1Schema,
+  browserAddressableEventIdV1Schema,
   type ApiErrorCodeV1
 } from "@agentlens/api-contract";
 import {
@@ -100,6 +101,18 @@ export function routeId(encoded: string): string {
     throw new RouteRequestError();
   }
   return value;
+}
+
+export function eventRouteId(encoded: string): string {
+  let value: string;
+  try {
+    value = decodeURIComponent(encoded);
+  } catch {
+    throw new RouteRequestError();
+  }
+  const parsed = browserAddressableEventIdV1Schema.safeParse(value);
+  if (!parsed.success) throw new RouteRequestError();
+  return parsed.data;
 }
 
 export function handleRouteError(response: ServerResponse, error: unknown): void {
