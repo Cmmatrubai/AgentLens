@@ -27,8 +27,14 @@ const gitDiffLineV1Schema = z.object({
   if ((line.type === "add" || line.type === "excluded") && line.oldLineNumber !== null) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Added lines cannot have an old line number." });
   }
+  if ((line.type === "add" || line.type === "excluded") && line.newLineNumber === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Added lines require a new line number." });
+  }
   if (line.type === "delete" && line.newLineNumber !== null) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Deleted lines cannot have a new line number." });
+  }
+  if (line.type === "delete" && line.oldLineNumber === null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Deleted lines require an old line number." });
   }
   if (line.type === "no_newline" && (line.oldLineNumber !== null || line.newLineNumber !== null)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "No-newline markers cannot have line numbers." });

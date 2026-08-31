@@ -427,6 +427,52 @@ describe("closed v1 browser schemas", () => {
     }
   });
 
+  it("requires the correct side-specific coordinate for every changed diff line", () => {
+    const maximum = Number.MAX_SAFE_INTEGER;
+    const withLine = (line: {
+      type: "add" | "delete" | "excluded";
+      oldLineNumber: number | null;
+      newLineNumber: number | null;
+      text: string;
+    }) => ({
+      schemaVersion: 1,
+      kind: "diff",
+      files: [{
+        oldPath: "a.ts",
+        newPath: "a.ts",
+        headers: ["diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts"],
+        metadata: [],
+        hunks: [{
+          header: `@@ -${maximum} +${maximum} @@`,
+          oldStart: maximum,
+          oldCount: 1,
+          newStart: maximum,
+          newCount: 1,
+          lines: [line]
+        }]
+      }],
+      preamble: [],
+      truncated: false,
+      malformed: false
+    });
+
+    for (const valid of [
+      withLine({ type: "add", oldLineNumber: null, newLineNumber: maximum, text: "added" }),
+      withLine({ type: "excluded", oldLineNumber: null, newLineNumber: maximum, text: "excluded" }),
+      withLine({ type: "delete", oldLineNumber: maximum, newLineNumber: null, text: "deleted" })
+    ]) {
+      expect(gitDiffContentV1Schema.safeParse(valid).success).toBe(true);
+    }
+
+    for (const missingRequiredCoordinate of [
+      withLine({ type: "add", oldLineNumber: null, newLineNumber: null, text: "added" }),
+      withLine({ type: "excluded", oldLineNumber: null, newLineNumber: null, text: "excluded" }),
+      withLine({ type: "delete", oldLineNumber: null, newLineNumber: null, text: "deleted" })
+    ]) {
+      expect(gitDiffContentV1Schema.safeParse(missingRequiredCoordinate).success).toBe(false);
+    }
+  });
+
   it("preserves projected versus explicit human assessment provenance", () => {
     const projected = {
       schemaVersion: 1,
