@@ -588,6 +588,11 @@ describe("browser-safe projectors", () => {
       contradictionCodes: ["provider_process_contradiction"]
     });
     expect(JSON.stringify(listItem)).not.toContain("MUST_NOT_CROSS_HTTP");
+    expect(() => projectRunListItemV1({
+      run: { ...run, startedAt: Number.MAX_SAFE_INTEGER },
+      summary,
+      ownership
+    })).toThrow();
   });
 
   it("projects empty and nonempty windows with authenticated page cursors", () => {

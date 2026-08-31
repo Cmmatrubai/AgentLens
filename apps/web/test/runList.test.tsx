@@ -1,15 +1,33 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { RunListItemV1, RunPageV1 } from "@agentlens/api-contract";
+import {
+  maximumEcmaScriptTimestamp,
+  type RunListItemV1,
+  type RunPageV1
+} from "@agentlens/api-contract";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { App } from "../src/app/App.js";
 import {
   AgentLensClientError,
   type AgentLensApiClient
 } from "../src/api/client.js";
+const runListStyle = document.createElement("style");
+
+beforeAll(() => {
+  runListStyle.textContent = readFileSync(
+    join(process.cwd(), "apps/web/src/styles/run-list.css"),
+    "utf8"
+  );
+  document.head.append(runListStyle);
+});
+
+afterAll(() => runListStyle.remove());
 
 const eventOrigin = (provenance: "observed" | "derived" | "git_recovered" | "recorder" | "human") => ({
   type: "event" as const,
@@ -149,6 +167,57 @@ function renderApp(
 }
 
 describe("production run ledger", () => {
+  it("renders the maximum contract-valid timestamp without crashing", async () => {
+    const item = run("maximum-date", { state: "known", value: "completed" }, {
+      startedAt: maximumEcmaScriptTimestamp,
+      endedAt: maximumEcmaScriptTimestamp
+    });
+    renderApp(clientWithList(vi.fn(async () => page([item]))));
+
+    const timestamp = await screen.findByRole("time");
+    expect(timestamp).toHaveAttribute("datetime", "+275760-09-13T00:00:00.000Z");
+  });
+
+  it("contains maximum-length row evidence inside every shrinkable text region", async () => {
+    const unbroken = "x".repeat(256);
+    const item = run("long-evidence", { state: "known", value: "completed" }, {
+      label: unbroken,
+      repository: { fingerprint: unbroken, display: unbroken },
+      warningCodes: ["w".repeat(64)],
+      contradictionCodes: ["c".repeat(64)]
+    });
+    const { container } = renderApp(clientWithList(vi.fn(async () => page([item]))));
+    await screen.findAllByText(unbroken);
+
+    for (const selector of [
+      ".run-row__destination",
+      ".run-row__primary",
+      ".run-row__identity",
+      ".run-row__status",
+      ".run-row__label",
+      ".run-row__repository",
+      ".run-row__evidence div",
+      ".run-row__evidence dd",
+      ".run-row__signals",
+      ".signal",
+      ".run-row__limitations"
+    ]) {
+      const element = container.querySelector<HTMLElement>(selector);
+      expect(element, selector).not.toBeNull();
+      expect(getComputedStyle(element!).minWidth, selector).toBe("0");
+    }
+    for (const selector of [
+      ".run-row__label",
+      ".run-row__repository",
+      ".run-row__evidence dd",
+      ".signal",
+      ".run-row__limitations"
+    ]) {
+      const element = container.querySelector<HTMLElement>(selector);
+      expect(getComputedStyle(element!).overflowWrap, selector).toBe("anywhere");
+    }
+  });
+
   it("renders exhaustive lifecycle wrappers and keeps every evidence dimension honest", async () => {
     const explicit = {
       schemaVersion: 1 as const,
@@ -301,6 +370,19 @@ describe("production run ledger", () => {
     expect(listRuns).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "/runs?status=failed",
+    "/runs?repository=repo-filter",
+    "/runs?assessment=partial",
+    "/runs?cursor=next-page"
+  ])("uses filtered-empty copy for %s", async (initialEntry) => {
+    const view = renderApp(clientWithList(vi.fn(async () => page([]))), initialEntry);
+    expect(await screen.findByRole("heading", { name: "No runs match these filters" })).toBeVisible();
+    expect(screen.queryByText("No runs recorded")).not.toBeInTheDocument();
+    expect(screen.queryByText("agentlens record -- codex exec --json ...")).not.toBeInTheDocument();
+    view.unmount();
+  });
+
   it("renders every row as a semantic destination with independent evidence labels", async () => {
     const user = userEvent.setup();
     const item = run("semantic-run", { state: "known", value: "completed" });
@@ -317,5 +399,12 @@ describe("production run ledger", () => {
     expect(screen.getByRole("heading", { name: "Run detail" })).toBeVisible();
     await user.click(screen.getByRole("link", { name: "Return to the run ledger" }));
     expect(await screen.findByRole("heading", { name: "Run ledger" })).toBeVisible();
+  });
+
+  it("links every browser-addressable run ID with one path encoding pass", async () => {
+    const item = run("run/id % 运行", { state: "known", value: "completed" });
+    renderApp(clientWithList(vi.fn(async () => page([item]))));
+    expect(await screen.findByRole("link", { name: /Run run\/id % 运行/ }))
+      .toHaveAttribute("href", "/runs/run%2Fid%20%25%20%E8%BF%90%E8%A1%8C");
   });
 });

@@ -1,5 +1,112 @@
 # Task 7.9 implementation report
 
+## Independent review hardening (2026-08-31)
+
+The focused review-fix round from `898695c6300d996b44741ff1399573612e634083`
+closed all five confirmed findings without entering Task 7.10:
+
+1. Run IDs now use one exported browser-addressable contract across run-list/detail/
+   trajectory DTOs, application projection, server route decoding, API-client paths,
+   and ledger links. Slash, percent, spaces, and Unicode resolve through list and
+   detail; URL dot segments, controls, overlength values, and malformed surrogates
+   fail closed. The broader event-ID contract remains separate.
+2. Response-body aborts now become sanitized non-retryable `request_aborted` errors.
+   Redirect, invalid-media, invalid-length, read-error, and overflow paths perform
+   best-effort cancellation without allowing cancellation failures or raw stream
+   errors to escape, and every acquired reader is released.
+3. Browser-visible millisecond timestamps are bounded to the ECMAScript Date domain
+   (`0..8_640_000_000_000_000`) in the shared contract. Projectors reject larger
+   persisted values before a DTO can reach an unguarded Date formatter.
+4. Every bounded row text region is shrinkable and uses robust wrapping. Repository
+   fingerprints no longer use ellipsis, so the 256-character stress fixture keeps
+   the evidence visible instead of forcing multi-thousand-pixel overflow or hiding it.
+5. Empty unfiltered first pages retain the first-trace prompt. Filtered or cursor
+   pages now say exactly `No runs match these filters` and never display the recording
+   command.
+
+### Review-fix RED evidence
+
+Each production correction followed a focused failing test:
+
+```text
+Run-ID contract RED
+Test Files  3 failed | 1 passed (4)
+Tests       6 failed | 37 passed (43)
+Observed   exported run schema undefined; all four list/detail special IDs returned 400
+
+Body-stream RED
+Test Files  1 failed (1)
+Tests       4 failed | 6 passed (10)
+Observed   raw body AbortError escaped; early rejects did not cancel; cancel failure escaped
+
+Timestamp RED
+Test Files  2 failed | 1 passed (3)
+Tests       2 failed | 51 passed (53)
+Observed   timestamp schema absent; MAX_SAFE_INTEGER projector input did not fail
+
+800px containment RED
+Test Files  1 failed (1)
+Tests       1 failed | 6 passed (7)
+Observed   shrinkable row regions had no min-width containment
+
+Filtered/cursor empty RED
+Test Files  1 failed (1)
+Tests       4 failed | 7 passed (11)
+Observed   every constrained empty page rendered `No runs recorded`
+```
+
+### Review-fix GREEN evidence
+
+```text
+pnpm vitest run packages/api-contract/test/contracts.test.ts \
+  packages/application/test/apiProjection.test.ts \
+  apps/server/test/readApi.integration.test.ts \
+  apps/server/test/security.integration.test.ts \
+  apps/web/test/apiClient.test.ts \
+  apps/web/test/runList.test.tsx \
+  apps/web/test/buildOutput.test.ts \
+  apps/web/test/fixtureDataRoot.test.ts
+Test Files  8 passed (8)
+Tests       101 passed (101)
+```
+
+The first repository-wide run exposed one timing failure in the pre-existing crash
+recovery integration test (`Timed out waiting for durable open provider work`) while
+the rest of the suite passed. The test passed alone (`1/1`, 1.62s), and a clean full
+rerun passed:
+
+```text
+pnpm test
+Test Files  56 passed (56)
+Tests       1198 passed (1198)
+```
+
+Fresh type/build and containment checks after the final source edit:
+
+```text
+pnpm typecheck
+$ tsc -b --pretty false
+exit 0
+
+pnpm build
+112 modules transformed
+assets/bootstrap-u5JZXtmU.css  12.01 kB
+assets/bootstrap-HxuWf7Ls.js  293.85 kB
+exit 0
+
+git diff --check
+exit 0
+
+external asset / sourceMappingURL / design-prototype scan
+no matches
+
+fixture bearer / consumed one-use bootstrap token scan
+no matches
+
+find apps/server/dist/web -type f -name '*.map'
+no files
+```
+
 ## Result
 
 Implemented the production AgentLens web workspace, closure-authenticated loopback API
@@ -168,6 +275,18 @@ Narrow supporting files required by real browser verification:
 - `apps/server/test/security.integration.test.ts`: WOFF and manifest-bound CSS
   integration without weakening static-asset security.
 
+Narrow post-review contract and test-support files:
+
+- `packages/api-contract/src/time.ts`, `runs.ts`, `events.ts`, `assessment.ts`, and
+  `index.ts`: shared run-ID and browser-timestamp boundaries.
+- `apps/server/src/routes/routeContext.ts` and
+  `apps/server/test/readApi.integration.test.ts`: shared route parsing plus special-ID
+  list/detail integration.
+- `packages/api-contract/test/contracts.test.ts` and
+  `packages/application/test/apiProjection.test.ts`: contract/projector regressions.
+- `apps/web/test-support/fixtureDataRoot.ts`: one 256-character stress row for the
+  outstanding real-browser width recheck.
+
 No `design-prototypes/`, `.scratch-e2e-ONFuP0/`, Task 7.10+ production path, provider
 adapter, recorder, storage schema, derivation, or CLI read/write behavior was changed.
 
@@ -237,7 +356,11 @@ The bundle contains no external asset reference or runtime dependency on the des
 prototype. React/router diagnostic documentation strings are library text, not asset
 URLs; the real browser made no external resource request.
 
-## Real browser evidence
+## Prior real-browser evidence (pre-review-fix build)
+
+This section records the real-browser review performed for the original Task 7.9
+implementation. It is historical evidence, not a claim that the post-review CSS and
+copy were freshly observed in a browser.
 
 The fixture server was started with:
 
@@ -276,7 +399,10 @@ Interaction/state evidence:
 - selecting `Interrupted` and applying filters produced
   `/runs?limit=50&status=interrupted` and exactly one matching server-projected row;
 - keyboard Tab focus landed on the Apply button with a visible two-ring focus shadow;
-- an unmatched repository produced the explicit `No runs recorded` state;
+- an unmatched repository produced `No runs recorded`; the independent review
+  correctly identified that copy as inaccurate, and the post-review component tests
+  now require `No runs match these filters` for repository/status/assessment/cursor
+  pages;
 - direct `/runs` reload produced `Authentication expired` with no console diagnostics;
 - stopping the fixture server then changing a filter produced the sanitized
   `Run evidence unavailable` / `AgentLens could not reach the local server.` state;
@@ -284,6 +410,13 @@ Interaction/state evidence:
   deterministically by the component test.
 
 ## Deviations and residual risks
+
+0. Fresh post-review browser inspection was attempted against the rebuilt local
+   fixture, but the browser runtime reported `No browser is available` and its
+   troubleshooting inventory was empty (`[]`). No alternate browser backend or
+   screenshot was substituted, and this report does not claim fresh 1440/1100/800
+   observation. The real-browser width recheck remains outstanding; automated
+   computed-style coverage and the 256-character real SQLite fixture are in place.
 
 1. Vite's entry stylesheet is a separate manifest asset. The frozen file list named
    only `staticAssets.ts`, but real rendering required the narrow bootstrap/router

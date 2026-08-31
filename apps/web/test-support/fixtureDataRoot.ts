@@ -314,6 +314,15 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     repositoryDisplay: "Redacted repository"
   }), "recorder-fixture-metadata-only");
 
+  const maximumUnbrokenText = "x".repeat(256);
+  create(runInput({
+    id: "fixture-maximum-width",
+    startedAt: baseTime - 10_000,
+    label: maximumUnbrokenText,
+    repositoryFingerprint: maximumUnbrokenText,
+    repositoryDisplay: maximumUnbrokenText
+  }), "recorder-fixture-maximum-width");
+
   database.close();
   return { root, dataRoot };
 }

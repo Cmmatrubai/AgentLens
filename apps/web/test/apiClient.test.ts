@@ -88,6 +88,22 @@ describe("AgentLens authenticated API client", () => {
     ]);
   });
 
+  it("enforces the shared browser-addressable run-ID contract before fetching", async () => {
+    const fetchImpl = vi.fn(async () => json(emptyRunPage));
+    const client = createAgentLensApiClient({
+      origin: "http://127.0.0.1:43123",
+      bearerToken: "fixture-bearer",
+      fetchImpl
+    });
+
+    for (const runId of [".", "..", "broken-\ud800-surrogate", "run\0id", "a".repeat(257)]) {
+      expect(() => client.getRun(runId)).toThrow(expect.objectContaining({
+        code: "invalid_client_input"
+      }));
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("rejects non-loopback, credential-bearing, and non-origin inputs", () => {
     for (const origin of [
       "https://127.0.0.1:43123",
@@ -171,5 +187,85 @@ describe("AgentLens authenticated API client", () => {
       retryable: false,
       message: "The AgentLens request was cancelled."
     });
+  });
+
+  it("normalizes aborts raised while consuming a response body and releases the reader", async () => {
+    const rawSentinel = "RAW_BODY_ABORT_SENTINEL";
+    const stream = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new DOMException(rawSentinel, "AbortError");
+      }
+    });
+    const response = new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+    const client = createAgentLensApiClient({
+      origin: "http://127.0.0.1:43123",
+      bearerToken: "fixture-bearer",
+      fetchImpl: vi.fn(async () => response)
+    });
+
+    const failure = await client.listRuns({ limit: 50 }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: "request_aborted",
+      retryable: false,
+      message: "The AgentLens request was cancelled."
+    });
+    expect(JSON.stringify(failure)).not.toContain(rawSentinel);
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it.each([
+    { headers: { "Content-Type": "text/plain" }, label: "invalid media type" },
+    {
+      headers: { "Content-Type": "application/json", "Content-Length": "4194305" },
+      label: "oversized declared body"
+    }
+  ])("best-effort cancels an $label without leaking cancellation failures", async ({ headers }) => {
+    const cancel = vi.fn(() => {
+      throw new Error("RAW_CANCEL_FAILURE_SENTINEL");
+    });
+    const response = new Response(new ReadableStream<Uint8Array>({ cancel }), {
+      status: 200,
+      headers
+    });
+    const client = createAgentLensApiClient({
+      origin: "http://127.0.0.1:43123",
+      bearerToken: "fixture-bearer",
+      fetchImpl: vi.fn(async () => response)
+    });
+
+    const failure = await client.listRuns({ limit: 50 }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "invalid_response", retryable: false });
+    expect(JSON.stringify(failure)).not.toContain("RAW_CANCEL_FAILURE_SENTINEL");
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(response.body?.locked).toBe(false);
+  });
+
+  it("keeps streamed-overflow cancellation best-effort and sanitized", async () => {
+    const cancel = vi.fn(() => {
+      throw new Error("RAW_OVERFLOW_CANCEL_SENTINEL");
+    });
+    const response = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(4 * 1024 * 1024 + 1));
+      },
+      cancel
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+    const client = createAgentLensApiClient({
+      origin: "http://127.0.0.1:43123",
+      bearerToken: "fixture-bearer",
+      fetchImpl: vi.fn(async () => response)
+    });
+
+    const failure = await client.listRuns({ limit: 50 }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "invalid_response", retryable: false });
+    expect(JSON.stringify(failure)).not.toContain("RAW_OVERFLOW_CANCEL_SENTINEL");
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(response.body?.locked).toBe(false);
   });
 });

@@ -1,7 +1,8 @@
-import type {
-  EvidenceUnavailableReasonV1,
-  ProviderCapabilityLimitationV1,
-  RunListItemV1
+import {
+  browserAddressableRunIdV1Schema,
+  type EvidenceUnavailableReasonV1,
+  type ProviderCapabilityLimitationV1,
+  type RunListItemV1
 } from "@agentlens/api-contract";
 import { Link } from "react-router-dom";
 
@@ -94,10 +95,11 @@ function providerLimitations(run: RunListItemV1): string {
 export function RunRow({ run }: Readonly<{ run: RunListItemV1 }>) {
   const title = run.label ?? "Unlabeled run";
   const recorderDuration = durationText(run);
+  const destination = `/runs/${encodeURIComponent(browserAddressableRunIdV1Schema.parse(run.runId))}`;
   return (
     <li className="run-ledger__item">
       <article className="run-row">
-        <Link className="run-row__destination" to={`/runs/${encodeURIComponent(run.runId)}`} aria-label={`${title} — inspect run evidence`}>
+        <Link className="run-row__destination" to={destination} aria-label={`${title} — inspect run evidence`}>
           <div className="run-row__primary">
             <div className="run-row__identity">
               <span className="run-row__label">{title}</span>

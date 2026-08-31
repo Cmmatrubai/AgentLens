@@ -3,6 +3,7 @@ import type { ServerResponse } from "node:http";
 import {
   apiErrorV1Schema,
   browserAddressableEventIdV1Schema,
+  browserAddressableRunIdV1Schema,
   type ApiErrorCodeV1
 } from "@agentlens/api-contract";
 import {
@@ -97,10 +98,9 @@ export function routeId(encoded: string): string {
   } catch {
     throw new RouteRequestError();
   }
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(value)) {
-    throw new RouteRequestError();
-  }
-  return value;
+  const parsed = browserAddressableRunIdV1Schema.safeParse(value);
+  if (!parsed.success) throw new RouteRequestError();
+  return parsed.data;
 }
 
 export function eventRouteId(encoded: string): string {

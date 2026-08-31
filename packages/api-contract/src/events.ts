@@ -12,6 +12,7 @@ import {
   browserAddressableEventIdV1Schema,
   taskCompletionV1Schema
 } from "./assessment.js";
+import { browserAddressableRunIdV1Schema } from "./runs.js";
 
 const boundedId = z.string().min(1).max(256);
 const boundedText = z.string().max(262_144);
@@ -72,7 +73,7 @@ export const detailAvailabilityV1Schema = z.discriminatedUnion("state", [
 export const trajectoryEventV1Schema = z.object({
   schemaVersion: z.literal(1),
   eventId: browserAddressableEventIdV1Schema,
-  runId: boundedId,
+  runId: browserAddressableRunIdV1Schema,
   sequence: nonnegativeInteger,
   receivedAt: z.string().datetime(),
   sourceOccurredAt: timestampAvailabilityV1Schema,
@@ -95,7 +96,7 @@ export const trajectoryEventV1Schema = z.object({
 const detailBase = {
   schemaVersion: z.literal(1),
   eventId: browserAddressableEventIdV1Schema,
-  runId: boundedId,
+  runId: browserAddressableRunIdV1Schema,
   sequence: nonnegativeInteger,
   kind: safeTokenV1Schema,
   status: eventStatusFieldV1Schema,
@@ -347,7 +348,7 @@ export const trajectoryWindowV1Schema = z.union([
 
 export const trajectoryPageV1Schema = z.object({
   schemaVersion: z.literal(1),
-  runId: boundedId,
+  runId: browserAddressableRunIdV1Schema,
   mode: z.enum(["head", "tail", "after", "around", "cursor"]),
   items: z.array(trajectoryEventV1Schema).max(250),
   window: trajectoryWindowV1Schema

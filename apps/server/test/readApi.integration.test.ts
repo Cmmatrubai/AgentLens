@@ -73,7 +73,7 @@ function trace(runId: string, id: string, sequence: number): TraceEventV1 {
   };
 }
 
-async function createDataRoot(active = false) {
+async function createDataRoot(active = false, runId = "run-http") {
   const root = await mkdtemp(join(tmpdir(), "agentlens-read-api-"));
   roots.push(root);
   const dataRoot = join(root, "data");
@@ -83,7 +83,7 @@ async function createDataRoot(active = false) {
   const database = openDatabase(databasePath);
   const repository = new RunRepository(database, { artifactRoot });
   repository.createRun({
-    id: "run-http",
+    id: runId,
     schemaVersion: 1,
     provider: "codex-exec",
     integrationVersion: "0.1.0",
@@ -102,8 +102,8 @@ async function createDataRoot(active = false) {
     recorderStartToken: "fixture-start-token",
     heartbeatAt: 100
   });
-  repository.appendEvent(trace("run-http", "event-http-0", 0));
-  repository.appendEvent(trace("run-http", "event-http-1", 1));
+  repository.appendEvent(trace(runId, "event-http-0", 0));
+  repository.appendEvent(trace(runId, "event-http-1", 1));
   if (active) {
     databases.push(database);
     await Promise.all([
@@ -214,6 +214,27 @@ afterEach(async () => {
 });
 
 describe("authenticated read API", () => {
+  it.each(["run/id", "run%id", "run id", "运行-δ"]) (
+    "lists and resolves browser-addressable run ID %s through the same contract",
+    async (runId) => {
+      const fixture = await createDataRoot(false, runId);
+      const handle = await start(fixture.dataRoot);
+      const headers = authorization();
+
+      const listed = runPageV1Schema.parse(await body(await fetch(
+        `${handle.origin}/api/v1/runs?limit=100`, { headers }
+      )));
+      expect(listed.items.map((item) => item.runId)).toEqual([runId]);
+
+      const response = await fetch(
+        `${handle.origin}/api/v1/runs/${encodeURIComponent(runId)}`,
+        { headers }
+      );
+      expect(response.status).toBe(200);
+      expect(runDetailV1Schema.parse(await body(response)).runId).toBe(runId);
+    }
+  );
+
   it("serves closed run/detail/event contracts through the production startup path without mutation", async () => {
     const fixture = await createDataRoot();
     const before = await hash(fixture.databasePath);

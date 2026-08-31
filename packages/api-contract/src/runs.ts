@@ -9,9 +9,32 @@ import {
   providerFieldV1Schema,
   runStatusFieldV1Schema
 } from "./evidence.js";
+import { ecmaScriptTimestampV1Schema } from "./time.js";
 
 const boundedId = z.string().min(1).max(256);
 const nonnegativeInteger = z.number().int().nonnegative();
+
+const UTF8_ENCODER = new TextEncoder();
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+
+function isBrowserAddressableRunId(value: string): boolean {
+  try {
+    return UTF8_DECODER.decode(UTF8_ENCODER.encode(value)) === value &&
+      !/\p{Cc}/u.test(value) &&
+      value !== "." &&
+      value !== "..";
+  } catch {
+    return false;
+  }
+}
+
+export const browserAddressableRunIdV1Schema = z.string()
+  .min(1)
+  .max(256)
+  .refine(
+    isBrowserAddressableRunId,
+    "Run ID must be canonical UTF-8 without Unicode controls or URL dot segments."
+  );
 
 export const observedTokenUsageV1Schema = z.object({
   inputTokens: nonnegativeInteger.nullable(),
@@ -123,7 +146,7 @@ export const finalGitEvidenceV1Schema = z.discriminatedUnion("state", [
 
 const runFields = {
   schemaVersion: z.literal(1),
-  runId: boundedId,
+  runId: browserAddressableRunIdV1Schema,
   status: runStatusFieldV1Schema,
   provider: providerFieldV1Schema,
   label: z.string().min(1).max(256).nullable(),
@@ -132,8 +155,8 @@ const runFields = {
     fingerprint: z.string().min(1).max(256),
     display: z.string().min(1).max(256)
   }).strict(),
-  startedAt: nonnegativeInteger,
-  endedAt: nonnegativeInteger.nullable(),
+  startedAt: ecmaScriptTimestampV1Schema,
+  endedAt: ecmaScriptTimestampV1Schema.nullable(),
   ownership: ownershipDiagnosisV1Schema,
   finalGitEvidence: finalGitEvidenceV1Schema,
   summary: runSummaryV1Schema

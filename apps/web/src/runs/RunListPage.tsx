@@ -86,6 +86,10 @@ export function RunListPage() {
   const query = useMemo(() => parseQuery(searchParams), [serializedSearch]);
   const canonical = queryParams(query);
   const result = useRunList(query);
+  const isConstrainedPage = query.cursor !== undefined ||
+    query.status !== undefined ||
+    query.repository !== undefined ||
+    query.assessment !== undefined;
 
   useEffect(() => {
     if (canonical.toString() !== serializedSearch) setSearchParams(canonical, { replace: true });
@@ -113,9 +117,18 @@ export function RunListPage() {
       })()}
       {result.data?.items.length === 0 && (
         <section className="empty-state" aria-labelledby="empty-runs-title">
-          <h2 id="empty-runs-title">No runs recorded</h2>
-          <p>Record a Codex execution to create the first durable trace.</p>
-          <code>agentlens record -- codex exec --json ...</code>
+          {isConstrainedPage ? (
+            <>
+              <h2 id="empty-runs-title">No runs match these filters</h2>
+              <p>Change the filters or return to a newer run-ledger page.</p>
+            </>
+          ) : (
+            <>
+              <h2 id="empty-runs-title">No runs recorded</h2>
+              <p>Record a Codex execution to create the first durable trace.</p>
+              <code>agentlens record -- codex exec --json ...</code>
+            </>
+          )}
         </section>
       )}
       {result.data !== undefined && result.data.items.length > 0 && (

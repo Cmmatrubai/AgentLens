@@ -7,7 +7,9 @@ import {
   assessmentResponseV1Schema,
   assessmentUpdateRequestV1Schema,
   browserAddressableEventIdV1Schema,
+  browserAddressableRunIdV1Schema,
   currentAssessmentV1Schema,
+  ecmaScriptTimestampV1Schema,
   eventDetailV1Schema,
   eventStatusFieldV1Schema,
   evidenceValueV1Schema,
@@ -15,6 +17,7 @@ import {
   nativeContentResponseV1Schema,
   normalizedContentV1Schema,
   normalizedContentResponseV1Schema,
+  maximumEcmaScriptTimestamp,
   presentationClassV1Schema,
   providerFieldV1Schema,
   runStatusFieldV1Schema,
@@ -89,6 +92,23 @@ const availableContent = { state: "available" } as const;
 const unavailableContent = { state: "unavailable", reason: "not_captured" } as const;
 
 describe("closed v1 browser schemas", () => {
+  it("bounds persisted browser timestamps to the ECMAScript Date domain", () => {
+    expect(ecmaScriptTimestampV1Schema.parse(maximumEcmaScriptTimestamp))
+      .toBe(maximumEcmaScriptTimestamp);
+    expect(() => ecmaScriptTimestampV1Schema.parse(maximumEcmaScriptTimestamp + 1)).toThrow();
+    expect(() => ecmaScriptTimestampV1Schema.parse(Number.MAX_SAFE_INTEGER)).toThrow();
+  });
+  it("keeps run IDs browser-addressable without narrowing the separate event-ID contract", () => {
+    for (const runId of ["run/id", "run%id", "run id", "运行-δ"]) {
+      expect(browserAddressableRunIdV1Schema.parse(runId)).toBe(runId);
+    }
+
+    for (const runId of [".", "..", "broken-\ud800-surrogate", "run\0id", "a".repeat(257)]) {
+      expect(() => browserAddressableRunIdV1Schema.parse(runId)).toThrow();
+    }
+
+    expect(browserAddressableEventIdV1Schema.parse("event/id %")).toBe("event/id %");
+  });
   it("accepts exactly every frozen API error code", () => {
     for (const code of API_ERROR_CODES) expect(apiErrorCodeV1Schema.parse(code)).toBe(code);
     expect(() => apiErrorCodeV1Schema.parse("database_path_leak")).toThrow();

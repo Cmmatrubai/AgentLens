@@ -1,6 +1,7 @@
 import {
   apiErrorV1Schema,
   browserAddressableEventIdV1Schema,
+  browserAddressableRunIdV1Schema,
   eventDetailV1Schema,
   runDetailV1Schema,
   runPageV1Schema,
@@ -131,8 +132,8 @@ function validateOrigin(value: string): string {
   return parsed.origin;
 }
 
-function boundedId(value: string): string {
-  if (value.length < 1 || value.length > 256 || /\p{Cc}/u.test(value) || value === "." || value === "..") {
+function runId(value: string): string {
+  if (!browserAddressableRunIdV1Schema.safeParse(value).success) {
     throw clientFailure("invalid_client_input", "AgentLens resource ID is invalid.");
   }
   return encodeURIComponent(value);
@@ -194,15 +195,38 @@ function eventSearch(query: EventPageQueryV1): string {
   return params.toString();
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+function isAbort(error: unknown, signal?: AbortSignal): boolean {
+  return signal?.aborted === true || (error instanceof DOMException && error.name === "AbortError");
+}
+
+async function cancelBodyBestEffort(body: ReadableStream<Uint8Array> | null): Promise<void> {
+  if (body === null || body.locked) return;
+  try {
+    await body.cancel();
+  } catch {
+    // Cancellation is cleanup only; its failure must not replace the bounded client error.
+  }
+}
+
+async function cancelReaderBestEffort(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
+  try {
+    await reader.cancel();
+  } catch {
+    // Cancellation is cleanup only; its failure must not replace the bounded client error.
+  }
+}
+
+async function readBoundedJson(response: Response, signal?: AbortSignal): Promise<unknown> {
   const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (mediaType !== "application/json") {
+    await cancelBodyBestEffort(response.body);
     throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
   }
   const declaredLength = response.headers.get("content-length");
   if (declaredLength !== null) {
     const parsedLength = Number(declaredLength);
     if (!Number.isSafeInteger(parsedLength) || parsedLength < 0 || parsedLength > maximumResponseBytes) {
+      await cancelBodyBestEffort(response.body);
       throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
     }
   }
@@ -212,15 +236,26 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  while (true) {
-    const next = await reader.read();
-    if (next.done) break;
-    total += next.value.byteLength;
-    if (total > maximumResponseBytes) {
-      await reader.cancel();
-      throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > maximumResponseBytes) {
+        await cancelReaderBestEffort(reader);
+        throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+      }
+      chunks.push(next.value);
     }
-    chunks.push(next.value);
+  } catch (error) {
+    await cancelReaderBestEffort(reader);
+    if (error instanceof AgentLensClientError) throw error;
+    if (isAbort(error, signal)) {
+      throw clientFailure("request_aborted", "The AgentLens request was cancelled.");
+    }
+    throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+  } finally {
+    reader.releaseLock();
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
@@ -237,11 +272,16 @@ async function readBoundedJson(response: Response): Promise<unknown> {
   }
 }
 
-async function parseResponse<T>(response: Response, schema: ResponseSchema<T>): Promise<T> {
+async function parseResponse<T>(
+  response: Response,
+  schema: ResponseSchema<T>,
+  signal?: AbortSignal
+): Promise<T> {
   if (response.redirected) {
+    await cancelBodyBestEffort(response.body);
     throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
   }
-  const body = await readBoundedJson(response);
+  const body = await readBoundedJson(response, signal);
   if (!response.ok) {
     const parsedError = apiErrorV1Schema.safeParse(body);
     if (!parsedError.success) {
@@ -285,23 +325,31 @@ export function createAgentLensApiClient(input: Readonly<{
       }
       throw clientFailure("network_error", "AgentLens could not reach the local server.", null, true);
     }
-    return parseResponse(response, schema);
+    try {
+      return await parseResponse(response, schema, signal);
+    } catch (error) {
+      if (error instanceof AgentLensClientError) throw error;
+      if (isAbort(error, signal)) {
+        throw clientFailure("request_aborted", "The AgentLens request was cancelled.");
+      }
+      throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+    }
   };
 
   return Object.freeze({
     listRuns: (query: RunListQueryV1, signal?: AbortSignal) =>
       request(`/api/v1/runs?${runSearch(query)}`, runPageV1Schema, signal),
     getRun: (runIdValue: string, signal?: AbortSignal) =>
-      request(`/api/v1/runs/${boundedId(runIdValue)}`, runDetailV1Schema, signal),
+      request(`/api/v1/runs/${runId(runIdValue)}`, runDetailV1Schema, signal),
     getEvents: (runIdValue: string, query: EventPageQueryV1, signal?: AbortSignal) =>
       request(
-        `/api/v1/runs/${boundedId(runIdValue)}/events?${eventSearch(query)}`,
+        `/api/v1/runs/${runId(runIdValue)}/events?${eventSearch(query)}`,
         trajectoryPageV1Schema,
         signal
       ),
     getEvent: (runIdValue: string, eventIdValue: string, signal?: AbortSignal) =>
       request(
-        `/api/v1/runs/${boundedId(runIdValue)}/events/${eventId(eventIdValue)}`,
+        `/api/v1/runs/${runId(runIdValue)}/events/${eventId(eventIdValue)}`,
         eventDetailV1Schema,
         signal
       )

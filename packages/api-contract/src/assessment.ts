@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { ecmaScriptTimestampV1Schema } from "./time.js";
+
 export const maximumAssessmentEventIdCharacters = 256;
 // A canonical 256-code-unit ID needs at most 768 UTF-8 bytes and 1,024
 // unpadded base64url characters, plus the fixed quotes and assessment prefix.
@@ -99,8 +101,8 @@ const explicitAssessmentV1Schema = z.object({
   note: assessmentNoteAvailabilityV1Schema,
   provenance: z.literal("human"),
   currentEventId: assessmentEventIdV1Schema,
-  reviewedAt: z.number().int().nonnegative(),
-  updatedAt: z.number().int().nonnegative()
+  reviewedAt: ecmaScriptTimestampV1Schema,
+  updatedAt: ecmaScriptTimestampV1Schema
 }).strict();
 
 export const currentAssessmentV1Schema = z.discriminatedUnion("state", [
