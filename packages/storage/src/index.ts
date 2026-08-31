@@ -1,12 +1,17 @@
 export {
   openDatabase,
+  openDatabaseForServerRead,
   openDatabaseReadOnly,
-  ReadOnlyDatabaseError
+  ReadOnlyDatabaseError,
+  ServerReadDatabaseError
 } from "./database.js";
 export type {
   AgentLensDatabase,
   DatabaseForeignKeyViolation,
   DatabaseInspection,
-  ReadOnlyDatabaseErrorReason
+  ReadOnlyDatabaseErrorReason,
+  ServerReadDatabase,
+  ServerReadDatabaseErrorReason,
+  ServerReadMode
 } from "./database.js";
 export * from "./runRepository.js";
