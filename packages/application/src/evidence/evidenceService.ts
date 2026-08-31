@@ -246,9 +246,19 @@ export function createEvidenceService(input: CreateEvidenceServiceInput): Eviden
       return read((repository) => {
         const run = requireRun(repository, runId);
         if (run.capturePolicy !== "standard") throw new EvidenceServiceError("content_unavailable");
-        const event = repository.getEvent(runId, eventId);
+        let event;
+        try {
+          event = repository.getEvent(runId, eventId);
+        } catch {
+          throw new EvidenceServiceError("content_unavailable");
+        }
         if (event === null) throw new EvidenceServiceError("event_not_found");
-        const value = projectEventContent(event, run.capturePolicy);
+        let value;
+        try {
+          value = projectEventContent(event, run.capturePolicy);
+        } catch {
+          throw new EvidenceServiceError("content_unavailable");
+        }
         if (value === null) throw new EvidenceServiceError("content_unavailable");
         responseWithin(value, LIMITS.content);
         return value;

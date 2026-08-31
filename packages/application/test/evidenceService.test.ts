@@ -1,11 +1,28 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { CapturePolicy, CompletedArtifact, TraceEventV1 } from "@agentlens/core";
 import { RunRepository, openDatabase } from "@agentlens/storage";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const artifactOpenRace = vi.hoisted(() => ({
+  beforeOpen: null as null | ((path: string) => Promise<void>)
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const beforeOpen = artifactOpenRace.beforeOpen;
+      artifactOpenRace.beforeOpen = null;
+      if (beforeOpen !== null) await beforeOpen(String(args[0]));
+      return actual.open(...args);
+    }
+  };
+});
 
 import {
   EvidenceServiceError,
@@ -97,11 +114,342 @@ async function fixture() {
   return { root, artifactRoot, databasePath, database, repository, createRun };
 }
 
+type ArtifactEvidenceRoute = "native" | "note" | "diff" | "status" | "diff-check" | "untracked";
+
+const artifactRouteKinds: Readonly<Record<ArtifactEvidenceRoute, string>> = {
+  native: "native-payload",
+  note: "assessment-note",
+  diff: "git-tracked-final-diff",
+  status: "git-initial-status",
+  "diff-check": "git-diff-check",
+  untracked: "git-untracked-file-metadata"
+};
+
+const artifactRouteMedia: Readonly<Record<ArtifactEvidenceRoute, string>> = {
+  native: "application/json",
+  note: "text/plain; charset=utf-8",
+  diff: "text/x-diff",
+  status: "text/plain",
+  "diff-check": "application/json",
+  untracked: "application/json"
+};
+
+const artifactRouteLimits: Readonly<Record<ArtifactEvidenceRoute, number>> = {
+  native: 256 * 1024,
+  note: 16 * 1024,
+  diff: 2 * 1024 * 1024,
+  status: 256 * 1024,
+  "diff-check": 256 * 1024,
+  untracked: 512 * 1024
+};
+
+const artifactRoutes = Object.freeze(
+  Object.keys(artifactRouteKinds) as ArtifactEvidenceRoute[]
+);
+
+const defaultRouteContent: Readonly<Record<ArtifactEvidenceRoute, string | Buffer>> = {
+  native: JSON.stringify({ value: "matrix native" }),
+  note: "matrix note",
+  diff: "diff --git a/old.ts b/new.ts\n--- a/old.ts\n+++ b/new.ts\n@@ -1 +1 @@\n-old\n+new\n",
+  status: "",
+  "diff-check": JSON.stringify({ passed: true, output: "matrix check" }),
+  untracked: JSON.stringify([{ path: "matrix.txt", type: "file", size: 12 }])
+};
+
+type MatrixFixture = Awaited<ReturnType<typeof artifactEvidenceFixture>>;
+
+async function unsafeDatabase(databasePath: string) {
+  const { createRequire } = await import("node:module");
+  const storageRequire = createRequire(new URL("../../storage/package.json", import.meta.url));
+  const Database = storageRequire("better-sqlite3") as new (path: string) => {
+    pragma(value: string): unknown;
+    prepare(sql: string): { run(...parameters: unknown[]): unknown };
+    close(): void;
+  };
+  return new Database(databasePath);
+}
+
+async function artifactEvidenceFixture(
+  targetRoute: ArtifactEvidenceRoute,
+  options: Readonly<{
+    targetContent?: string | Buffer;
+    targetOverrides?: Partial<CompletedArtifact>;
+  }> = {}
+) {
+  const setup = await fixture();
+  const runId = "matrix-run";
+  setup.createRun(runId, "standard");
+  const make = async (route: ArtifactEvidenceRoute, content = defaultRouteContent[route]) =>
+    completedArtifact(
+      setup.artifactRoot,
+      runId,
+      artifactRouteKinds[route],
+      artifactRouteMedia[route],
+      route === targetRoute && options.targetContent !== undefined ? options.targetContent : content,
+      route === targetRoute ? options.targetOverrides : undefined
+    );
+
+  const native = await make("native");
+  await setup.repository.commitArtifactMetadata(native);
+  setup.repository.appendEvent(trace(runId, "matrix-native", 0, {
+    nativePayload: { storage: "artifact", artifactId: native.id }
+  }));
+  setup.repository.appendEvent(trace(runId, "matrix-message", 1, {
+    nativePayload: { storage: "omitted", reason: "not_captured" }
+  }));
+
+  const note = await make("note");
+  await setup.repository.updateAssessment({
+    runId,
+    eventId: "matrix-note",
+    receivedAt,
+    verdict: "partial",
+    taskCompleted: "uncertain",
+    note: { state: "artifact", artifact: note }
+  });
+
+  const status = await make("status");
+  const finalStatus = await completedArtifact(
+    setup.artifactRoot, runId, "git-final-status", "text/plain", "? final-matrix.txt\n"
+  );
+  const diff = await make("diff");
+  const diffCheck = await make("diff-check");
+  const untracked = await make("untracked");
+  for (const artifact of [status, finalStatus, diff, diffCheck, untracked]) {
+    await setup.repository.commitArtifactMetadata(artifact);
+  }
+  setup.repository.saveGitEvidence(runId, {
+    initialHead: "a".repeat(40),
+    finalHead: "b".repeat(40),
+    initialBranch: "main",
+    finalBranch: "main",
+    initialStatus: { state: "artifact", artifactId: status.id },
+    finalStatus: { state: "artifact", artifactId: finalStatus.id },
+    trackedFinalDiff: { state: "artifact", artifactId: diff.id },
+    diffCheck: { state: "artifact", artifactId: diffCheck.id },
+    diffCheckPassed: true,
+    untrackedMetadata: { state: "artifact", artifactId: untracked.id },
+    headChanged: true,
+    branchChanged: false,
+    capturedAt: 2
+  });
+  setup.createRun("matrix-other", "standard");
+  const otherArtifact = await completedArtifact(
+    setup.artifactRoot,
+    "matrix-other",
+    artifactRouteKinds[targetRoute],
+    artifactRouteMedia[targetRoute],
+    targetRoute === "native" || targetRoute === "diff-check" || targetRoute === "untracked"
+      ? JSON.stringify({ other: targetRoute })
+      : `other ${targetRoute}\n`
+  );
+  await setup.repository.commitArtifactMetadata(otherArtifact);
+  setup.repository.appendEvent(trace("matrix-other", "matrix-other-event", 0, {
+    ...(targetRoute === "native"
+      ? { nativePayload: { storage: "artifact" as const, artifactId: otherArtifact.id } }
+      : {})
+  }));
+  setup.database.close();
+  return {
+    ...setup,
+    runId,
+    artifacts: { native, note, diff, status, "diff-check": diffCheck, untracked },
+    otherArtifact
+  };
+}
+
+function matrixService(setup: MatrixFixture) {
+  return createEvidenceService({ databasePath: setup.databasePath, artifactRoot: setup.artifactRoot });
+}
+
+function readMatrixRoute(
+  setup: MatrixFixture,
+  route: ArtifactEvidenceRoute,
+  runId = setup.runId,
+  eventId?: string
+) {
+  const service = matrixService(setup);
+  switch (route) {
+    case "native":
+      return service.eventNative(runId, eventId ?? "matrix-native");
+    case "note":
+      return service.assessmentNote(runId, eventId ?? "matrix-note");
+    case "diff":
+      return service.gitDiff(runId);
+    case "status":
+      return service.gitStatus(runId, "initial");
+    case "diff-check":
+      return service.gitDiffCheck(runId);
+    case "untracked":
+      return service.gitUntracked(runId);
+  }
+}
+
+async function updateArtifact(
+  setup: MatrixFixture,
+  route: ArtifactEvidenceRoute,
+  assignment: string,
+  value: unknown
+): Promise<void> {
+  const database = await unsafeDatabase(setup.databasePath);
+  database.prepare(`UPDATE artifacts SET ${assignment} = ? WHERE run_id = ? AND id = ?`)
+    .run(value, setup.runId, setup.artifacts[route].id);
+  database.close();
+}
+
+const gitReferenceColumn: Readonly<Partial<Record<ArtifactEvidenceRoute, string>>> = {
+  diff: "tracked_final_diff_artifact_id",
+  status: "initial_status_artifact_id",
+  "diff-check": "diff_check_artifact_id",
+  untracked: "untracked_metadata_artifact_id"
+};
+
+async function rebindRouteArtifact(
+  setup: MatrixFixture,
+  route: ArtifactEvidenceRoute,
+  artifactId: string
+): Promise<void> {
+  const database = await unsafeDatabase(setup.databasePath);
+  database.pragma("foreign_keys = OFF");
+  if (route === "native") {
+    database.prepare(`
+      UPDATE events SET native_payload_artifact_id = ?
+      WHERE run_id = ? AND id = 'matrix-native'
+    `).run(artifactId, setup.runId);
+  } else if (route === "note") {
+    database.prepare(`
+      UPDATE event_artifact_bindings SET artifact_id = ?
+      WHERE run_id = ? AND event_id = 'matrix-note' AND role = 'assessment_note'
+    `).run(artifactId, setup.runId);
+  } else {
+    database.prepare(`UPDATE git_evidence SET ${gitReferenceColumn[route]} = ? WHERE run_id = ?`)
+      .run(artifactId, setup.runId);
+  }
+  database.close();
+}
+
+async function replaceAssessmentRole(setup: MatrixFixture, role: string): Promise<void> {
+  const database = await unsafeDatabase(setup.databasePath);
+  database.pragma("ignore_check_constraints = ON");
+  database.prepare(`
+    UPDATE event_artifact_bindings SET role = ?
+    WHERE run_id = ? AND event_id = 'matrix-note' AND role = 'assessment_note'
+  `).run(role, setup.runId);
+  database.close();
+}
+
+async function updateRunCapturePolicy(setup: MatrixFixture, capturePolicy: CapturePolicy): Promise<void> {
+  const database = await unsafeDatabase(setup.databasePath);
+  database.prepare("UPDATE runs SET capture_policy = ? WHERE id = ?")
+    .run(capturePolicy, setup.runId);
+  database.close();
+}
+
+function physicalRouteContent(route: ArtifactEvidenceRoute): string | Buffer {
+  if (route === "status") {
+    return `1 .M N... 100644 100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} matrix.ts\n`;
+  }
+  return defaultRouteContent[route];
+}
+
+function invalidRouteContent(route: ArtifactEvidenceRoute): string | Buffer {
+  switch (route) {
+    case "native":
+    case "diff-check":
+      return "{";
+    case "untracked":
+      return "[{}]";
+    case "note":
+    case "diff":
+    case "status":
+      return Buffer.from([0xff, 0xfe]);
+  }
+}
+
+function oversizedRouteContent(route: ArtifactEvidenceRoute): string | Buffer {
+  const limit = artifactRouteLimits[route];
+  switch (route) {
+    case "native":
+      return JSON.stringify({ value: "x".repeat(limit) });
+    case "diff-check":
+      return JSON.stringify({ passed: true, output: "x".repeat(limit) });
+    case "untracked":
+      return JSON.stringify([{ path: "x".repeat(limit), type: "file", size: 1 }]);
+    case "note":
+    case "diff":
+    case "status":
+      return "x".repeat(limit + 1);
+  }
+}
+
+function responseLimitRouteContent(route: ArtifactEvidenceRoute): string {
+  const limit = artifactRouteLimits[route];
+  switch (route) {
+    case "native":
+      return JSON.stringify({ value: "x".repeat(limit - 32) });
+    case "note":
+      return "x".repeat(limit);
+    case "diff": {
+      const lines = Array.from({ length: 45_000 }, () => "+x").join("\n");
+      return [
+        "diff --git a/a b/a", "--- a/a", "+++ b/a", "@@ -0,0 +1,45000 @@", lines, ""
+      ].join("\n");
+    }
+    case "status":
+      return Array.from({ length: 10_000 }, (_, index) => `? file-${index}.txt`).join("\n") + "\n";
+    case "diff-check":
+      return JSON.stringify({ passed: true, output: "x".repeat(limit - 40) });
+    case "untracked":
+      return JSON.stringify(Array.from({ length: 9_070 }, (_, index) => ({
+        path: `file-${index}-${"x".repeat(index === 0 ? 410 : 10)}`,
+        type: "file",
+        size: index
+      })));
+  }
+}
+
 afterEach(async () => {
+  artifactOpenRace.beforeOpen = null;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe("Task 7.7 evidence projection", () => {
+  it("prefers bounded terminal command output while retaining command fallback", async () => {
+    const setup = await fixture();
+    setup.createRun("command-content", "standard");
+    setup.repository.appendEvent(trace("command-content", "command-terminal", 0, {
+      kind: "command",
+      normalizedPayload: {
+        commandEvidence: { state: "available", redactedCommand: "pnpm test" },
+        aggregatedOutput: "15 tests passed",
+        exitCode: 0
+      }
+    }));
+    setup.repository.appendEvent(trace("command-content", "command-started", 1, {
+      kind: "command",
+      status: "in_progress",
+      normalizedPayload: {
+        commandEvidence: { state: "available", redactedCommand: "pnpm test" }
+      }
+    }));
+    setup.database.close();
+
+    const service = createEvidenceService({
+      databasePath: setup.databasePath,
+      artifactRoot: setup.artifactRoot
+    });
+    await expect(service.eventContent("command-content", "command-terminal")).resolves.toEqual({
+      schemaVersion: 1,
+      eventId: "command-terminal",
+      content: { kind: "command_output", output: "15 tests passed" }
+    });
+    await expect(service.eventContent("command-content", "command-started")).resolves.toEqual({
+      schemaVersion: 1,
+      eventId: "command-started",
+      content: { kind: "command", command: "pnpm test", exitCode: null }
+    });
+  });
+
   it("parses a structured Git diff without producing markup", () => {
     const parsed = parseGitDiff([
       "diff --git \"a/src/old name.ts\" \"b/src/new name.ts\"",
@@ -712,6 +1060,194 @@ describe("Task 7.7 evidence projection", () => {
       artifactRoot: setup.artifactRoot
     });
     await expect(service.gitDiff("bounded-diff"))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it("maps malformed and over-limit standard normalized content to content unavailable", async () => {
+    const setup = await fixture();
+    setup.createRun("invalid-content", "standard");
+    setup.repository.appendEvent(trace("invalid-content", "malformed-content", 0));
+    setup.repository.appendEvent(trace("invalid-content", "over-limit-content", 1, {
+      normalizedPayload: { text: "x".repeat(256 * 1024 + 1) }
+    }));
+    setup.database.close();
+    const database = await unsafeDatabase(setup.databasePath);
+    database.prepare(`
+      UPDATE events SET normalized_payload_json = '{'
+      WHERE run_id = 'invalid-content' AND id = 'malformed-content'
+    `).run();
+    database.close();
+
+    const service = createEvidenceService({
+      databasePath: setup.databasePath,
+      artifactRoot: setup.artifactRoot
+    });
+    await expect(service.eventContent("invalid-content", "malformed-content"))
+      .rejects.toMatchObject({ code: "content_unavailable" });
+    await expect(service.eventContent("invalid-content", "over-limit-content"))
+      .rejects.toMatchObject({ code: "content_unavailable" });
+  });
+});
+
+describe("Task 7.7 bound artifact route matrix", () => {
+  it.each(artifactRoutes)("reads valid authoritative %s evidence", async (route) => {
+    const setup = await artifactEvidenceFixture(route);
+    await expect(readMatrixRoute(setup, route)).resolves.toMatchObject({ schemaVersion: 1 });
+  });
+
+  it.each(artifactRoutes)("rejects a cross-run artifact rebound into the %s role", async (route) => {
+    const setup = await artifactEvidenceFixture(route);
+    await rebindRouteArtifact(setup, route, setup.otherArtifact.id);
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("rejects a same-run artifact from the wrong %s evidence role", async (route) => {
+    const setup = await artifactEvidenceFixture(route);
+    const wrongRoleArtifact = route === "native" ? setup.artifacts.note : setup.artifacts.native;
+    await rebindRouteArtifact(setup, route, wrongRoleArtifact.id);
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(["native", "note"] as const)("rejects the wrong event for %s evidence", async (route) => {
+    const setup = await artifactEvidenceFixture(route);
+    await expect(readMatrixRoute(setup, route, setup.runId, "matrix-message"))
+      .rejects.toMatchObject({
+        code: route === "native" ? "content_unavailable" : "evidence_binding_mismatch"
+      });
+  });
+
+  it("rejects an assessment artifact bound under the wrong role", async () => {
+    const setup = await artifactEvidenceFixture("note");
+    await replaceAssessmentRole(setup, "future_note_role");
+    await expect(readMatrixRoute(setup, "note"))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("checks capture policy before touching corrupt %s bytes", async (route) => {
+    const setup = await artifactEvidenceFixture(route, { targetContent: physicalRouteContent(route) });
+    await updateRunCapturePolicy(setup, "metadata-only");
+    await rm(setup.artifacts[route].path);
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "content_unavailable" });
+  });
+
+  it.each(artifactRoutes)("rejects wrong %s artifact kind metadata", async (route) => {
+    const setup = await artifactEvidenceFixture(route);
+    await updateArtifact(setup, route, "kind", "wrong-evidence-kind");
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("rejects wrong %s artifact media metadata", async (route) => {
+    const setup = await artifactEvidenceFixture(route);
+    await updateArtifact(setup, route, "media_type", "application/octet-stream");
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("rejects a non-canonical %s artifact path", async (route) => {
+    const setup = await artifactEvidenceFixture(route);
+    await updateArtifact(setup, route, "path", join(setup.root, `outside-${route}`));
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("rejects a %s artifact replaced by a symlink", async (route) => {
+    const setup = await artifactEvidenceFixture(route, { targetContent: physicalRouteContent(route) });
+    const artifact = setup.artifacts[route];
+    const bytes = await readFile(artifact.path);
+    const externalPath = join(setup.root, `external-${route}`);
+    await writeFile(externalPath, bytes, { mode: 0o600 });
+    await rm(artifact.path);
+    await symlink(externalPath, artifact.path);
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("rejects a %s artifact inode swap between validation and open", async (route) => {
+    const setup = await artifactEvidenceFixture(route, { targetContent: physicalRouteContent(route) });
+    const artifact = setup.artifacts[route];
+    const replacement = `${artifact.path}.replacement`;
+    await writeFile(replacement, await readFile(artifact.path), { mode: 0o600 });
+    artifactOpenRace.beforeOpen = async (openedPath) => {
+      expect(openedPath).toBe(artifact.path);
+      await rename(replacement, artifact.path);
+    };
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("rejects a %s artifact with a changed byte length", async (route) => {
+    const setup = await artifactEvidenceFixture(route, { targetContent: physicalRouteContent(route) });
+    const artifact = setup.artifacts[route];
+    const bytes = await readFile(artifact.path);
+    await writeFile(artifact.path, Buffer.concat([bytes, Buffer.from("x")]), { mode: 0o600 });
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("rejects a %s artifact with a changed digest", async (route) => {
+    const setup = await artifactEvidenceFixture(route, { targetContent: physicalRouteContent(route) });
+    const artifact = setup.artifacts[route];
+    const bytes = await readFile(artifact.path);
+    const changed = Buffer.from(bytes.length === 0 ? "x" : bytes);
+    if (bytes.length === 0) {
+      await updateArtifact(setup, route, "byte_length", 1);
+      await updateArtifact(setup, route, "original_byte_length", 1);
+    } else {
+      changed[0] = changed[0] === 0x78 ? 0x79 : 0x78;
+    }
+    await writeFile(artifact.path, changed, { mode: 0o600 });
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("rejects non-owner-only permissions for %s evidence", async (route) => {
+    const setup = await artifactEvidenceFixture(route, { targetContent: physicalRouteContent(route) });
+    await chmod(setup.artifacts[route].path, 0o644);
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(["native", "diff"] as const)("allows declared truncation for %s evidence", async (route) => {
+    const setup = await artifactEvidenceFixture(route, {
+      targetOverrides: { truncated: true, originalByteLength: 9_999_999 }
+    });
+    await expect(readMatrixRoute(setup, route)).resolves.toMatchObject(
+      route === "native" ? { content: { truncated: true } } : { truncated: true }
+    );
+  });
+
+  it.each(["note", "status", "diff-check", "untracked"] as const)(
+    "rejects forbidden truncation for %s evidence",
+    async (route) => {
+      const setup = await artifactEvidenceFixture(route, {
+        targetOverrides: { truncated: true, originalByteLength: 9_999_999 }
+      });
+      await expect(readMatrixRoute(setup, route))
+        .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+    }
+  );
+
+  it.each(artifactRoutes)("rejects invalid UTF-8 or JSON for %s evidence", async (route) => {
+    const setup = await artifactEvidenceFixture(route, { targetContent: invalidRouteContent(route) });
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("rejects %s source metadata over the route limit", async (route) => {
+    const setup = await artifactEvidenceFixture(route, { targetContent: oversizedRouteContent(route) });
+    await expect(readMatrixRoute(setup, route))
+      .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
+  });
+
+  it.each(artifactRoutes)("rejects a %s projection over the response limit", async (route) => {
+    const content = responseLimitRouteContent(route);
+    expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(artifactRouteLimits[route]);
+    const setup = await artifactEvidenceFixture(route, { targetContent: content });
+    await expect(readMatrixRoute(setup, route))
       .rejects.toMatchObject({ code: "evidence_binding_mismatch" });
   });
 });

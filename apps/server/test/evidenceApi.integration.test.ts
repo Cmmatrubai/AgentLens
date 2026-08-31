@@ -207,6 +207,28 @@ describe("Task 7.7 evidence API", () => {
       normalizedPayload: { text: "redacted content" },
       nativePayload: { storage: "inline", redacted: { value: "redacted native" } }
     });
+    repository.appendEvent({
+      id: "event-command-production",
+      runId: "run-production",
+      sequence: 1,
+      receivedAt: "2026-08-31T12:00:01.000Z",
+      kind: "command",
+      status: "completed",
+      provenance: "observed",
+      source: {
+        provider: "codex-exec",
+        itemId: "RAW_COMMAND_ITEM_MUST_NOT_CROSS",
+        eventType: "item.completed"
+      },
+      relationships: [],
+      summary: "redacted command summary",
+      normalizedPayload: {
+        commandEvidence: { state: "available", redactedCommand: "pnpm test" },
+        aggregatedOutput: "15 tests passed",
+        exitCode: 0
+      },
+      nativePayload: { storage: "omitted", reason: "not_captured" }
+    });
     database.close();
 
     let seed = 1;
@@ -223,13 +245,24 @@ describe("Task 7.7 evidence API", () => {
     const native = await fetch(
       `${handle.origin}/api/v1/runs/run-production/events/event-production/native`, { headers }
     );
+    const commandOutput = await fetch(
+      `${handle.origin}/api/v1/runs/run-production/events/event-command-production/content`, { headers }
+    );
     expect(content.status).toBe(200);
     expect(native.status).toBe(200);
-    const serialized = JSON.stringify([await content.json(), await native.json()]);
+    expect(commandOutput.status).toBe(200);
+    const projectedCommandOutput = await commandOutput.json();
+    expect(projectedCommandOutput).toEqual({
+      schemaVersion: 1,
+      eventId: "event-command-production",
+      content: { kind: "command_output", output: "15 tests passed" }
+    });
+    const serialized = JSON.stringify([await content.json(), await native.json(), projectedCommandOutput]);
     expect(serialized).toContain("redacted content");
     expect(serialized).toContain("redacted native");
     expect(serialized).not.toContain("RAW_SESSION_MUST_NOT_CROSS");
     expect(serialized).not.toContain("RAW_ITEM_MUST_NOT_CROSS");
+    expect(serialized).not.toContain("RAW_COMMAND_ITEM_MUST_NOT_CROSS");
     expect(serialized).not.toContain(dataRoot);
   });
 });
