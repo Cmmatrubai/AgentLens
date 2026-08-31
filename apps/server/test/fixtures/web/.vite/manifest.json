@@ -1,0 +1,6 @@
+{
+  "src/main.ts": {
+    "file": "assets/fixture.js",
+    "isEntry": true
+  }
+}

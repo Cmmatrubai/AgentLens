@@ -10,6 +10,7 @@
     "@agentlens/codex": "workspace:*",
     "@agentlens/core": "workspace:*",
     "@agentlens/derivations": "workspace:*",
+    "@agentlens/server": "workspace:*",
     "@agentlens/storage": "workspace:*"
   }
 }

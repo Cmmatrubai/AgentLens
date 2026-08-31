@@ -219,6 +219,21 @@ describe("packaged AgentLens binary", () => {
     });
   });
 
+  it("rejects public UI bind configuration through the compiled error boundary", async () => {
+    const result = await plainNode([
+      compiledMain,
+      "ui",
+      "--port",
+      "9000"
+    ], workspaceRoot, process.env);
+
+    expect(result).toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "AgentLens error: Unknown option for ui: --port.\n"
+    });
+  });
+
   it.each([
     ["SIGINT", 130],
     ["SIGTERM", 143]

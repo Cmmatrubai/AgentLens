@@ -12,6 +12,7 @@
     { "path": "../../packages/application" },
     { "path": "../../packages/core" },
     { "path": "../../packages/derivations" },
+    { "path": "../server" },
     { "path": "../../packages/storage" },
     { "path": "../../packages/codex" }
   ]

@@ -39,9 +39,18 @@ importers:
       '@agentlens/derivations':
         specifier: workspace:*
         version: link:../../packages/derivations
+      '@agentlens/server':
+        specifier: workspace:*
+        version: link:../server
       '@agentlens/storage':
         specifier: workspace:*
         version: link:../../packages/storage
+
+  apps/server:
+    dependencies:
+      '@agentlens/api-contract':
+        specifier: workspace:*
+        version: link:../../packages/api-contract
 
   packages/api-contract:
     dependencies:

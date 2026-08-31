@@ -6,7 +6,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "agentlens": "tsx --conditions=development apps/cli/src/main.ts",
+    "agentlens": "tsx --conditions=development apps/cli/src/developmentEntry.ts",
     "test": "vitest --run",
     "typecheck": "tsc -b --pretty false"
   },
