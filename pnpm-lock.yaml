@@ -43,8 +43,17 @@ importers:
         specifier: workspace:*
         version: link:../../packages/storage
 
+  packages/api-contract:
+    dependencies:
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+
   packages/application:
     dependencies:
+      '@agentlens/api-contract':
+        specifier: workspace:*
+        version: link:../api-contract
       '@agentlens/core':
         specifier: workspace:*
         version: link:../core

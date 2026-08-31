@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "./packages/api-contract" },
     { "path": "./packages/core" },
     { "path": "./packages/derivations" },
     { "path": "./packages/storage" },

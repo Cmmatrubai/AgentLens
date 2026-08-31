@@ -1,5 +1,5 @@
 {
-  "name": "@agentlens/application",
+  "name": "@agentlens/api-contract",
   "private": true,
   "type": "module",
   "exports": {
@@ -10,9 +10,6 @@
     }
   },
   "dependencies": {
-    "@agentlens/api-contract": "workspace:*",
-    "@agentlens/core": "workspace:*",
-    "@agentlens/derivations": "workspace:*",
-    "@agentlens/storage": "workspace:*"
+    "zod": "^3.23.8"
   }
 }

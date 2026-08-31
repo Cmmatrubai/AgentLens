@@ -1,0 +1,71 @@
+import { z } from "zod";
+
+export const assessmentVerdictV1Schema = z.enum([
+  "unreviewed",
+  "success",
+  "partial",
+  "failure"
+]);
+
+export const taskCompletionV1Schema = z.enum(["yes", "no", "uncertain"]);
+
+export const assessmentNoteAvailabilityV1Schema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("absent") }).strict(),
+  z.object({ state: z.literal("available") }).strict(),
+  z.object({
+    state: z.literal("unavailable"),
+    reason: z.enum(["capture_policy", "artifact_unreadable"])
+  }).strict()
+]);
+
+const projectedAssessmentV1Schema = z.object({
+  schemaVersion: z.literal(1),
+  state: z.literal("projected"),
+  verdict: z.literal("unreviewed"),
+  taskCompleted: z.literal("uncertain"),
+  note: z.object({ state: z.literal("absent") }).strict(),
+  provenance: z.null(),
+  currentEventId: z.null(),
+  reviewedAt: z.null(),
+  updatedAt: z.null()
+}).strict();
+
+const explicitAssessmentV1Schema = z.object({
+  schemaVersion: z.literal(1),
+  state: z.literal("explicit"),
+  verdict: assessmentVerdictV1Schema,
+  taskCompleted: taskCompletionV1Schema,
+  note: assessmentNoteAvailabilityV1Schema,
+  provenance: z.literal("human"),
+  currentEventId: z.string().min(1).max(256),
+  reviewedAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative()
+}).strict();
+
+export const currentAssessmentV1Schema = z.discriminatedUnion("state", [
+  projectedAssessmentV1Schema,
+  explicitAssessmentV1Schema
+]);
+
+export const assessmentUpdateRequestV1Schema = z.object({
+  schemaVersion: z.literal(1),
+  verdict: assessmentVerdictV1Schema,
+  taskCompleted: taskCompletionV1Schema,
+  note: z.discriminatedUnion("state", [
+    z.object({ state: z.literal("absent") }).strict(),
+    z.object({ state: z.literal("text"), text: z.string().max(16_384) }).strict()
+  ])
+}).strict();
+
+export const assessmentResponseV1Schema = z.object({
+  schemaVersion: z.literal(1),
+  assessment: currentAssessmentV1Schema,
+  etag: z.string().min(1).max(256)
+}).strict();
+
+export type AssessmentVerdictV1 = z.infer<typeof assessmentVerdictV1Schema>;
+export type TaskCompletionV1 = z.infer<typeof taskCompletionV1Schema>;
+export type AssessmentNoteAvailabilityV1 = z.infer<typeof assessmentNoteAvailabilityV1Schema>;
+export type CurrentAssessmentV1 = z.infer<typeof currentAssessmentV1Schema>;
+export type AssessmentUpdateRequestV1 = z.infer<typeof assessmentUpdateRequestV1Schema>;
+export type AssessmentResponseV1 = z.infer<typeof assessmentResponseV1Schema>;
