@@ -119,11 +119,26 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
   let hunk: typeof files[number]["hunks"][number] | undefined;
   let oldLine = 0;
   let newLine = 0;
+  let consumedOld = 0;
+  let consumedNew = 0;
+  let hasOldHeader = false;
+  let hasNewHeader = false;
   let malformed = false;
+
+  const closeHunk = (allowTruncatedIncomplete: boolean): void => {
+    if (hunk === undefined) return;
+    const exact = consumedOld === hunk.oldCount && consumedNew === hunk.newCount;
+    const incomplete = consumedOld <= hunk.oldCount && consumedNew <= hunk.newCount;
+    if (!exact && !(allowTruncatedIncomplete && incomplete)) malformed = true;
+    hunk = undefined;
+    consumedOld = 0;
+    consumedNew = 0;
+  };
 
   for (const line of text.split("\n")) {
     if (line.length === 0) continue;
     if (line.startsWith("diff --git ")) {
+      closeHunk(false);
       try {
         const pair = tokens(line.slice("diff --git ".length));
         if (pair.length !== 2) throw new Error("Malformed diff header.");
@@ -141,11 +156,14 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
           hunks: []
         };
         files.push(current);
-        hunk = undefined;
+        hasOldHeader = false;
+        hasNewHeader = false;
       } catch {
         malformed = true;
         preamble.push(line);
         current = undefined;
+        hasOldHeader = false;
+        hasNewHeader = false;
       }
       continue;
     }
@@ -155,11 +173,20 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
       continue;
     }
     if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+      if (hunk !== undefined) {
+        closeHunk(false);
+        malformed = true;
+      }
       current.headers.push(line);
       try {
         const parsed = pathToken(line.slice(4));
-        if (line.startsWith("--- ")) current.oldPath = parsed;
-        else current.newPath = parsed;
+        if (line.startsWith("--- ")) {
+          current.oldPath = parsed;
+          hasOldHeader = true;
+        } else {
+          current.newPath = parsed;
+          hasNewHeader = true;
+        }
       } catch {
         malformed = true;
       }
@@ -167,6 +194,8 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
     }
     const header = HUNK.exec(line);
     if (header !== null) {
+      closeHunk(false);
+      if (!hasOldHeader || !hasNewHeader) malformed = true;
       hunk = {
         header: line,
         oldStart: Number(header[1]),
@@ -178,6 +207,8 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
       current.hunks.push(hunk);
       oldLine = hunk.oldStart;
       newLine = hunk.newStart;
+      consumedOld = 0;
+      consumedNew = 0;
       continue;
     }
     const type = metadataType(line);
@@ -195,6 +226,15 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
     if (hunk !== undefined && [" ", "+", "-"].includes(line[0] ?? "")) {
       const prefix = line[0]!;
       const content = line.slice(1);
+      const consumesOld = prefix === " " || prefix === "-";
+      const consumesNew = prefix === " " || prefix === "+";
+      if (
+        (consumesOld && consumedOld >= hunk.oldCount) ||
+        (consumesNew && consumedNew >= hunk.newCount)
+      ) {
+        malformed = true;
+        continue;
+      }
       if (prefix === " ") {
         hunk.lines.push({ type: "context", oldLineNumber: oldLine++, newLineNumber: newLine++, text: content });
       } else if (prefix === "+") {
@@ -207,8 +247,11 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
       } else {
         hunk.lines.push({ type: "delete", oldLineNumber: oldLine++, newLineNumber: null, text: content });
       }
+      if (consumesOld) consumedOld += 1;
+      if (consumesNew) consumedNew += 1;
       continue;
     }
+    closeHunk(false);
     const fallback = metadataType(line);
     if (fallback !== null) current.metadata.push({ type: fallback, text: line });
     else {
@@ -216,6 +259,8 @@ export function parseGitDiff(text: string, truncated: boolean): GitDiffContentV1
       malformed = true;
     }
   }
+
+  closeHunk(truncated);
 
   return gitDiffContentV1Schema.parse({
     schemaVersion: 1,

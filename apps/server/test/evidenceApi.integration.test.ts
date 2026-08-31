@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,9 +8,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   EvidenceServiceError,
+  createEvidenceService,
   type EvidenceService
 } from "../../../packages/application/src/index.js";
+import { normalizeCodexRecord } from "../../../packages/codex/src/index.js";
+import { ArtifactStore } from "../../../packages/core/src/index.js";
 import { RunRepository, openDatabase } from "../../../packages/storage/src/index.js";
+import { persistEventDraft } from "../../cli/src/persistEvent.js";
 import { createAgentLensRouter } from "../src/router.js";
 import { startAgentLensServer, type AgentLensServerHandle } from "../src/startServer.js";
 
@@ -264,5 +268,153 @@ describe("Task 7.7 evidence API", () => {
     expect(serialized).not.toContain("RAW_ITEM_MUST_NOT_CROSS");
     expect(serialized).not.toContain("RAW_COMMAND_ITEM_MUST_NOT_CROSS");
     expect(serialized).not.toContain(dataRoot);
+  });
+
+  it("response-redacts canonical source tuples from real inline and artifact native payloads", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-native-response-redaction-"));
+    roots.push(root);
+    const dataRoot = join(root, "data");
+    const artifactRoot = join(dataRoot, "artifacts", "sha256");
+    await mkdir(artifactRoot, { recursive: true, mode: 0o700 });
+    const databasePath = join(dataRoot, "agentlens.sqlite");
+    const database = openDatabase(databasePath);
+    const repository = new RunRepository(database, { artifactRoot });
+    repository.createRun({
+      id: "native-source-run",
+      schemaVersion: 1,
+      provider: "codex-exec",
+      integrationVersion: "0.1.0",
+      agentVersion: "fixture",
+      capturePolicy: "standard",
+      capturePolicyVersion: "1",
+      redactionVersion: "1",
+      repositoryFingerprint: "repo-native-source",
+      repositoryDisplay: "fixture repository",
+      startedAt: 1
+    }, {
+      recorderInstanceId: "recorder-native-source",
+      recorderPid: 4242,
+      recorderStartToken: "token-native-source",
+      heartbeatAt: 1
+    });
+
+    const artifactStore = new ArtifactStore(dataRoot);
+    let sequence = 0;
+    const persisted: Array<{ eventId: string; sourceValues: string[]; storage: "inline" | "artifact" }> = [];
+    for (const fixture of [
+      { label: "inline", filler: "", sharedSessionThread: false },
+      { label: "artifact", filler: "x".repeat(40 * 1024), sharedSessionThread: true }
+    ] as const) {
+      const sessionId = `SRC_SESSION_${fixture.label}`;
+      const threadId = fixture.sharedSessionThread ? sessionId : `SRC_THREAD_${fixture.label}`;
+      const turnId = `SRC_TURN_${fixture.label}`;
+      const itemId = `SRC_ITEM_${fixture.label}`;
+      const toolId = `SRC_TOOL_${fixture.label}`;
+      const correlationId = `SRC_CALL_CORRELATION_${fixture.label}`;
+      const eventType = "item.completed";
+      const itemType = "command_execution";
+      const record = {
+        type: eventType,
+        session_id: sessionId,
+        thread_id: threadId,
+        turn_id: turnId,
+        correlation_id: correlationId,
+        call_id: correlationId,
+        inspectable: "INSPECTABLE_ALREADY_REDACTED_PROVIDER_CONTENT",
+        [`${sessionId}_embedded_key`]: "KEY_INSPECTABLE_PROVIDER_CONTENT",
+        embedded: `before:${sessionId}:${threadId}:${turnId}:${itemId}:${toolId}:${correlationId}:${eventType}:${itemType}:after`,
+        item: {
+          id: itemId,
+          type: itemType,
+          tool_id: toolId,
+          call_id: correlationId,
+          status: "completed",
+          command: "printf inspectable",
+          aggregated_output: "provider output remains inspectable",
+          nested: {
+            sourceEcho: `nested:${sessionId}:${itemId}:${correlationId}`,
+            inspectable: "NESTED_INSPECTABLE_PROVIDER_CONTENT"
+          },
+          filler: fixture.filler
+        }
+      };
+      const draft = normalizeCodexRecord(record)[0]!;
+      const eventId = `native-${fixture.label}`;
+      const event = await persistEventDraft(draft, {
+        runId: "native-source-run",
+        capturePolicy: "standard",
+        redactionKey: Buffer.alloc(32, 7),
+        artifactStore,
+        repository,
+        committedArtifactIds: new Set<string>(),
+        nextEventId: () => eventId,
+        nextSequence: () => sequence++,
+        receivedAt: () => "2026-08-31T12:00:00.000Z"
+      });
+      if (event.nativePayload?.storage !== fixture.label) {
+        throw new Error(`Expected ${fixture.label} native storage.`);
+      }
+      expect(event.source).toEqual({
+        provider: "codex-exec",
+        sessionId,
+        threadId,
+        turnId,
+        itemId,
+        toolId,
+        correlationId,
+        eventType,
+        itemType
+      });
+      const sourceValues = [...new Set(Object.entries(event.source)
+        .filter(([field, value]) => field !== "provider" && typeof value === "string")
+        .map(([, value]) => value as string))];
+      const durableNative = event.nativePayload.storage === "inline"
+        ? JSON.stringify(event.nativePayload.redacted)
+        : await readFile(artifactStore.pathForArtifactId(event.nativePayload.artifactId), "utf8");
+      for (const sourceValue of sourceValues) expect(durableNative).toContain(sourceValue);
+      persisted.push({
+        eventId,
+        sourceValues,
+        storage: event.nativePayload.storage
+      });
+    }
+    database.close();
+
+    const evidence = createEvidenceService({ databasePath, artifactRoot });
+    const directResponses = await Promise.all(persisted.map(({ eventId }) =>
+      evidence.eventNative("native-source-run", eventId)
+    ));
+
+    let seed = 11;
+    const handle = await startAgentLensServer({
+      dataRoot,
+      webRoot: fixtureWebRoot,
+      tokenBytes: () => Buffer.alloc(32, seed++)
+    });
+    handles.push(handle);
+    const headers = { Authorization: `Bearer ${Buffer.alloc(32, 11).toString("base64url")}` };
+    const httpResponses = await Promise.all(persisted.map(async ({ eventId }) => {
+      const response = await fetch(
+        `${handle.origin}/api/v1/runs/native-source-run/events/${eventId}/native`, { headers }
+      );
+      expect(response.status).toBe(200);
+      return response.json();
+    }));
+
+    for (const [index, { sourceValues, storage }] of persisted.entries()) {
+      expect(storage).toBe(index === 0 ? "inline" : "artifact");
+      const serialized = JSON.stringify([directResponses[index], httpResponses[index]]);
+      for (const sourceValue of sourceValues) expect(serialized).not.toContain(sourceValue);
+      expect(serialized).toContain("INSPECTABLE_ALREADY_REDACTED_PROVIDER_CONTENT");
+      expect(serialized).toContain("NESTED_INSPECTABLE_PROVIDER_CONTENT");
+      expect(serialized).toContain("KEY_INSPECTABLE_PROVIDER_CONTENT");
+      expect(serialized).toContain("[[AGENTLENS_RESPONSE_REDACTED:");
+    }
+    expect(JSON.stringify(httpResponses[1])).toContain(
+      "[[AGENTLENS_RESPONSE_REDACTED:SESSION_ID]]"
+    );
+    expect(JSON.stringify(httpResponses[1])).not.toContain(
+      "[[AGENTLENS_RESPONSE_REDACTED:THREAD_ID]]"
+    );
   });
 });

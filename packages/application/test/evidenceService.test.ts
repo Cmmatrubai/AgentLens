@@ -558,6 +558,67 @@ describe("Task 7.7 evidence projection", () => {
     });
   });
 
+  it.each([
+    ["old", ["diff --git a/a.ts b/a.ts", "+++ b/a.ts"]],
+    ["new", ["diff --git a/a.ts b/a.ts", "--- a/a.ts"]]
+  ] as const)("marks a text hunk missing its %s file header malformed", (_missing, headers) => {
+    const parsed = parseGitDiff([
+      ...headers,
+      "@@ -1 +1 @@",
+      "-old",
+      "+new",
+      ""
+    ].join("\n"), false);
+    expect(parsed.malformed).toBe(true);
+  });
+
+  it.each([
+    ["under-consumed old", "@@ -1,2 +1 @@", ["-old", "+new"]],
+    ["under-consumed new", "@@ -1 +1,2 @@", ["-old", "+new"]],
+    ["over-consumed old", "@@ -1 +0,0 @@", ["-one", "-two"]],
+    ["over-consumed new", "@@ -0,0 +1 @@", ["+one", "+two"]]
+  ] as const)("marks %s hunk counts malformed", (_name, hunk, lines) => {
+    const parsed = parseGitDiff([
+      "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts", hunk, ...lines, ""
+    ].join("\n"), false);
+    expect(parsed.malformed).toBe(true);
+    if (_name.startsWith("over-consumed")) {
+      expect(parsed.files[0]?.hunks[0]?.lines).toHaveLength(1);
+    }
+  });
+
+  it("does not excuse an earlier incomplete hunk when only the final hunk is truncated", () => {
+    const parsed = parseGitDiff([
+      "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts",
+      "@@ -1,2 +1 @@", "-old", "+new",
+      "@@ -5,2 +5,2 @@", " context",
+      ""
+    ].join("\n"), true);
+    expect(parsed).toMatchObject({ truncated: true, malformed: true });
+  });
+
+  it.each([
+    ["addition", "@@ -0,0 +1,2 @@", ["+one", "+two"], [1, 2]],
+    ["deletion", "@@ -1,2 +0,0 @@", ["-one", "-two"], [1, 2]]
+  ] as const)("accepts valid zero-count %s hunks", (kind, hunk, lines, expectedNumbers) => {
+    const parsed = parseGitDiff([
+      "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts", hunk, ...lines, ""
+    ].join("\n"), false);
+    expect(parsed.malformed).toBe(false);
+    expect(parsed.files[0]?.hunks[0]?.lines.map((line) =>
+      kind === "addition" ? line.newLineNumber : line.oldLineNumber
+    )).toEqual(expectedNumbers);
+  });
+
+  it("allows only an incomplete final hunk when the artifact is explicitly truncated", () => {
+    const text = [
+      "diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts",
+      "@@ -1,2 +1,2 @@", " context", ""
+    ].join("\n");
+    expect(parseGitDiff(text, true)).toMatchObject({ truncated: true, malformed: false });
+    expect(parseGitDiff(text, false)).toMatchObject({ truncated: false, malformed: true });
+  });
+
   it("exposes a typed unavailable error instead of accepting invalid service identifiers", async () => {
     const service = createEvidenceService({
       databasePath: "/definitely/missing/agentlens.sqlite",

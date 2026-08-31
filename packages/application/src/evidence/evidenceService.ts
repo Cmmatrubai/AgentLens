@@ -14,6 +14,7 @@ import {
   type NativeContentResponseV1,
   type NormalizedContentResponseV1
 } from "@agentlens/api-contract";
+import type { NativeSourceV1 } from "@agentlens/core";
 import {
   RunRepository,
   ServerReadDatabaseError,
@@ -41,6 +42,16 @@ const LIMITS = Object.freeze({
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 const EXCLUSION_STATUS = /^\[\[EXCLUDED:[a-z0-9._-]{1,128}\]\]$/;
 const GIT_STATUS_KINDS = new Set(["git-initial-status", "git-final-status"]);
+const NATIVE_SOURCE_MARKERS = Object.freeze([
+  ["sessionId", "[[AGENTLENS_RESPONSE_REDACTED:SESSION_ID]]"],
+  ["threadId", "[[AGENTLENS_RESPONSE_REDACTED:THREAD_ID]]"],
+  ["turnId", "[[AGENTLENS_RESPONSE_REDACTED:TURN_ID]]"],
+  ["itemId", "[[AGENTLENS_RESPONSE_REDACTED:ITEM_ID]]"],
+  ["toolId", "[[AGENTLENS_RESPONSE_REDACTED:TOOL_ID]]"],
+  ["correlationId", "[[AGENTLENS_RESPONSE_REDACTED:CORRELATION_ID]]"],
+  ["eventType", "[[AGENTLENS_RESPONSE_REDACTED:EVENT_TYPE]]"],
+  ["itemType", "[[AGENTLENS_RESPONSE_REDACTED:ITEM_TYPE]]"]
+] as const);
 
 export type EvidenceServiceErrorCode =
   | "invalid_request"
@@ -99,6 +110,104 @@ function parseJson(text: string): unknown {
   } catch {
     throw new EvidenceServiceError("evidence_binding_mismatch");
   }
+}
+
+type SourceReplacement = Readonly<{
+  source: string;
+  marker: string;
+  priority: number;
+}>;
+
+function sourceReplacements(source: NativeSourceV1): readonly SourceReplacement[] {
+  const byValue = new Map<string, SourceReplacement>();
+  for (const [priority, [field, marker]] of NATIVE_SOURCE_MARKERS.entries()) {
+    const value = source[field];
+    if (typeof value !== "string" || value.length === 0 || byValue.has(value)) continue;
+    byValue.set(value, { source: value, marker, priority });
+  }
+  return [...byValue.values()].sort((left, right) =>
+    right.source.length - left.source.length || left.priority - right.priority
+  );
+}
+
+function redactSourceString(value: string, replacements: readonly SourceReplacement[]): string {
+  const output: string[] = [];
+  let cursor = 0;
+  while (cursor < value.length) {
+    let matchIndex = -1;
+    let match: SourceReplacement | undefined;
+    for (const candidate of replacements) {
+      const index = value.indexOf(candidate.source, cursor);
+      if (
+        index !== -1 &&
+        (matchIndex === -1 || index < matchIndex ||
+          (index === matchIndex && candidate.source.length > (match?.source.length ?? 0)))
+      ) {
+        matchIndex = index;
+        match = candidate;
+      }
+    }
+    if (match === undefined) {
+      output.push(value.slice(cursor));
+      break;
+    }
+    output.push(value.slice(cursor, matchIndex), match.marker);
+    cursor = matchIndex + match.source.length;
+  }
+  return output.join("");
+}
+
+function projectNativeJson(value: unknown, source: NativeSourceV1): unknown {
+  const replacements = sourceReplacements(source);
+  if (replacements.length === 0) return value;
+  if (typeof value === "string") return redactSourceString(value, replacements);
+  if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value !== "object") throw new Error("Native payload is not JSON.");
+
+  const root: unknown[] | Record<string, unknown> = Array.isArray(value)
+    ? []
+    : Object.create(null) as Record<string, unknown>;
+  const pending: Array<{
+    input: readonly unknown[] | Readonly<Record<string, unknown>>;
+    output: unknown[] | Record<string, unknown>;
+  }> = [{
+    input: value as readonly unknown[] | Readonly<Record<string, unknown>>,
+    output: root
+  }];
+  let visited = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    const entries: Array<[string, unknown]> = Array.isArray(current.input)
+      ? current.input.map((entry, index) => [String(index), entry])
+      : Object.entries(current.input);
+    for (const [inputKey, child] of entries) {
+      visited += 1;
+      if (visited > LIMITS.native) throw new Error("Native payload projection exceeds node bound.");
+      const outputKey = Array.isArray(current.output)
+        ? inputKey
+        : redactSourceString(inputKey, replacements);
+      if (!Array.isArray(current.output) && Object.hasOwn(current.output, outputKey)) {
+        throw new Error("Native payload source redaction collides object keys.");
+      }
+      let projected: unknown;
+      if (typeof child === "string") {
+        projected = redactSourceString(child, replacements);
+      } else if (child === null || typeof child === "boolean" || typeof child === "number") {
+        projected = child;
+      } else if (typeof child === "object") {
+        projected = Array.isArray(child) ? [] : Object.create(null) as Record<string, unknown>;
+        pending.push({
+          input: child as readonly unknown[] | Readonly<Record<string, unknown>>,
+          output: projected as unknown[] | Record<string, unknown>
+        });
+      } else {
+        throw new Error("Native payload is not JSON.");
+      }
+      if (Array.isArray(current.output)) current.output.push(projected);
+      else current.output[outputKey] = projected;
+    }
+  }
+  return root;
 }
 
 async function artifactBytes(
@@ -279,13 +388,14 @@ export function createEvidenceService(input: CreateEvidenceServiceInput): Eviden
         if (native === undefined || native.storage === "omitted") {
           throw new EvidenceServiceError("content_unavailable");
         }
-        let text: string;
+        let parsed: unknown;
         let truncated = false;
         if (native.storage === "inline") {
-          text = JSON.stringify(native.redacted);
-          if (Buffer.byteLength(text, "utf8") > LIMITS.native) {
+          const durableText = JSON.stringify(native.redacted);
+          if (Buffer.byteLength(durableText, "utf8") > LIMITS.native) {
             throw new EvidenceServiceError("evidence_binding_mismatch");
           }
+          parsed = parseJson(durableText);
         } else {
           const artifact = boundArtifact(repository, runId, native.artifactId);
           const value = await artifactBytes(artifact, input.artifactRoot, {
@@ -294,9 +404,17 @@ export function createEvidenceService(input: CreateEvidenceServiceInput): Eviden
             expectedMediaType: "application/json",
             requireComplete: false
           });
-          text = decodeUtf8(value.bytes);
-          parseJson(text);
+          parsed = parseJson(decodeUtf8(value.bytes));
           truncated = value.truncated;
+        }
+        let text: string;
+        try {
+          text = JSON.stringify(projectNativeJson(parsed, event.source));
+        } catch {
+          throw new EvidenceServiceError("evidence_binding_mismatch");
+        }
+        if (Buffer.byteLength(text, "utf8") > LIMITS.native) {
+          throw new EvidenceServiceError("evidence_binding_mismatch");
         }
         const value = nativeContentResponseV1Schema.parse({
           schemaVersion: 1,
