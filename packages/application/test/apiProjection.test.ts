@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { TraceEventV1 } from "@agentlens/core";
-import type { RunSummary } from "@agentlens/derivations";
+import { MAX_COMMAND_EVIDENCE_BYTES, type RunSummary } from "@agentlens/derivations";
 import type { CurrentAssessment, EventWindowRecord, RunListRecord } from "@agentlens/storage";
 import type { OwnershipDiagnosis } from "../src/ownership.js";
 
@@ -269,6 +269,69 @@ describe("browser-safe projectors", () => {
       .toMatchObject({ presentationClass: "lifecycle", content: unavailable });
     expect(projectEventDetailV1(event({ kind: "command" }), "metadata-only"))
       .toMatchObject({ content: { state: "unavailable", reason: "capture_policy" } });
+  });
+
+  it("projects the bounded durable command evidence retained after standard truncation", () => {
+    const truncated = event({
+      normalizedPayload: {
+        truncated: true,
+        exitCode: 17,
+        commandEvidence: {
+          state: "available",
+          redactedCommand: "pnpm test"
+        },
+        arbitrary: "MUST_NOT_CROSS_HTTP"
+      }
+    });
+
+    expect(projectNormalizedContentV1(truncated, "standard")).toEqual({
+      kind: "command",
+      command: "pnpm test",
+      exitCode: 17
+    });
+    expect(projectEventDetailV1(truncated, "standard")).toMatchObject({
+      presentationClass: "command",
+      content: { state: "available" },
+      output: { state: "unavailable", reason: "not_captured" }
+    });
+    expect(JSON.stringify(projectNormalizedContentV1(truncated, "standard")))
+      .not.toContain("MUST_NOT_CROSS_HTTP");
+  });
+
+  it.each(["metadata-only", "strict"] as const)(
+    "gives %s capture policy precedence over omitted command content and output",
+    (capturePolicy) => {
+      const omitted = event({
+        normalizedPayload: {
+          commandEvidence: { state: "omitted", reason: capturePolicy }
+        }
+      });
+
+      expect(projectNormalizedContentV1(omitted, capturePolicy)).toBeNull();
+      expect(projectCommandOutputContentV1(omitted, capturePolicy)).toBeNull();
+      expect(projectEventDetailV1(omitted, capturePolicy)).toMatchObject({
+        content: { state: "unavailable", reason: "capture_policy" },
+        output: { state: "unavailable", reason: "capture_policy" }
+      });
+    }
+  );
+
+  it("rejects malformed or oversized available command evidence at the DTO boundary", () => {
+    for (const redactedCommand of [42, "x".repeat(MAX_COMMAND_EVIDENCE_BYTES + 1)]) {
+      const malformed = event({
+        normalizedPayload: {
+          truncated: true,
+          exitCode: 17,
+          commandEvidence: { state: "available", redactedCommand }
+        }
+      });
+
+      expect(projectNormalizedContentV1(malformed, "standard")).toBeNull();
+      expect(projectEventDetailV1(malformed, "standard")).toMatchObject({
+        content: { state: "unavailable", reason: "not_captured" },
+        output: { state: "unavailable", reason: "not_captured" }
+      });
+    }
   });
 
   it("reports native payload availability only for eligible standard observed evidence", () => {

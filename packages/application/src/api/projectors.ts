@@ -24,11 +24,12 @@ import {
   type TrajectoryPageV1
 } from "@agentlens/api-contract";
 import type { CapturePolicy, TraceEventV1 } from "@agentlens/core";
-import type {
-  HumanAssessmentSummary,
-  RunSummary,
-  SummaryEvidence,
-  SummaryProvenance
+import {
+  parseCommandEvidence,
+  type HumanAssessmentSummary,
+  type RunSummary,
+  type SummaryEvidence,
+  type SummaryProvenance
 } from "@agentlens/derivations";
 import type { CurrentAssessment, EventWindowRecord, RunListRecord } from "@agentlens/storage";
 
@@ -145,7 +146,10 @@ function payloadRecord(event: TraceEventV1): Record<string, unknown> | null {
     : null;
 }
 
-function normalizedContentCandidate(event: TraceEventV1): NormalizedContentV1 | null {
+function normalizedContentCandidate(
+  event: TraceEventV1,
+  capturePolicy: CapturePolicy
+): NormalizedContentV1 | null {
   const payload = payloadRecord(event);
   if (payload === null) return null;
   const presentationClass = presentationClassForEvent(event.kind);
@@ -164,13 +168,14 @@ function normalizedContentCandidate(event: TraceEventV1): NormalizedContentV1 | 
       candidate = { kind: "reasoning", text: payload.text };
       break;
     case "command": {
-      if (typeof payload.command !== "string") return null;
+      const commandEvidence = parseCommandEvidence(event, capturePolicy);
+      if (commandEvidence?.state !== "available") return null;
       const rawExitCode = payload.exitCode;
       if (!(rawExitCode === undefined || rawExitCode === null ||
           (typeof rawExitCode === "number" && Number.isInteger(rawExitCode)))) return null;
       candidate = {
         kind: "command",
-        command: payload.command,
+        command: commandEvidence.redactedCommand,
         exitCode: rawExitCode === undefined ? null : rawExitCode
       };
       break;
@@ -303,15 +308,16 @@ export function projectNormalizedContentV1(
   capturePolicy: CapturePolicy
 ): NormalizedContentV1 | null {
   if (capturePolicy !== "standard") return null;
-  return normalizedContentCandidate(event);
+  return normalizedContentCandidate(event, capturePolicy);
 }
 
 function normalizedContentAvailability(event: TraceEventV1, capturePolicy: CapturePolicy) {
-  const candidate = normalizedContentCandidate(event);
+  if (capturePolicy !== "standard") {
+    return { state: "unavailable", reason: "capture_policy" } as const;
+  }
+  const candidate = normalizedContentCandidate(event, capturePolicy);
   if (candidate === null) return { state: "unavailable", reason: "not_captured" } as const;
-  return capturePolicy === "standard"
-    ? { state: "available" } as const
-    : { state: "unavailable", reason: "capture_policy" } as const;
+  return { state: "available" } as const;
 }
 
 function commandOutputCandidate(event: TraceEventV1): NormalizedContentV1 | null {
@@ -334,11 +340,12 @@ export function projectCommandOutputContentV1(
 }
 
 function commandOutputAvailability(event: TraceEventV1, capturePolicy: CapturePolicy) {
+  if (capturePolicy !== "standard") {
+    return { state: "unavailable", reason: "capture_policy" } as const;
+  }
   const candidate = commandOutputCandidate(event);
   if (candidate === null) return { state: "unavailable", reason: "not_captured" } as const;
-  return capturePolicy === "standard"
-    ? { state: "available" } as const
-    : { state: "unavailable", reason: "capture_policy" } as const;
+  return { state: "available" } as const;
 }
 
 function nativePayloadAvailability(event: TraceEventV1, capturePolicy: CapturePolicy) {
