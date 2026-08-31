@@ -4,7 +4,8 @@ import { TextDecoder } from "node:util";
 import {
   assessmentConflictResponseV1Schema,
   assessmentResponseV1Schema,
-  assessmentUpdateRequestV1Schema
+  assessmentUpdateRequestV1Schema,
+  maximumAssessmentRequestEnvelopeBytes
 } from "@agentlens/api-contract";
 import {
   AssessmentConflictError,
@@ -24,7 +25,7 @@ import {
   projectedAssessmentEtag
 } from "./assessmentRevision.js";
 
-export const maximumAssessmentRequestBytes = 32 * 1024;
+export const maximumAssessmentRequestBytes = maximumAssessmentRequestEnvelopeBytes;
 const UTF8 = new TextDecoder("utf-8", { fatal: true });
 
 export function explicitAssessmentEtag(eventId: string): string {

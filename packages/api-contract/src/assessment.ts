@@ -5,6 +5,20 @@ export const maximumAssessmentEventIdCharacters = 256;
 // unpadded base64url characters, plus the fixed quotes and assessment prefix.
 export const maximumAssessmentRevisionEtagCharacters =
   13 + 4 * maximumAssessmentEventIdCharacters;
+export const maximumAssessmentNoteUtf8Bytes = 16 * 1024;
+
+// The closed request's longest fixed fields use `unreviewed`, `uncertain`, and
+// a text note. Each accepted note byte can require at most one six-byte JSON
+// escape (`\u0000`). The fixed empty-note envelope is ASCII, so its UTF-8 byte
+// length is exact and the full request maximum is fixed bytes + 6 * note bytes.
+const maximumAssessmentRequestFixedBytes = new TextEncoder().encode(JSON.stringify({
+  schemaVersion: 1,
+  verdict: "unreviewed",
+  taskCompleted: "uncertain",
+  note: { state: "text", text: "" }
+})).byteLength;
+export const maximumAssessmentRequestEnvelopeBytes =
+  maximumAssessmentRequestFixedBytes + 6 * maximumAssessmentNoteUtf8Bytes;
 
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
@@ -87,7 +101,10 @@ export const assessmentUpdateRequestV1Schema = z.object({
   taskCompleted: taskCompletionV1Schema,
   note: z.discriminatedUnion("state", [
     z.object({ state: z.literal("absent") }).strict(),
-    z.object({ state: z.literal("text"), text: z.string().max(16_384) }).strict()
+    z.object({
+      state: z.literal("text"),
+      text: z.string().max(maximumAssessmentNoteUtf8Bytes)
+    }).strict()
   ])
 }).strict().superRefine((value, context) => {
   if (value.verdict === "unreviewed" && value.taskCompleted !== "uncertain") {
@@ -98,7 +115,7 @@ export const assessmentUpdateRequestV1Schema = z.object({
     });
   }
   if (value.note.state === "text" &&
-      new TextEncoder().encode(value.note.text).byteLength > 16 * 1024) {
+      new TextEncoder().encode(value.note.text).byteLength > maximumAssessmentNoteUtf8Bytes) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["note", "text"],
@@ -127,7 +144,7 @@ export const assessmentConflictResponseV1Schema = z.object({
 export const assessmentNoteContentV1Schema = z.object({
   schemaVersion: z.literal(1),
   eventId: assessmentEventIdV1Schema,
-  content: z.string().max(16_384)
+  content: z.string().max(maximumAssessmentNoteUtf8Bytes)
 }).strict();
 
 export type AssessmentVerdictV1 = z.infer<typeof assessmentVerdictV1Schema>;

@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { openDatabase, RunRepository } from "../../../packages/storage/src/index.js";
 import { createAgentLensRouter } from "../src/router.js";
+import { maximumAssessmentRequestBytes } from "../src/routes/assessment.js";
 
 const roots: string[] = [];
 const servers: ReturnType<typeof createServer>[] = [];
@@ -460,7 +461,7 @@ describe("Task 7.8 conditional assessment API", () => {
     const oversized = await fetch(`${origin}${path}`, {
       method: "PUT",
       headers: requestHeaders(origin, '"assessment:projected"'),
-      body: "x".repeat(32 * 1024 + 1)
+      body: "x".repeat(maximumAssessmentRequestBytes + 1)
     });
     expect(oversized.status).toBe(413);
     expect(inspect(setup.databasePath, setup.dataRoot).events).toEqual([]);
@@ -538,7 +539,7 @@ describe("Task 7.8 conditional assessment API", () => {
     });
   });
 
-  it("writes and reads an exact 16 KiB note through the authenticated HTTP boundary", async () => {
+  it("writes and reads an exact 16 KiB worst-case escaped note through authenticated HTTP", async () => {
     const setup = await fixture();
     const evidence = createEvidenceService({
       databasePath: setup.databasePath,
@@ -549,7 +550,7 @@ describe("Task 7.8 conditional assessment API", () => {
       now: () => new Date("2026-08-31T18:22:00.000Z"),
       eventId: () => "assessment-http-note-boundary"
     }), evidence);
-    const note = "a".repeat(16 * 1024);
+    const note = "\0".repeat(16 * 1024);
     const update = await fetch(`${origin}/api/v1/runs/${setup.runId}/assessment`, {
       method: "PUT",
       headers: requestHeaders(origin, '"assessment:projected"'),
@@ -567,6 +568,54 @@ describe("Task 7.8 conditional assessment API", () => {
       eventId: "assessment-http-note-boundary",
       content: note
     });
+  });
+
+  it("derives the assessment request envelope from worst-case closed DTO escaping", () => {
+    const worstCaseEnvelope = JSON.stringify({
+      schemaVersion: 1,
+      verdict: "unreviewed",
+      taskCompleted: "uncertain",
+      note: { state: "text", text: "\0".repeat(16 * 1024) }
+    });
+    expect(Buffer.byteLength(worstCaseEnvelope, "utf8"))
+      .toBe(maximumAssessmentRequestBytes);
+  });
+
+  it("keeps decoded note validation inside the enlarged envelope and bounds raw bytes first", async () => {
+    const setup = await fixture();
+    let serviceCalls = 0;
+    const assessment = {
+      assess: async () => {
+        serviceCalls += 1;
+        throw new Error("oversized input must not reach assessment service");
+      }
+    } as AssessmentService;
+    const origin = await serve(assessment);
+    const path = `${origin}/api/v1/runs/${setup.runId}/assessment`;
+
+    const decodedOverLimit = await fetch(path, {
+      method: "PUT",
+      headers: requestHeaders(origin, '"assessment:projected"'),
+      body: body({ state: "text", text: "a".repeat(16 * 1024 + 1) })
+    });
+    expect(decodedOverLimit.status).toBe(400);
+    expect(serviceCalls).toBe(0);
+
+    const rawOverLimit = await fetch(path, {
+      method: "PUT",
+      headers: requestHeaders(origin, '"assessment:projected"'),
+      body: Buffer.alloc(maximumAssessmentRequestBytes + 1, 0x20)
+    });
+    expect(rawOverLimit.status).toBe(413);
+    expect(await rawOverLimit.json()).toEqual({
+      schemaVersion: 1,
+      error: {
+        code: "invalid_request",
+        message: "Request body is too large.",
+        retryable: false
+      }
+    });
+    expect(serviceCalls).toBe(0);
   });
 
   it("maps redaction expansion above the durable note cap to a closed 400 without assessment writes", async () => {
