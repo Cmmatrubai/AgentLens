@@ -8,6 +8,7 @@
     { "path": "./packages/codex" },
     { "path": "./packages/application" },
     { "path": "./apps/server" },
+    { "path": "./apps/web" },
     { "path": "./apps/cli" }
   ]
 }

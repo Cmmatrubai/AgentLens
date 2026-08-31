@@ -13,6 +13,7 @@ export interface StaticAsset {
 
 export interface StaticAssets {
   readonly entryUrl: string;
+  readonly styleUrls: readonly string[];
   read(pathname: string): Promise<StaticAsset | null>;
 }
 
@@ -53,6 +54,7 @@ function contentType(path: string): string {
     case ".json": return "application/json; charset=utf-8";
     case ".svg": return "image/svg+xml";
     case ".png": return "image/png";
+    case ".woff": return "font/woff";
     case ".woff2": return "font/woff2";
     default: return "application/octet-stream";
   }
@@ -136,10 +138,12 @@ async function readBoundedRegularFile(
 
 function collectManifestAssets(manifest: object): Readonly<{
   entry: string;
+  styles: readonly string[];
   allowlist: ReadonlySet<string>;
 }> {
   const allowlist = new Set<string>();
   let entry: string | undefined;
+  let styles: readonly string[] = [];
   for (const value of Object.values(manifest)) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
     const record = value as Record<string, unknown>;
@@ -148,6 +152,10 @@ function collectManifestAssets(manifest: object): Readonly<{
       if (record.isEntry === true) {
         if (entry !== undefined) throw new Error("AgentLens web manifest has multiple entry modules.");
         entry = record.file;
+        styles = Array.isArray(record.css)
+          ? record.css.filter((candidate): candidate is string =>
+              typeof candidate === "string" && safeAssetPath(candidate))
+          : [];
       }
     }
     for (const key of ["css", "assets"] as const) {
@@ -158,7 +166,7 @@ function collectManifestAssets(manifest: object): Readonly<{
     }
   }
   if (entry === undefined) throw new Error("AgentLens web manifest has no entry module.");
-  return { entry, allowlist };
+  return { entry, styles: [...new Set(styles)], allowlist };
 }
 
 export async function loadStaticAssets(
@@ -178,10 +186,11 @@ export async function loadStaticAssets(
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error("AgentLens web manifest is invalid.");
   }
-  const { entry, allowlist } = collectManifestAssets(parsed);
+  const { entry, styles, allowlist } = collectManifestAssets(parsed);
 
   return {
     entryUrl: `/${entry}`,
+    styleUrls: styles.map((style) => `/${style}`),
     async read(pathname) {
       let decoded: string;
       try {

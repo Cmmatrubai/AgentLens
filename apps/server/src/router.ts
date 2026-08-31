@@ -121,16 +121,21 @@ export function createAgentLensRouter(options: AgentLensRouterOptions) {
         const html = createBootstrapHtml(
           options.bearer.toString("base64url"),
           options.staticAssets.entryUrl,
-          nonce
+          nonce,
+          options.staticAssets.styleUrls
         );
         bootstrapAvailable = false;
         endHtml(response, html, nonce);
         return;
       }
 
-      if (request.method === "GET" && /^\/runs(?:\/[^/?#]+)?$/.test(url.pathname) && url.search === "") {
+      if (request.method === "GET" && /^\/runs(?:\/[^/?#]+)?$/.test(url.pathname)) {
         const nonce = createResponseNonce();
-        endHtml(response, createReloadHtml(options.staticAssets.entryUrl, nonce), nonce);
+        endHtml(response, createReloadHtml(
+          options.staticAssets.entryUrl,
+          nonce,
+          options.staticAssets.styleUrls
+        ), nonce);
         return;
       }
 

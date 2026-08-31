@@ -1,0 +1,309 @@
+import {
+  apiErrorV1Schema,
+  browserAddressableEventIdV1Schema,
+  eventDetailV1Schema,
+  runDetailV1Schema,
+  runPageV1Schema,
+  trajectoryPageV1Schema,
+  type ApiErrorCodeV1,
+  type EventDetailV1,
+  type RunDetailV1,
+  type RunPageV1,
+  type TrajectoryPageV1
+} from "@agentlens/api-contract";
+
+interface ResponseSchema<T> {
+  safeParse(value: unknown):
+    | Readonly<{ success: true; data: T }>
+    | Readonly<{ success: false }>;
+}
+
+const maximumResponseBytes = 4 * 1024 * 1024;
+const runStatuses = new Set([
+  "starting", "running", "completed", "failed", "interrupted", "recorder_error"
+] as const);
+const assessments = new Set([
+  "projected", "explicit", "unreviewed", "success", "partial", "failure"
+] as const);
+
+export type RunStatusQueryV1 =
+  | "starting" | "running" | "completed" | "failed"
+  | "interrupted" | "recorder_error";
+export type AssessmentQueryV1 =
+  | "projected" | "explicit" | "unreviewed" | "success" | "partial" | "failure";
+
+export interface RunListQueryV1 {
+  readonly limit: number;
+  readonly cursor?: string;
+  readonly status?: RunStatusQueryV1;
+  readonly repository?: string;
+  readonly assessment?: AssessmentQueryV1;
+}
+
+export interface EventPageQueryV1 {
+  readonly limit: number;
+  readonly cursor?: string;
+  readonly afterSequence?: number;
+  readonly aroundSequence?: number;
+}
+
+export interface AgentLensApiClient {
+  listRuns(query: RunListQueryV1, signal?: AbortSignal): Promise<RunPageV1>;
+  getRun(runId: string, signal?: AbortSignal): Promise<RunDetailV1>;
+  getEvents(
+    runId: string,
+    query: EventPageQueryV1,
+    signal?: AbortSignal
+  ): Promise<TrajectoryPageV1>;
+  getEvent(runId: string, eventId: string, signal?: AbortSignal): Promise<EventDetailV1>;
+}
+
+export type AgentLensClientErrorCode =
+  | ApiErrorCodeV1
+  | "invalid_client_input"
+  | "invalid_response"
+  | "network_error"
+  | "request_aborted";
+
+export class AgentLensClientError extends Error {
+  readonly code: AgentLensClientErrorCode;
+  readonly status: number | null;
+  readonly retryable: boolean;
+
+  constructor(input: Readonly<{
+    code: AgentLensClientErrorCode;
+    status: number | null;
+    retryable: boolean;
+    message: string;
+  }>) {
+    super(input.message);
+    this.name = "AgentLensClientError";
+    this.code = input.code;
+    this.status = input.status;
+    this.retryable = input.retryable;
+  }
+}
+
+function clientFailure(
+  code: AgentLensClientErrorCode,
+  message: string,
+  status: number | null = null,
+  retryable = false
+): AgentLensClientError {
+  return new AgentLensClientError({ code, message, status, retryable });
+}
+
+function safeApiMessage(code: ApiErrorCodeV1): string {
+  switch (code) {
+    case "authentication_required": return "AgentLens authentication is no longer available.";
+    case "active_snapshot_unavailable": return "Active run evidence is temporarily unavailable.";
+    case "run_not_found": return "The requested run was not found.";
+    case "event_not_found": return "The requested event was not found.";
+    case "invalid_cursor": return "The evidence cursor is no longer valid.";
+    case "forbidden_origin": return "The request origin was not accepted.";
+    case "precondition_required":
+    case "assessment_conflict":
+    case "content_unavailable":
+    case "evidence_binding_mismatch":
+    case "invalid_request":
+    case "internal_error":
+      return "AgentLens could not complete the request.";
+  }
+}
+
+function validateOrigin(value: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw clientFailure("invalid_client_input", "AgentLens server origin is invalid.");
+  }
+  if (parsed.protocol !== "http:"
+    || parsed.hostname !== "127.0.0.1"
+    || parsed.port === ""
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || parsed.pathname !== "/"
+    || parsed.search !== ""
+    || parsed.hash !== "") {
+    throw clientFailure("invalid_client_input", "AgentLens server origin is invalid.");
+  }
+  return parsed.origin;
+}
+
+function boundedId(value: string): string {
+  if (value.length < 1 || value.length > 256 || /\p{Cc}/u.test(value) || value === "." || value === "..") {
+    throw clientFailure("invalid_client_input", "AgentLens resource ID is invalid.");
+  }
+  return encodeURIComponent(value);
+}
+
+function eventId(value: string): string {
+  if (!browserAddressableEventIdV1Schema.safeParse(value).success) {
+    throw clientFailure("invalid_client_input", "AgentLens event ID is invalid.");
+  }
+  return encodeURIComponent(value);
+}
+
+function boundedInteger(value: number, maximum: number): void {
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw clientFailure("invalid_client_input", "AgentLens query is invalid.");
+  }
+}
+
+function addBoundedText(params: URLSearchParams, name: string, value: string | undefined, maximum: number): void {
+  if (value === undefined) return;
+  if (value.length < 1 || value.length > maximum) {
+    throw clientFailure("invalid_client_input", "AgentLens query is invalid.");
+  }
+  params.set(name, value);
+}
+
+function runSearch(query: RunListQueryV1): string {
+  boundedInteger(query.limit, 100);
+  if (query.status !== undefined && !runStatuses.has(query.status)) {
+    throw clientFailure("invalid_client_input", "AgentLens query is invalid.");
+  }
+  if (query.assessment !== undefined && !assessments.has(query.assessment)) {
+    throw clientFailure("invalid_client_input", "AgentLens query is invalid.");
+  }
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit));
+  addBoundedText(params, "cursor", query.cursor, 4_096);
+  if (query.status !== undefined) params.set("status", query.status);
+  addBoundedText(params, "repository", query.repository, 256);
+  if (query.assessment !== undefined) params.set("assessment", query.assessment);
+  return params.toString();
+}
+
+function eventSearch(query: EventPageQueryV1): string {
+  boundedInteger(query.limit, 250);
+  const selectors = [query.cursor, query.afterSequence, query.aroundSequence]
+    .filter((value) => value !== undefined);
+  if (selectors.length > 1) throw clientFailure("invalid_client_input", "AgentLens query is invalid.");
+  for (const sequence of [query.afterSequence, query.aroundSequence]) {
+    if (sequence !== undefined && (!Number.isSafeInteger(sequence) || sequence < 0)) {
+      throw clientFailure("invalid_client_input", "AgentLens query is invalid.");
+    }
+  }
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit));
+  addBoundedText(params, "cursor", query.cursor, 4_096);
+  if (query.afterSequence !== undefined) params.set("afterSequence", String(query.afterSequence));
+  if (query.aroundSequence !== undefined) params.set("aroundSequence", String(query.aroundSequence));
+  return params.toString();
+}
+
+async function readBoundedJson(response: Response): Promise<unknown> {
+  const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType !== "application/json") {
+    throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+  }
+  const declaredLength = response.headers.get("content-length");
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0 || parsedLength > maximumResponseBytes) {
+      throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+    }
+  }
+  if (response.body === null) {
+    throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    total += next.value.byteLength;
+    if (total > maximumResponseBytes) {
+      await reader.cancel();
+      throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+    }
+    chunks.push(next.value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+  }
+}
+
+async function parseResponse<T>(response: Response, schema: ResponseSchema<T>): Promise<T> {
+  if (response.redirected) {
+    throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+  }
+  const body = await readBoundedJson(response);
+  if (!response.ok) {
+    const parsedError = apiErrorV1Schema.safeParse(body);
+    if (!parsedError.success) {
+      throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+    }
+    const { code, retryable } = parsedError.data.error;
+    throw clientFailure(code, safeApiMessage(code), response.status, retryable);
+  }
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+  }
+  return parsed.data;
+}
+
+export function createAgentLensApiClient(input: Readonly<{
+  origin: string;
+  bearerToken: string;
+  fetchImpl?: typeof fetch;
+}>): AgentLensApiClient {
+  const origin = validateOrigin(input.origin);
+  if (input.bearerToken.length < 1) {
+    throw clientFailure("invalid_client_input", "AgentLens authentication is invalid.");
+  }
+  const fetchImpl = input.fetchImpl ?? fetch;
+  const request = async <T>(path: string, schema: ResponseSchema<T>, signal?: AbortSignal): Promise<T> => {
+    let response: Response;
+    try {
+      response = await fetchImpl(`${origin}${path}`, {
+        method: "GET",
+        redirect: "error",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${input.bearerToken}`
+        },
+        ...(signal === undefined ? {} : { signal })
+      });
+    } catch (error) {
+      if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+        throw clientFailure("request_aborted", "The AgentLens request was cancelled.");
+      }
+      throw clientFailure("network_error", "AgentLens could not reach the local server.", null, true);
+    }
+    return parseResponse(response, schema);
+  };
+
+  return Object.freeze({
+    listRuns: (query: RunListQueryV1, signal?: AbortSignal) =>
+      request(`/api/v1/runs?${runSearch(query)}`, runPageV1Schema, signal),
+    getRun: (runIdValue: string, signal?: AbortSignal) =>
+      request(`/api/v1/runs/${boundedId(runIdValue)}`, runDetailV1Schema, signal),
+    getEvents: (runIdValue: string, query: EventPageQueryV1, signal?: AbortSignal) =>
+      request(
+        `/api/v1/runs/${boundedId(runIdValue)}/events?${eventSearch(query)}`,
+        trajectoryPageV1Schema,
+        signal
+      ),
+    getEvent: (runIdValue: string, eventIdValue: string, signal?: AbortSignal) =>
+      request(
+        `/api/v1/runs/${boundedId(runIdValue)}/events/${eventId(eventIdValue)}`,
+        eventDetailV1Schema,
+        signal
+      )
+  });
+}

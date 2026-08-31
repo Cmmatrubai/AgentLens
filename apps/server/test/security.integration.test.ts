@@ -315,6 +315,65 @@ describe("AgentLens loopback security boundary", () => {
     expect((await fetch(`${handle.origin}/.vite/manifest.json`)).status).toBe(404);
   });
 
+  it("serves locally bundled WOFF fallbacks with a strict font media type", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-static-font-"));
+    const webRoot = join(root, "web");
+    await mkdir(join(webRoot, ".vite"), { recursive: true });
+    await mkdir(join(webRoot, "assets"), { recursive: true });
+    await writeFile(join(webRoot, "assets", "entry.js"), "export const boot = () => undefined;\n");
+    await writeFile(join(webRoot, "assets", "geist.woff"), Buffer.from("fixture-font"));
+    await writeFile(join(webRoot, ".vite", "manifest.json"), JSON.stringify({
+      entry: {
+        file: "assets/entry.js",
+        isEntry: true,
+        assets: ["assets/geist.woff"]
+      }
+    }));
+    let handle: AgentLensServerHandle | undefined;
+    try {
+      handle = await startAgentLensServer({ dataRoot: join(root, "data"), webRoot });
+      const response = await fetch(`${handle.origin}/assets/geist.woff`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("font/woff");
+      expect(Buffer.from(await response.arrayBuffer())).toEqual(Buffer.from("fixture-font"));
+    } finally {
+      await handle?.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("loads only manifest-bound entry styles in bootstrap and reload shells", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-static-styles-"));
+    const webRoot = join(root, "web");
+    await mkdir(join(webRoot, ".vite"), { recursive: true });
+    await mkdir(join(webRoot, "assets"), { recursive: true });
+    await writeFile(join(webRoot, "assets", "entry.js"), "export const boot = () => undefined;\n");
+    await writeFile(join(webRoot, "assets", "entry.css"), ":root { color-scheme: dark; }\n");
+    await writeFile(join(webRoot, ".vite", "manifest.json"), JSON.stringify({
+      "src/bootstrap.tsx": {
+        file: "assets/entry.js",
+        isEntry: true,
+        css: ["assets/entry.css"]
+      }
+    }));
+    let handle: AgentLensServerHandle | undefined;
+    try {
+      handle = await startAgentLensServer({ dataRoot: join(root, "data"), webRoot });
+      const bootstrap = await fetch(handle.bootstrapUrl);
+      const bootstrapHtml = await bootstrap.text();
+      expect(bootstrapHtml).toContain('<link rel="stylesheet" href="/assets/entry.css">');
+      const reloadHtml = await (await fetch(`${handle.origin}/runs`)).text();
+      expect(reloadHtml).toContain('<link rel="stylesheet" href="/assets/entry.css">');
+      const stylesheet = await fetch(`${handle.origin}/assets/entry.css`);
+      expect(stylesheet.status).toBe(200);
+      expect(stylesheet.headers.get("content-type")).toMatch(/^text\/css/);
+      expect(await stylesheet.text()).toBe(":root { color-scheme: dark; }\n");
+    } finally {
+      await handle?.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it.each(["final", "intermediate"] as const)(
     "refuses an allowlisted asset with a %s symlink component",
     async (symlinkKind) => {
@@ -442,7 +501,11 @@ describe("AgentLens loopback security boundary", () => {
     }
   });
 
-  it.each(["/runs", "/runs/run-fixture"])(
+  it.each([
+    "/runs",
+    "/runs/run-fixture",
+    "/runs?limit=25&status=failed&repository=repo%2Ffixture&assessment=partial"
+  ])(
     "serves a token-free expired-authentication shell for %s reloads",
     async (path) => {
       const handle = await startFixtureServer();

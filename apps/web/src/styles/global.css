@@ -1,0 +1,258 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-width: 320px;
+  background:
+    radial-gradient(circle at 80% -20%, rgb(112 203 208 / 8%), transparent 32rem),
+    var(--canvas);
+  color: var(--text);
+  font-family: "Geist Sans", system-ui, sans-serif;
+  font-size: 14px;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button,
+a,
+input,
+select {
+  outline: none;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  box-shadow: 0 0 0 2px var(--canvas), 0 0 0 4px var(--focus);
+}
+
+a {
+  color: inherit;
+}
+
+code,
+time,
+.status-badge,
+.connection-state {
+  font-family: "Geist Mono Variable", ui-monospace, monospace;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 172px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.instrument-rail {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  padding: var(--space-6) var(--space-3);
+  border-right: 1px solid var(--border-soft);
+  background: rgb(13 16 19 / 94%);
+}
+
+.brand-mark {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 var(--space-1) var(--space-8);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.brand-mark__lens {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--cyan);
+  border-radius: 50%;
+  color: var(--cyan);
+  font-family: "Geist Mono Variable", monospace;
+  font-size: 10px;
+}
+
+.rail-link {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+  text-decoration: none;
+}
+
+.rail-link--active {
+  border-color: var(--border);
+  background: var(--panel-raised);
+  color: var(--text);
+}
+
+.shell-main {
+  min-width: 0;
+}
+
+.top-bar {
+  position: sticky;
+  z-index: 10;
+  top: 0;
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-6);
+  border-bottom: 1px solid var(--border-soft);
+  background: rgb(9 11 13 / 90%);
+  backdrop-filter: blur(14px);
+}
+
+.top-bar__product {
+  color: var(--text-muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.connection-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.connection-state__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cyan);
+}
+
+.content-frame {
+  width: min(100%, 1440px);
+  margin: 0 auto;
+  padding: var(--space-8);
+}
+
+.page-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-6);
+  margin-bottom: var(--space-6);
+}
+
+.page-heading h1,
+.state-panel h1,
+.detail-shell h1 {
+  margin: 2px 0 var(--space-2);
+  font-size: clamp(24px, 3vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+
+.page-heading p,
+.state-panel p,
+.detail-shell p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.page-eyebrow,
+.state-panel__eyebrow {
+  color: var(--cyan) !important;
+  font-family: "Geist Mono Variable", monospace;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.page-heading__privacy {
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.state-panel,
+.empty-state,
+.loading-state,
+.detail-shell {
+  padding: var(--space-8);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.empty-state code {
+  display: inline-block;
+  margin-top: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: 5px;
+  color: var(--cyan);
+  background: var(--canvas);
+}
+
+.detail-shell__identity {
+  margin-bottom: var(--space-4) !important;
+  color: var(--text) !important;
+  font-family: "Geist Mono Variable", monospace;
+}
+
+@media (max-width: 800px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .instrument-rail {
+    position: relative;
+    display: flex;
+    height: auto;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-3) var(--space-4);
+    border-right: 0;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .brand-mark {
+    margin: 0;
+  }
+
+  .rail-link {
+    min-height: 44px;
+  }
+
+  .top-bar {
+    padding: 0 var(--space-4);
+  }
+
+  .content-frame {
+    padding: var(--space-4);
+  }
+
+  .page-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
