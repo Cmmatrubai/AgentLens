@@ -167,6 +167,37 @@ function renderApp(
   );
 }
 
+function clientForEmptyDetail(runId: string): AgentLensApiClient {
+  const item = run(runId, { state: "known", value: "completed" });
+  const client = clientWithList(vi.fn(async () => page([item])));
+  client.getRun = vi.fn(async () => ({
+    ...item,
+    eventCount: 0,
+    anchors: {
+      firstFailure: null,
+      recorderRecovery: null,
+      latestLikelyTest: null,
+      finalGitEvidence: null,
+      latestEvent: null
+    }
+  }));
+  client.getEvents = vi.fn(async () => ({
+    schemaVersion: 1,
+    runId,
+    mode: "head",
+    items: [],
+    window: {
+      state: "empty",
+      latestCommittedSequence: null,
+      hasEarlier: false,
+      hasLater: false,
+      earlierCursor: null,
+      laterCursor: null
+    }
+  }));
+  return client;
+}
+
 describe("production run ledger", () => {
   it("renders the maximum contract-valid timestamp without crashing", async () => {
     const item = run("maximum-date", { state: "known", value: "completed" }, {
@@ -467,5 +498,17 @@ describe("production run ledger", () => {
     renderApp(clientWithList(vi.fn(async () => page([item]))));
     expect(await screen.findByRole("link", { name: /Run run\/id % 运行/ }))
       .toHaveAttribute("href", "/runs/run%2Fid%20%25%20%E8%BF%90%E8%A1%8C");
+  });
+
+  it.each([
+    ["duplicate", "/runs/query-run?event=event-a&event=event-b"],
+    ["empty", "/runs/query-run?event="],
+    ["malformed", "/runs/query-run?event=%00"]
+  ])("treats a present %s event query as invalid without resolving a selection", async (_case, entry) => {
+    const client = clientForEmptyDetail("query-run");
+    renderApp(client, entry);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("The selected event link is invalid.");
+    expect(client.getEvent).not.toHaveBeenCalled();
   });
 });

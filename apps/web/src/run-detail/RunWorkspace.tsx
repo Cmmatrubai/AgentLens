@@ -1,15 +1,17 @@
 import type { TrajectoryEventV1 } from "@agentlens/api-contract";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Trajectory } from "../trajectory/Trajectory.js";
 
 export function RunWorkspace(props: Readonly<{
+  runId: string;
   events: readonly TrajectoryEventV1[];
   selectedEventId: string | null;
   selectionState: "idle" | "resolving" | "unavailable";
   onSelect: (eventId: string) => void;
 }>) {
   const [expandedGroupKeys, setExpandedGroupKeys] = useState<ReadonlySet<string>>(new Set());
+  useEffect(() => setExpandedGroupKeys(new Set()), [props.runId]);
   const selected = props.events.find(({ eventId }) => eventId === props.selectedEventId) ?? null;
   return (
     <div className="run-workspace">

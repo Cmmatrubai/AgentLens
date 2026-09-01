@@ -1,6 +1,7 @@
 import type { TrajectoryEventV1 } from "@agentlens/api-contract";
 import type { KeyboardEvent, Ref } from "react";
 
+import { uniqueRelationships } from "./relationships.js";
 import type { TrajectoryLayoutRow } from "./types.js";
 
 const provenanceLabels = {
@@ -54,14 +55,18 @@ export function TrajectoryRow(props: Readonly<{
   const relationshipSource = events.find(({ eventId }) => eventId === props.selectedEventId) ?? primary;
   const presentation = status(primary);
   const offscreenRelationships = selected
-    ? relationshipSource.relationships.filter(({ eventId }) => !props.visibleEventIds.has(eventId))
+    ? uniqueRelationships(relationshipSource.relationships).filter(({ eventId }) => !props.visibleEventIds.has(eventId))
     : [];
+  const relatedLabel = offscreenRelationships.length === 0 ? "" :
+    ` Related: ${offscreenRelationships.map((relationship) =>
+      `${relationship.type.replaceAll("_", " ")} event ${relationship.eventId}`
+    ).join("; ")}.`;
   return (
     <div
       ref={props.rowRef}
       role="option"
       aria-selected={selected}
-      aria-label={`${primary.safeSummary}. ${provenanceLabels[primary.provenance]}. ${presentation.label}.`}
+      aria-label={`${primary.safeSummary}. ${provenanceLabels[primary.provenance]}. ${presentation.label}.${relatedLabel}`}
       className={`trajectory-row trajectory-row--${primary.provenance}${selected ? " trajectory-row--selected" : ""}`}
       data-event-id={primary.eventId}
       data-index={primary.sequence}
@@ -105,6 +110,7 @@ export function TrajectoryRow(props: Readonly<{
               <button
                 key={`${relationship.type}:${relationship.eventId}`}
                 type="button"
+                tabIndex={-1}
                 onClick={(click) => {
                   click.stopPropagation();
                   props.onRelationshipJump(relationship.eventId);

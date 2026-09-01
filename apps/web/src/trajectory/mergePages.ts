@@ -3,7 +3,14 @@ import type { TrajectoryEventV1, TrajectoryPageV1 } from "@agentlens/api-contrac
 import type { PreservedTrajectoryAnchor, TrajectoryAnchor } from "./types.js";
 
 function equalEvent(left: TrajectoryEventV1, right: TrajectoryEventV1): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value === null || typeof value !== "object") return value;
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey))
+      .map(([key, entry]) => [key, canonical(entry)]));
+  };
+  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 
 function validatePage(page: TrajectoryPageV1): void {
@@ -21,8 +28,39 @@ function validatePage(page: TrajectoryPageV1): void {
         first.sequence !== page.window.minSequence || last.sequence !== page.window.maxSequence) {
       throw new Error("Trajectory window metadata does not match its items.");
     }
+    if (page.window.latestCommittedSequence < page.window.maxSequence) {
+      throw new Error("Trajectory window snapshot precedes its items.");
+    }
   } else if (page.items.length !== 0) {
     throw new Error("Trajectory window metadata does not match its items.");
+  }
+  if (page.window.hasEarlier !== (page.window.earlierCursor !== null) ||
+      page.window.hasLater !== (page.window.laterCursor !== null)) {
+    throw new Error("Trajectory window cursor metadata is incompatible.");
+  }
+}
+
+function validateTopology(pages: readonly TrajectoryPageV1[]): void {
+  const lineage = pages.filter((page) =>
+    page.mode === "head" || page.mode === "tail" || page.mode === "cursor"
+  );
+  const snapshot = lineage[0]?.window.latestCommittedSequence;
+  if (snapshot !== undefined && lineage.some((page) => page.window.latestCommittedSequence !== snapshot)) {
+    throw new Error("Trajectory cursor snapshot lineage is incompatible.");
+  }
+  const windows = pages.filter((page) => page.window.state === "nonempty")
+    .sort((left, right) => {
+      if (left.window.state !== "nonempty" || right.window.state !== "nonempty") return 0;
+      return left.window.minSequence - right.window.minSequence;
+    });
+  for (let index = 0; index < windows.length - 1; index += 1) {
+    const left = windows[index]!;
+    const right = windows[index + 1]!;
+    if (left.window.state !== "nonempty" || right.window.state !== "nonempty") continue;
+    if (left.window.maxSequence + 1 < right.window.minSequence &&
+        (left.window.laterCursor === null || right.window.earlierCursor === null)) {
+      throw new Error("Trajectory page gap lacks compatible bounded cursors.");
+    }
   }
 }
 
@@ -54,6 +92,7 @@ export function mergeTrajectoryPages(
       }
     }
   }
+  validateTopology(pages);
   return [...byId.values()].sort((left, right) => left.sequence - right.sequence);
 }
 

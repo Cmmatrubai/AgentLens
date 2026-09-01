@@ -13,9 +13,11 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
   const client = useAgentLensApi();
   const [searchParams, setSearchParams] = useSearchParams();
   const eventValues = searchParams.getAll("event");
+  const hasEventQuery = searchParams.has("event");
   const rawEventId = eventValues.length === 1 ? eventValues[0] : null;
   const parsedEventId = rawEventId === null ? null : browserAddressableEventIdV1Schema.safeParse(rawEventId);
   const selectedEventId = parsedEventId?.success ? parsedEventId.data : null;
+  const invalidEventQuery = hasEventQuery && (eventValues.length !== 1 || parsedEventId?.success !== true);
   const run = useQuery({
     queryKey: ["run", runId],
     queryFn: ({ signal }) => client.getRun(runId, signal)
@@ -29,7 +31,7 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
     <section className="run-detail-page">
       <Link className="run-detail-page__back" to="/runs">← Run ledger</Link>
       <RunHeader run={run.data} />
-      {rawEventId !== null && !parsedEventId?.success && (
+      {invalidEventQuery && (
         <section className="trajectory-selection-error" role="alert">The selected event link is invalid.</section>
       )}
       <TrajectoryToolbar
@@ -55,6 +57,7 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
       )}
       {trajectory.state === "ready" && (
         <RunWorkspace
+          runId={runId}
           events={trajectory.events}
           selectedEventId={selectedEventId}
           selectionState={trajectory.selectionState}

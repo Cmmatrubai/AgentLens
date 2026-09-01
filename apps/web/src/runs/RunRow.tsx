@@ -9,10 +9,7 @@ import { Link } from "react-router-dom";
 import { Availability } from "../components/Availability.js";
 import { ProvenanceMark } from "../components/ProvenanceMark.js";
 import { StatusBadge } from "../components/StatusBadge.js";
-
-function words(value: string): string {
-  return value.replaceAll("_", " ");
-}
+import { durationText, likelyTestsText, providerText, reviewText, words } from "./runFacts.js";
 
 function unavailableReason(reason: EvidenceUnavailableReasonV1): string {
   switch (reason) {
@@ -25,29 +22,6 @@ function unavailableReason(reason: EvidenceUnavailableReasonV1): string {
   }
 }
 
-function providerText(run: RunListItemV1): string {
-  return run.provider.state === "known"
-    ? run.provider.value
-    : `Unsupported provider: ${run.provider.safeToken}`;
-}
-
-function likelyTestsText(run: RunListItemV1): string {
-  const tests = run.summary.likelyTests;
-  if (tests.state === "none_detected") return "Likely tests: none detected";
-  if (tests.state === "unavailable_due_to_capture_policy") {
-    return "Likely tests: unavailable due to capture policy";
-  }
-  const failures = tests.attempts.previousFailures;
-  return `Latest likely test: ${tests.attempts.latest} · ${failures} previous ${failures === 1 ? "failure" : "failures"}`;
-}
-
-function reviewText(run: RunListItemV1): string {
-  const assessment = run.summary.assessment;
-  if (assessment.state === "projected") {
-    return "Not reviewed · projected state · no human evidence";
-  }
-  return `Reviewer: ${assessment.verdict}`;
-}
 
 function gitText(run: RunListItemV1): string {
   if (run.finalGitEvidence.state === "unavailable") {
@@ -62,13 +36,6 @@ function gitText(run: RunListItemV1): string {
     ? `${untracked.value} untracked ${untracked.value === 1 ? "entry" : "entries"}`
     : `untracked-file metadata unavailable (${unavailableReason(untracked.reason)})`;
   return `Final Git evidence: ${diffText} · ${untrackedText}`;
-}
-
-function durationText(run: RunListItemV1): string | undefined {
-  const elapsed = run.summary.elapsedRecorderTimeMs;
-  if (elapsed.state === "unavailable") return undefined;
-  if (elapsed.value < 1_000) return `${elapsed.value} ms`;
-  return `${(elapsed.value / 1_000).toFixed(elapsed.value % 1_000 === 0 ? 0 : 1)} s`;
 }
 
 function commandsText(run: RunListItemV1): string {

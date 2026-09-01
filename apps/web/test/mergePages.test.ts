@@ -159,6 +159,49 @@ describe("mergeTrajectoryPages", () => {
       })
     ])).toEqual({ earlier: "earlier", later: "later" });
   });
+
+  it("rejects incompatible cursor snapshot lineage but accepts a newer around-selection snapshot", () => {
+    const head = page("head", [event("event-1", 1), event("event-2", 2)], {
+      hasLater: true,
+      latest: 2
+    });
+    const cursor = page("cursor", [event("event-3", 3)], { hasEarlier: true, latest: 999 });
+    expect(() => mergeTrajectoryPages([head, cursor])).toThrow(/snapshot/i);
+
+    const around = page("around", [event("event-99", 99), event("event-100", 100)], {
+      hasEarlier: true,
+      latest: 100
+    });
+    expect(mergeTrajectoryPages([head, around]).map(({ sequence }) => sequence))
+      .toEqual([1, 2, 99, 100]);
+  });
+
+  it("rejects a disjoint topology without cursors pointing into its gap", () => {
+    expect(() => mergeTrajectoryPages([
+      page("head", [event("event-1", 1)], { latest: 100 }),
+      page("around", [event("event-100", 100)], { hasEarlier: true, latest: 100 })
+    ])).toThrow(/gap/i);
+  });
+
+  it("treats structurally equal DTOs as exact repeats regardless of object property order", () => {
+    const canonical = event("event-2", 2);
+    const reordered = {
+      ...canonical,
+      source: {
+        hasCorrelation: canonical.source.hasCorrelation,
+        hasItemOrTool: canonical.source.hasItemOrTool,
+        hasTurn: canonical.source.hasTurn,
+        hasSessionOrThread: canonical.source.hasSessionOrThread,
+        provider: canonical.source.provider,
+        opaqueRef: canonical.source.opaqueRef
+      }
+    } satisfies TrajectoryEventV1;
+
+    expect(mergeTrajectoryPages([
+      page("head", [canonical]),
+      page("around", [reordered])
+    ])).toEqual([canonical]);
+  });
 });
 
 describe("deep-link selection", () => {

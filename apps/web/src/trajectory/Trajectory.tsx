@@ -1,7 +1,7 @@
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import { projectTrajectory } from "./projectTrajectory.js";
+import { findTrajectoryRowIndex, projectTrajectory } from "./projectTrajectory.js";
 import { RelationshipOverlay } from "./RelationshipOverlay.js";
 import { TrajectoryRow } from "./TrajectoryRow.js";
 
@@ -21,8 +21,11 @@ export function Trajectory(props: Readonly<{
     expandedGroupKeys: props.expandedGroupKeys
   }), [props.events, props.expandedGroupKeys]);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef(new Map<number, HTMLDivElement>());
-  const anchorRef = useRef<Readonly<{ key: string; offset: number }> | null>(null);
+  const eventRowRefs = useRef(new Map<string, HTMLDivElement>());
+  const anchorRef = useRef<Readonly<{ eventId: string; offset: number }> | null>(null);
+  const pendingFocusRef = useRef<number | null>(null);
   const selectedIndex = rows.findIndex((row) => row.type === "event"
     ? row.event.eventId === props.selectedEventId
     : row.events.some(({ eventId }) => eventId === props.selectedEventId));
@@ -32,6 +35,14 @@ export function Trajectory(props: Readonly<{
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 144,
     overscan: 3,
+    rangeExtractor: (range) => {
+      const indexes = defaultRangeExtractor(range);
+      if (focusIndex >= 0 && focusIndex < rows.length && !indexes.includes(focusIndex)) {
+        indexes.push(focusIndex);
+        indexes.sort((left, right) => left - right);
+      }
+      return indexes;
+    },
     getItemKey: (index) => rows[index]!.key,
     measureElement: (element) => element.getBoundingClientRect().height || 144,
     observeElementRect: (instance, callback) => {
@@ -52,19 +63,22 @@ export function Trajectory(props: Readonly<{
   const virtualItems = virtualizer.getVirtualItems();
   const visibleEventIds = useMemo(() => {
     const ids = new Set<string>();
+    const viewportStart = virtualizer.scrollOffset ?? 0;
+    const viewportEnd = viewportStart + (scrollRef.current?.clientHeight || 520);
     for (const item of virtualItems) {
+      if (item.end <= viewportStart || item.start >= viewportEnd) continue;
       const row = rows[item.index]!;
       if (row.type === "event") ids.add(row.event.eventId);
       else for (const event of row.events) ids.add(event.eventId);
     }
     return ids;
-  }, [rows, virtualItems]);
+  }, [rows, virtualItems, virtualizer.scrollOffset]);
   const selected = props.events.find(({ eventId }) => eventId === props.selectedEventId) ?? null;
 
   useLayoutEffect(() => {
     const anchor = anchorRef.current;
     if (anchor === null || scrollRef.current === null) return;
-    const index = rows.findIndex(({ key }) => key === anchor.key);
+    const index = findTrajectoryRowIndex(rows, anchor.eventId);
     if (index === -1) return;
     const offset = virtualizer.getOffsetForIndex(index, "start")?.[0];
     if (offset !== undefined) {
@@ -75,8 +89,11 @@ export function Trajectory(props: Readonly<{
   useEffect(() => {
     const first = virtualItems[0];
     if (first === undefined || scrollRef.current === null) return;
+    const firstRow = rows[first.index]!;
     anchorRef.current = {
-      key: rows[first.index]!.key,
+      eventId: firstRow.type === "event"
+        ? firstRow.event.eventId
+        : firstRow.events[0]!.eventId,
       offset: first.start - scrollRef.current.scrollTop
     };
     if (!virtualItems.some(({ index }) => index === focusIndex)) setFocusIndex(first.index);
@@ -88,13 +105,20 @@ export function Trajectory(props: Readonly<{
     virtualizer.scrollToIndex(selectedIndex, { align: "auto" });
   }, [selectedIndex, virtualizer]);
 
+  useLayoutEffect(() => {
+    const pending = pendingFocusRef.current;
+    if (pending === null) return;
+    const mounted = rowRefs.current.get(pending);
+    if (mounted === undefined || mounted.tabIndex !== 0) return;
+    mounted.focus();
+    pendingFocusRef.current = null;
+  }, [focusIndex, virtualItems]);
+
   const focus = (index: number): void => {
     const bounded = Math.max(0, Math.min(rows.length - 1, index));
+    pendingFocusRef.current = bounded;
     setFocusIndex(bounded);
     virtualizer.scrollToIndex(bounded, { align: "auto" });
-    const mounted = rowRefs.current.get(bounded);
-    if (mounted !== undefined) mounted.focus();
-    else requestAnimationFrame(() => rowRefs.current.get(bounded)?.focus());
   };
 
   if (rows.length === 0) {
@@ -107,7 +131,7 @@ export function Trajectory(props: Readonly<{
       role="listbox"
       aria-label="Execution trajectory"
     >
-      <div className="trajectory-stage" style={{ height: virtualizer.getTotalSize() }}>
+      <div ref={stageRef} className="trajectory-stage" style={{ height: virtualizer.getTotalSize() }}>
         {virtualItems.map((item) => {
           const row = rows[item.index]!;
           const primary = row.type === "event" ? row.event : row.events.at(-1)!;
@@ -122,9 +146,17 @@ export function Trajectory(props: Readonly<{
                 selectedEventId={props.selectedEventId}
                 tabIndex={item.index === focusIndex ? 0 : -1}
                 rowRef={(element) => {
-                  if (element === null) rowRefs.current.delete(item.index);
+                  const eventIds = row.type === "event" ? [row.event.eventId] : row.events.map(({ eventId }) => eventId);
+                  if (element === null) {
+                    const previous = rowRefs.current.get(item.index);
+                    rowRefs.current.delete(item.index);
+                    for (const eventId of eventIds) {
+                      if (eventRowRefs.current.get(eventId) === previous) eventRowRefs.current.delete(eventId);
+                    }
+                  }
                   else {
                     rowRefs.current.set(item.index, element);
+                    for (const eventId of eventIds) eventRowRefs.current.set(eventId, element);
                     virtualizer.measureElement(element);
                   }
                 }}
@@ -152,7 +184,14 @@ export function Trajectory(props: Readonly<{
             </div>
           );
         })}
-        <RelationshipOverlay selected={selected} visibleEventIds={visibleEventIds} />
+        <RelationshipOverlay
+          selected={selected}
+          visibleEventIds={visibleEventIds}
+          rowElements={eventRowRefs.current}
+          stageRef={stageRef}
+          viewportRef={scrollRef}
+          layoutKey={virtualItems.map(({ index, start, size }) => `${index}:${start}:${size}`).join("|")}
+        />
       </div>
     </div>
   );

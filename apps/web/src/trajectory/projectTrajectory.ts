@@ -6,10 +6,46 @@ function eventKey(event: TrajectoryEventV1): string {
   return `${event.eventId}:${event.sequence}`;
 }
 
-function canGroup(event: TrajectoryEventV1): boolean {
+function isGroupCandidate(event: TrajectoryEventV1): boolean {
   return event.presentationClass === "lifecycle" &&
     event.kind !== "recorder.recovery" &&
     event.lifecycleGroupKey !== null;
+}
+
+function lifecyclePhase(event: TrajectoryEventV1): Readonly<{
+  domain: "thread" | "turn";
+  phase: "started" | "completed" | "failed" | "declined" | "interrupted";
+}> | null {
+  const match = /^(thread|turn)\.(started|completed|failed|declined|interrupted)$/.exec(event.kind);
+  if (match === null) return null;
+  return {
+    domain: match[1] as "thread" | "turn",
+    phase: match[2] as "started" | "completed" | "failed" | "declined" | "interrupted"
+  };
+}
+
+function compatibleLifecyclePair(start: TrajectoryEventV1, terminal: TrajectoryEventV1): boolean {
+  if (!isGroupCandidate(start) || !isGroupCandidate(terminal) ||
+      start.lifecycleGroupKey !== terminal.lifecycleGroupKey) return false;
+  const startPhase = lifecyclePhase(start);
+  const terminalPhase = lifecyclePhase(terminal);
+  if (startPhase?.phase !== "started" || terminalPhase === null ||
+      terminalPhase.phase === "started" || startPhase.domain !== terminalPhase.domain) return false;
+  return start.status.state === "known" && start.status.value === "in_progress" &&
+    terminal.status.state === "known" && terminal.status.value === terminalPhase.phase;
+}
+
+function lifecycleInstanceKey(start: TrajectoryEventV1, terminal: TrajectoryEventV1): string {
+  return `lifecycle:${start.lifecycleGroupKey}:${eventKey(start)}:${eventKey(terminal)}`;
+}
+
+export function findTrajectoryRowIndex(
+  rows: readonly TrajectoryLayoutRow[],
+  eventId: string
+): number {
+  return rows.findIndex((row) => row.type === "event"
+    ? row.event.eventId === eventId
+    : row.events.some((event) => event.eventId === eventId));
 }
 
 export function projectTrajectory(input: Readonly<{
@@ -25,24 +61,26 @@ export function projectTrajectory(input: Readonly<{
   const rows: TrajectoryLayoutRow[] = [];
   for (let index = 0; index < input.events.length;) {
     const current = input.events[index]!;
-    const groupKey = current.lifecycleGroupKey;
-    if (canGroup(current) && groupKey !== null) {
-      const siblings: TrajectoryEventV1[] = [current];
-      let nextIndex = index + 1;
-      while (nextIndex < input.events.length) {
-        const next = input.events[nextIndex]!;
-        if (!canGroup(next) || next.lifecycleGroupKey !== groupKey) break;
-        siblings.push(next);
-        nextIndex += 1;
+    const candidateKey = current.lifecycleGroupKey;
+    let candidateEnd = index;
+    if (isGroupCandidate(current) && candidateKey !== null) {
+      while (candidateEnd + 1 < input.events.length) {
+        const candidate = input.events[candidateEnd + 1]!;
+        if (!isGroupCandidate(candidate) || candidate.lifecycleGroupKey !== candidateKey) break;
+        candidateEnd += 1;
       }
-      if (siblings.length > 1 && !input.expandedGroupKeys.has(groupKey)) {
+    }
+    const terminal = candidateEnd === index + 1 ? input.events[index + 1] : undefined;
+    if (terminal !== undefined && compatibleLifecyclePair(current, terminal)) {
+      const groupKey = lifecycleInstanceKey(current, terminal);
+      if (!input.expandedGroupKeys.has(groupKey)) {
         rows.push({
           type: "lifecycle_group",
           key: groupKey,
-          events: siblings as [TrajectoryEventV1, ...TrajectoryEventV1[]],
+          events: [current, terminal],
           expanded: false
         });
-        index = nextIndex;
+        index += 2;
         continue;
       }
     }

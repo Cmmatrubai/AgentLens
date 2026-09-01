@@ -1,5 +1,5 @@
 import type { TrajectoryEventV1, TrajectoryPageV1 } from "@agentlens/api-contract";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { AgentLensApiClient } from "../api/client.js";
 import { useAgentLensApi } from "../api/queries.js";
@@ -76,24 +76,49 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
   const [error, setError] = useState<unknown>(null);
   const [selectionState, setSelectionState] = useState<"idle" | "resolving" | "unavailable">("idle");
   const [pagingState, setPagingState] = useState<"idle" | "loading" | "error">("idle");
+  const initialRequestRef = useRef<object | null>(null);
+  const selectionRequestRef = useRef<object | null>(null);
+  const cursorRequestRef = useRef<Readonly<{ identity: object; controller: AbortController }> | null>(null);
+  const pagesRef = useRef<readonly TrajectoryPageV1[]>([]);
   const events = useMemo(() => mergeTrajectoryPages(pages), [pages]);
+
+  const commitPage = useCallback((page: TrajectoryPageV1): void => {
+    const candidate = [...pagesRef.current, page];
+    mergeTrajectoryPages(candidate);
+    pagesRef.current = candidate;
+    setPages(candidate);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
+    const identity = {};
+    initialRequestRef.current = identity;
+    cursorRequestRef.current?.controller.abort();
+    cursorRequestRef.current = null;
+    selectionRequestRef.current = null;
+    pagesRef.current = [];
     setPages([]);
     setState("loading");
     setError(null);
+    setSelectionState("idle");
+    setPagingState("idle");
     void client.getEvents(runId, { limit: pageLimit }, controller.signal).then((page) => {
-      setPages([page]);
+      if (controller.signal.aborted || initialRequestRef.current !== identity) return;
+      commitPage(page);
       setState("ready");
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && initialRequestRef.current === identity) {
         setError(failure);
         setState("error");
       }
     });
-    return () => controller.abort();
-  }, [client, runId]);
+    return () => {
+      controller.abort();
+      if (initialRequestRef.current === identity) initialRequestRef.current = null;
+      cursorRequestRef.current?.controller.abort();
+      cursorRequestRef.current = null;
+    };
+  }, [client, commitPage, runId]);
 
   useEffect(() => {
     if (state !== "ready" || selectedEventId === null ||
@@ -102,6 +127,8 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
       return;
     }
     const controller = new AbortController();
+    const identity = {};
+    selectionRequestRef.current = identity;
     setSelectionState("resolving");
     void resolveTrajectorySelection({
       client,
@@ -111,28 +138,46 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
       limit: pageLimit,
       signal: controller.signal
     }).then((resolution) => {
+      if (controller.signal.aborted || selectionRequestRef.current !== identity) return;
       if (resolution.state === "resolved" && resolution.page !== null) {
-        setPages((current) => [...current, resolution.page!]);
-        setSelectionState("idle");
+        try {
+          commitPage(resolution.page);
+          setSelectionState("idle");
+        } catch (failure) {
+          setError(failure);
+          setState("error");
+        }
       } else if (resolution.state === "unavailable") {
         setSelectionState("unavailable");
       }
     }).catch(() => {
-      if (!controller.signal.aborted) setSelectionState("unavailable");
+      if (!controller.signal.aborted && selectionRequestRef.current === identity) {
+        setSelectionState("unavailable");
+      }
     });
-    return () => controller.abort();
-  }, [client, events, runId, selectedEventId, state]);
+    return () => {
+      controller.abort();
+      if (selectionRequestRef.current === identity) selectionRequestRef.current = null;
+    };
+  }, [client, commitPage, events, runId, selectedEventId, state]);
 
   const loadCursor = useCallback(async (cursor: string) => {
+    cursorRequestRef.current?.controller.abort();
+    const controller = new AbortController();
+    const identity = {};
+    cursorRequestRef.current = { identity, controller };
     setPagingState("loading");
     try {
-      const page = await client.getEvents(runId, { limit: pageLimit, cursor });
-      setPages((current) => [...current, page]);
+      const page = await client.getEvents(runId, { limit: pageLimit, cursor }, controller.signal);
+      if (controller.signal.aborted || cursorRequestRef.current?.identity !== identity) return;
+      commitPage(page);
       setPagingState("idle");
     } catch {
-      setPagingState("error");
+      if (!controller.signal.aborted && cursorRequestRef.current?.identity === identity) {
+        setPagingState("error");
+      }
     }
-  }, [client, runId]);
+  }, [client, commitPage, runId]);
 
   const cursors = useMemo(() => trajectoryPageCursors(pages), [pages]);
 

@@ -1,5 +1,10 @@
 # Task 7.10 implementation report
 
+> Review-fix update (2026-08-31): the original implementation evidence below is
+> retained as history. The final sections record the focused fix round after review
+> rejected `69ccffa4ca95c85e974bdc4c20d5ef2018e0a68a`; those later results and
+> residuals supersede the original completion/browser claims.
+
 ## Result
 
 Implemented only the Task 7.10 execution-trajectory spine from accepted base
@@ -183,3 +188,99 @@ connector treatment; richer geometry and inspector evidence expansion remain out
 Task 7.10. Browser verification used deterministic disposable fixtures rather than a
 live recording, and covered the required 1440/1100 widths, not the Task 7.13 800-pixel
 final polish target. No other known Task 7.10 residual remains.
+
+## Review-fix round after `69ccffa`
+
+All seven confirmed Important findings were fixed within Task 7.10:
+
+- abortable initial/selection/cursor request ownership checks every identity and
+  abort signal before state commits and resets all run-scoped state;
+- exact compatible `thread`/`turn` start-terminal pairing, immutable per-instance
+  keys, per-run expansion reset, and event-identity scroll anchoring;
+- candidate merge validation before state commits, bounded contradiction errors,
+  cursor snapshot lineage, compatible gap rules, and canonical structural equality;
+- present-invalid duplicate/empty/malformed `?event=` handling without resolution;
+- a bounded extra virtual focus row so End/Home destinations mount with the sole
+  `tabIndex=0`, with nested controls non-tab and row-accessible;
+- exact relationship dedupe and live selected-visible SVG geometry between row
+  centers, updated on layout/scroll/resize, with `pointer-events: none`;
+- labeled recorder start/end/duration, likely tests, assessment provenance,
+  warnings, and contradictions in the header via shared run-fact formatters.
+
+### Review-fix RED evidence
+
+```text
+pnpm vitest --run apps/web/test/trajectoryPages.test.tsx -t "trajectory request ownership"
+3 failed: old run, selection, and cursor results committed after replacement/abort.
+
+pnpm vitest --run apps/web/test/projectTrajectory.test.ts
+4 failed, 3 passed: incompatible/repeated phases grouped; instance keys collided.
+
+pnpm vitest --run apps/web/test/mergePages.test.ts apps/web/test/trajectoryPages.test.tsx \
+  -t "snapshot|topology|structurally|merge containment"
+4 failed: snapshot/topology/canonical equality failed and render merge escaped containment.
+
+pnpm vitest --run apps/web/test/runList.test.tsx -t "present .* event query"
+1 failed, 2 passed: duplicate query values were silently absent.
+
+pnpm vitest --run apps/web/test/trajectory.test.tsx \
+  -t "virtual End|relationship controls|resets expanded"
+2 failed, 1 passed: End focus ownership and nested tab stop failed.
+
+pnpm vitest --run apps/web/test/projectTrajectory.test.ts -t "scroll anchor"
+1 failed: immutable event-to-row anchor resolver was absent.
+
+pnpm vitest --run apps/web/test/trajectory.test.tsx -t "selected visible connectors"
+1 failed: duplicates rendered and the fixed spans exposed no row geometry.
+
+pnpm vitest --run apps/web/test/runHeader.test.tsx
+2 failed: frozen timing/test/assessment/signal facts were absent.
+```
+
+### Review-fix GREEN and regression evidence
+
+```text
+Focused Task 7.10 matrix
+Test Files 6 passed (6)
+Tests      50 passed (50)
+
+Adjacent Tasks 7.6-7.9 matrix
+Test Files 13 passed (13)
+Tests      459 passed (459)
+
+pnpm typecheck
+$ tsc -b --pretty false
+exit 0
+
+pnpm build
+129 modules transformed
+bootstrap CSS 17.51 kB (gzip 4.11 kB)
+bootstrap JS 341.21 kB (gzip 101.13 kB)
+exit 0
+
+pnpm test
+Test Files 61 passed (61)
+Tests      1237 passed (1237)
+exit 0
+
+git diff --check
+exit 0
+```
+
+Source scans found no active polling, browser storage, bearer/token handling,
+content/native/evidence/artifact fetches, absolute user paths, or design-prototype
+references in changed source/tests. The existing untracked `.scratch-e2e-ONFuP0/`
+directory was not read, edited, staged, or committed.
+
+### Browser limitation and residual
+
+The in-app browser runtime returned `No browser is available` during this fix round.
+No standalone substitute was used. The earlier browser observations therefore are not
+fresh evidence for this changed build. Fresh 1440/1100 checks for 10/250/1,000 events
+remain a release residual, especially real scroll stability, connector placement after
+resize, overflow, console/network cleanliness, and stale-race browser timing.
+
+Automated DOM coverage does verify bounded 10/50/250/1,000 rows, virtual End/Home,
+one row tab stop, non-tab nested controls, dedupe, row-center geometry, off-screen
+jumps, deep-link cardinality, group reset, and stale promises. No other known Task
+7.10 code residual remains after the focused, adjacent, type, build, and full suite.
