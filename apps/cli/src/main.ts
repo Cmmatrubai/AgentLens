@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { pathToFileURL } from "node:url";
+import { realpathSync } from "node:fs";
 import { parseAgentLensArgs } from "./args.js";
 import { runAssessCommand } from "./commands/assess.js";
 import { runDoctorCommand } from "./commands/doctor.js";
@@ -106,6 +106,6 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 }
 
 const entry = process.argv[1];
-if (entry && import.meta.url === pathToFileURL(entry).href) {
+if (entry && realpathSync(entry) === realpathSync(new URL(import.meta.url))) {
   process.exitCode = await main();
 }
