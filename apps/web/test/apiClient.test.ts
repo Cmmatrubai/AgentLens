@@ -88,6 +88,72 @@ describe("AgentLens authenticated API client", () => {
     ]);
   });
 
+  it("uses only the exact role-bound evidence routes and forwards abort signals", async () => {
+    const signal = new AbortController().signal;
+    const requested: string[] = [];
+    const responses: unknown[] = [
+      { schemaVersion: 1, eventId: "event/id %", content: { kind: "command_output", output: "redacted" } },
+      { schemaVersion: 1, eventId: "event/id %", content: { format: "text", text: "redacted native", truncated: false } },
+      { schemaVersion: 1, eventId: "event/id %", content: "redacted note" },
+      { schemaVersion: 1, kind: "status", entries: [] },
+      { schemaVersion: 1, kind: "status", entries: [] },
+      { schemaVersion: 1, kind: "diff_check", passed: true, output: "" },
+      { schemaVersion: 1, kind: "untracked", entries: [] },
+      { schemaVersion: 1, kind: "diff", files: [], preamble: [], truncated: false, malformed: false }
+    ];
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      requested.push(String(input));
+      return json(responses.shift());
+    });
+    const client = createAgentLensApiClient({
+      origin: "http://127.0.0.1:43123",
+      bearerToken: "fixture-bearer",
+      fetchImpl
+    });
+
+    await client.getEventContent("run/id %", "event/id %", signal);
+    await client.getEventNative("run/id %", "event/id %", signal);
+    await client.getAssessmentNote("run/id %", "event/id %", signal);
+    await client.getGitStatus("run/id %", "initial", signal);
+    await client.getGitStatus("run/id %", "final", signal);
+    await client.getGitDiffCheck("run/id %", signal);
+    await client.getGitUntracked("run/id %", signal);
+    await client.getGitDiff("run/id %", signal);
+
+    expect(requested).toEqual([
+      "http://127.0.0.1:43123/api/v1/runs/run%2Fid%20%25/events/event%2Fid%20%25/content",
+      "http://127.0.0.1:43123/api/v1/runs/run%2Fid%20%25/events/event%2Fid%20%25/native",
+      "http://127.0.0.1:43123/api/v1/runs/run%2Fid%20%25/events/event%2Fid%20%25/assessment-note",
+      "http://127.0.0.1:43123/api/v1/runs/run%2Fid%20%25/git/status?phase=initial",
+      "http://127.0.0.1:43123/api/v1/runs/run%2Fid%20%25/git/status?phase=final",
+      "http://127.0.0.1:43123/api/v1/runs/run%2Fid%20%25/git/diff-check",
+      "http://127.0.0.1:43123/api/v1/runs/run%2Fid%20%25/git/untracked",
+      "http://127.0.0.1:43123/api/v1/runs/run%2Fid%20%25/git/diff"
+    ]);
+    expect(fetchImpl.mock.calls.every(([, init]) => init?.signal === signal)).toBe(true);
+    expect(requested.every((url) => !url.includes("/artifacts/"))).toBe(true);
+  });
+
+  it("rejects invalid evidence IDs and invalid Git phases before fetching", () => {
+    const fetchImpl = vi.fn(async () => json(emptyRunPage));
+    const client = createAgentLensApiClient({
+      origin: "http://127.0.0.1:43123",
+      bearerToken: "fixture-bearer",
+      fetchImpl
+    });
+
+    expect(() => client.getEventContent(".", "event-1")).toThrow(expect.objectContaining({
+      code: "invalid_client_input"
+    }));
+    expect(() => client.getEventNative("run-1", "..")).toThrow(expect.objectContaining({
+      code: "invalid_client_input"
+    }));
+    expect(() => client.getGitStatus("run-1", "middle" as "initial")).toThrow(expect.objectContaining({
+      code: "invalid_client_input"
+    }));
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("enforces the shared browser-addressable run-ID contract before fetching", async () => {
     const fetchImpl = vi.fn(async () => json(emptyRunPage));
     const client = createAgentLensApiClient({

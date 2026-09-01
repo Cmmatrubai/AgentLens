@@ -1,5 +1,6 @@
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import { findTrajectoryRowIndex, projectTrajectory } from "./projectTrajectory.js";
 import { RelationshipOverlay } from "./RelationshipOverlay.js";
@@ -15,6 +16,7 @@ export function Trajectory(props: Readonly<{
   onEscapeDeepEvidence: () => void;
   onRelationshipJump: (eventId: string) => void;
   onExpandGroup?: (groupKey: string) => void;
+  inlineEvidence?: ReactNode;
 }>) {
   const rows = useMemo(() => projectTrajectory({
     events: props.events,
@@ -142,6 +144,9 @@ export function Trajectory(props: Readonly<{
       <div ref={stageRef} className="trajectory-stage" style={{ height: virtualizer.getTotalSize() }}>
         {virtualItems.map((item) => {
           const row = rows[item.index]!;
+          const containsSelection = row.type === "event"
+            ? row.event.eventId === props.selectedEventId
+            : row.events.some(({ eventId }) => eventId === props.selectedEventId);
           return (
             <div
               key={item.key}
@@ -185,6 +190,7 @@ export function Trajectory(props: Readonly<{
                   }
                 }}
               />
+              {containsSelection ? props.inlineEvidence : null}
             </div>
           );
         })}

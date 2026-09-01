@@ -134,11 +134,21 @@ function page(items: readonly RunListItemV1[], nextCursor: string | null = null)
 }
 
 function clientWithList(listRuns: AgentLensApiClient["listRuns"]): AgentLensApiClient {
+  const unavailable = vi.fn(async (): Promise<never> => {
+    throw new Error("Evidence method is not configured for this fixture.");
+  });
   return {
     listRuns,
     getRun: vi.fn(),
     getEvents: vi.fn(),
-    getEvent: vi.fn()
+    getEvent: unavailable,
+    getEventContent: unavailable,
+    getEventNative: unavailable,
+    getAssessmentNote: unavailable,
+    getGitDiff: unavailable,
+    getGitStatus: unavailable,
+    getGitDiffCheck: unavailable,
+    getGitUntracked: unavailable
   };
 }
 

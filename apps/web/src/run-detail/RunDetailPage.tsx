@@ -58,6 +58,7 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
       {trajectory.state === "ready" && (
         <RunWorkspace
           runId={runId}
+          run={run.data}
           events={trajectory.events}
           selectedEventId={selectedEventId}
           selectionState={trajectory.selectionState}

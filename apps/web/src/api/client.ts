@@ -1,13 +1,27 @@
 import {
   apiErrorV1Schema,
+  assessmentNoteContentV1Schema,
   browserAddressableEventIdV1Schema,
   browserAddressableRunIdV1Schema,
   eventDetailV1Schema,
+  gitDiffCheckContentV1Schema,
+  gitDiffContentV1Schema,
+  gitStatusContentV1Schema,
+  gitUntrackedContentV1Schema,
+  nativeContentResponseV1Schema,
+  normalizedContentResponseV1Schema,
   runDetailV1Schema,
   runPageV1Schema,
   trajectoryPageV1Schema,
   type ApiErrorCodeV1,
+  type AssessmentNoteContentV1,
   type EventDetailV1,
+  type GitDiffCheckContentV1,
+  type GitDiffContentV1,
+  type GitStatusContentV1,
+  type GitUntrackedContentV1,
+  type NativeContentResponseV1,
+  type NormalizedContentResponseV1,
   type RunDetailV1,
   type RunPageV1,
   type TrajectoryPageV1
@@ -57,6 +71,13 @@ export interface AgentLensApiClient {
     signal?: AbortSignal
   ): Promise<TrajectoryPageV1>;
   getEvent(runId: string, eventId: string, signal?: AbortSignal): Promise<EventDetailV1>;
+  getEventContent(runId: string, eventId: string, signal?: AbortSignal): Promise<NormalizedContentResponseV1>;
+  getEventNative(runId: string, eventId: string, signal?: AbortSignal): Promise<NativeContentResponseV1>;
+  getAssessmentNote(runId: string, eventId: string, signal?: AbortSignal): Promise<AssessmentNoteContentV1>;
+  getGitDiff(runId: string, signal?: AbortSignal): Promise<GitDiffContentV1>;
+  getGitStatus(runId: string, phase: "initial" | "final", signal?: AbortSignal): Promise<GitStatusContentV1>;
+  getGitDiffCheck(runId: string, signal?: AbortSignal): Promise<GitDiffCheckContentV1>;
+  getGitUntracked(runId: string, signal?: AbortSignal): Promise<GitUntrackedContentV1>;
 }
 
 export type AgentLensClientErrorCode =
@@ -352,6 +373,40 @@ export function createAgentLensApiClient(input: Readonly<{
         `/api/v1/runs/${runId(runIdValue)}/events/${eventId(eventIdValue)}`,
         eventDetailV1Schema,
         signal
-      )
+      ),
+    getEventContent: (runIdValue: string, eventIdValue: string, signal?: AbortSignal) =>
+      request(
+        `/api/v1/runs/${runId(runIdValue)}/events/${eventId(eventIdValue)}/content`,
+        normalizedContentResponseV1Schema,
+        signal
+      ),
+    getEventNative: (runIdValue: string, eventIdValue: string, signal?: AbortSignal) =>
+      request(
+        `/api/v1/runs/${runId(runIdValue)}/events/${eventId(eventIdValue)}/native`,
+        nativeContentResponseV1Schema,
+        signal
+      ),
+    getAssessmentNote: (runIdValue: string, eventIdValue: string, signal?: AbortSignal) =>
+      request(
+        `/api/v1/runs/${runId(runIdValue)}/events/${eventId(eventIdValue)}/assessment-note`,
+        assessmentNoteContentV1Schema,
+        signal
+      ),
+    getGitDiff: (runIdValue: string, signal?: AbortSignal) =>
+      request(`/api/v1/runs/${runId(runIdValue)}/git/diff`, gitDiffContentV1Schema, signal),
+    getGitStatus: (runIdValue: string, phase: "initial" | "final", signal?: AbortSignal) => {
+      if (phase !== "initial" && phase !== "final") {
+        throw clientFailure("invalid_client_input", "AgentLens query is invalid.");
+      }
+      return request(
+        `/api/v1/runs/${runId(runIdValue)}/git/status?phase=${phase}`,
+        gitStatusContentV1Schema,
+        signal
+      );
+    },
+    getGitDiffCheck: (runIdValue: string, signal?: AbortSignal) =>
+      request(`/api/v1/runs/${runId(runIdValue)}/git/diff-check`, gitDiffCheckContentV1Schema, signal),
+    getGitUntracked: (runIdValue: string, signal?: AbortSignal) =>
+      request(`/api/v1/runs/${runId(runIdValue)}/git/untracked`, gitUntrackedContentV1Schema, signal)
   });
 }

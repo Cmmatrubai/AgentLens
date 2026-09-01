@@ -1,8 +1,9 @@
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { TraceEventV1 } from "../../../packages/core/src/index.js";
+import type { CompletedArtifact, TraceEventV1 } from "../../../packages/core/src/index.js";
 import { buildTestDerivationDrafts } from "../../../packages/derivations/src/index.js";
 import {
   RunRepository,
@@ -44,6 +45,7 @@ function observedEvent(input: Readonly<{
   status: TraceEventV1["status"];
   summary: string;
   normalizedPayload?: Record<string, unknown>;
+  nativePayload?: TraceEventV1["nativePayload"];
   provenance?: TraceEventV1["provenance"];
   source?: TraceEventV1["source"];
 }>): TraceEventV1 {
@@ -65,7 +67,35 @@ function observedEvent(input: Readonly<{
     },
     relationships: [],
     summary: input.summary,
-    ...(input.normalizedPayload === undefined ? {} : { normalizedPayload: input.normalizedPayload })
+    ...(input.normalizedPayload === undefined ? {} : { normalizedPayload: input.normalizedPayload }),
+    ...(input.nativePayload === undefined ? {} : { nativePayload: input.nativePayload })
+  };
+}
+
+async function completedArtifact(
+  artifactRoot: string,
+  runId: string,
+  kind: string,
+  mediaType: string,
+  content: string
+): Promise<CompletedArtifact> {
+  const bytes = Buffer.from(content, "utf8");
+  const id = createHash("sha256").update(bytes).digest("hex");
+  const directory = join(artifactRoot, id.slice(0, 2));
+  const path = join(directory, id);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path, bytes, { mode: 0o600 });
+  return {
+    id,
+    runId,
+    kind,
+    mediaType,
+    path,
+    sha256: id,
+    byteLength: bytes.byteLength,
+    redactionState: "redacted",
+    truncated: false,
+    originalByteLength: bytes.byteLength
   };
 }
 
@@ -186,7 +216,12 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     summary: "Command failed",
     normalizedPayload: {
       commandEvidence: { state: "available", redactedCommand: "pnpm test" },
-      exitCode: 1
+      exitCode: 1,
+      aggregatedOutput: "FAIL synthetic fixture: expected true to be false\n"
+    },
+    nativePayload: {
+      storage: "inline",
+      redacted: { type: "item.failed", command: "pnpm test", output: "[REDACTED]" }
     }
   }));
   sequence = appendTestDerivations(repository, {
@@ -216,6 +251,36 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     exitCode: 0,
     sequence
   });
+  repository.appendEvent(observedEvent({
+    runId: completedId,
+    id: `${completedId}-unknown`,
+    sequence: sequence++,
+    kind: "future.synthetic_fixture",
+    status: "unknown",
+    summary: "Unknown future event retained without interpretation"
+  }));
+  repository.appendEvent(observedEvent({
+    runId: completedId,
+    id: `${completedId}-open-command`,
+    sequence: sequence++,
+    kind: "command",
+    status: "in_progress",
+    source: {
+      provider: "codex-exec",
+      itemId: `${completedId}-open-item`,
+      itemType: "command_execution",
+      eventType: "item.started"
+    },
+    summary: "Provider command remained open at recorder recovery",
+    normalizedPayload: {
+      commandEvidence: { state: "available", redactedCommand: "pnpm test" }
+    }
+  }));
+  const recovered = repository.appendRecoveryForOpenEvents(completedId, {
+    receivedAt: new Date(baseTime + sequence * 1_000).toISOString(),
+    eventIdFor: (openEvent) => `${completedId}-recovery-${openEvent.id}`
+  });
+  sequence += recovered.length;
   finishRun(repository, {
     runId: completedId,
     recorderInstanceId: completedRecorder,
@@ -224,17 +289,55 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     signal: null,
     providerCompleted: true
   });
+  const statusInitial = await completedArtifact(
+    artifactRoot, completedId, "git-initial-status", "text/plain", ""
+  );
+  const statusFinal = await completedArtifact(
+    artifactRoot, completedId, "git-final-status", "text/plain", "? notes.txt\n"
+  );
+  const diffPreamble = [
+    "diff --git a/apps/web/src/example.ts b/apps/web/src/example.ts",
+    "--- a/apps/web/src/example.ts",
+    "+++ b/apps/web/src/example.ts",
+    "@@ -1 +1 @@",
+    "-old fixture value",
+    "+new fixture value"
+  ].join("\n");
+  const diff = await completedArtifact(
+    artifactRoot,
+    completedId,
+    "git-tracked-final-diff",
+    "text/x-diff",
+    `${diffPreamble}\n`
+  );
+  const diffCheck = await completedArtifact(
+    artifactRoot,
+    completedId,
+    "git-diff-check",
+    "application/json",
+    JSON.stringify({ passed: true, output: "" })
+  );
+  const untracked = await completedArtifact(
+    artifactRoot,
+    completedId,
+    "git-untracked-file-metadata",
+    "application/json",
+    JSON.stringify([{ path: "notes.txt", type: "file", size: 2048 }])
+  );
+  for (const artifact of [statusInitial, statusFinal, diff, diffCheck, untracked]) {
+    await repository.commitArtifactMetadata(artifact);
+  }
   repository.saveGitEvidence(completedId, {
     initialHead: "a".repeat(40),
     finalHead: "b".repeat(40),
     initialBranch: "main",
     finalBranch: "codex/fixture",
-    initialStatus: { state: "omitted", reason: "metadata-only" },
-    finalStatus: { state: "omitted", reason: "metadata-only" },
-    trackedFinalDiff: { state: "absent" },
-    diffCheck: { state: "omitted", reason: "metadata-only" },
+    initialStatus: { state: "artifact", artifactId: statusInitial.id },
+    finalStatus: { state: "artifact", artifactId: statusFinal.id },
+    trackedFinalDiff: { state: "artifact", artifactId: diff.id },
+    diffCheck: { state: "artifact", artifactId: diffCheck.id },
     diffCheckPassed: true,
-    untrackedMetadata: { state: "absent" },
+    untrackedMetadata: { state: "artifact", artifactId: untracked.id },
     headChanged: true,
     branchChanged: true,
     capturedAt: baseTime + 60_000
@@ -305,14 +408,93 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     updatedAt: baseTime + 10_500
   });
 
+  const metadataOnlyId = "fixture-metadata-only";
   create(runInput({
-    id: "fixture-metadata-only",
+    id: metadataOnlyId,
     startedAt: baseTime,
     label: "Metadata-only capture",
     capturePolicy: "metadata-only",
     repositoryFingerprint: "repo-private-redacted",
     repositoryDisplay: "Redacted repository"
   }), "recorder-fixture-metadata-only");
+  repository.appendEvent(observedEvent({
+    runId: metadataOnlyId,
+    id: `${metadataOnlyId}-message`,
+    sequence: 0,
+    kind: "message.agent",
+    status: "completed",
+    summary: "Metadata-only evidence remains explicit"
+  }));
+  repository.saveGitEvidence(metadataOnlyId, {
+    initialHead: "c".repeat(40),
+    finalHead: "c".repeat(40),
+    initialBranch: "main",
+    finalBranch: "main",
+    initialStatus: { state: "omitted", reason: "metadata-only" },
+    finalStatus: { state: "omitted", reason: "metadata-only" },
+    trackedFinalDiff: { state: "omitted", reason: "metadata-only" },
+    diffCheck: { state: "omitted", reason: "metadata-only" },
+    diffCheckPassed: true,
+    untrackedMetadata: { state: "omitted", reason: "metadata-only" },
+    headChanged: false,
+    branchChanged: false,
+    capturedAt: baseTime + 1_000
+  });
+
+  const boundedDiffId = "fixture-bounded-2mib-diff";
+  const boundedRecorder = `recorder-${boundedDiffId}`;
+  create(runInput({
+    id: boundedDiffId,
+    startedAt: baseTime - 5_000,
+    label: "Bounded two-mebibyte-class diff"
+  }), boundedRecorder);
+  repository.appendEvent(observedEvent({
+    runId: boundedDiffId,
+    id: `${boundedDiffId}-message`,
+    sequence: 0,
+    kind: "message.agent",
+    status: "completed",
+    summary: "Large diff remains bounded and selectable",
+    normalizedPayload: { text: "Open Final Git evidence to inspect the bounded large diff." }
+  }));
+  finishRun(repository, {
+    runId: boundedDiffId,
+    recorderInstanceId: boundedRecorder,
+    sequence: 1,
+    exitCode: 0,
+    signal: null,
+    providerCompleted: true
+  });
+  const boundedHeader = [
+    "diff --git a/large.txt b/large.txt",
+    "--- a/large.txt",
+    "+++ b/large.txt",
+    "@@ -0,0 +1 @@",
+    "+"
+  ].join("\n");
+  const boundedDiff = await completedArtifact(
+    artifactRoot,
+    boundedDiffId,
+    "git-tracked-final-diff",
+    "text/x-diff",
+    `${boundedHeader}${"x".repeat(2_096_000 - boundedHeader.length)}\n`
+  );
+  await repository.commitArtifactMetadata(boundedDiff);
+  repository.saveGitEvidence(boundedDiffId, {
+    initialHead: "d".repeat(40),
+    finalHead: "e".repeat(40),
+    initialBranch: "main",
+    finalBranch: "main",
+    initialStatus: { state: "omitted", reason: "metadata-only" },
+    finalStatus: { state: "omitted", reason: "metadata-only" },
+    trackedFinalDiff: { state: "artifact", artifactId: boundedDiff.id },
+    diffCheck: { state: "omitted", reason: "metadata-only" },
+    diffCheckPassed: true,
+    untrackedMetadata: { state: "absent" },
+    headChanged: true,
+    branchChanged: false,
+    capturedAt: baseTime + 2_000
+  });
 
   const maximumUnbrokenText = "x".repeat(256);
   create(runInput({
