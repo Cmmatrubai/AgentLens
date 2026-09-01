@@ -373,6 +373,15 @@ describe("browser-safe projectors", () => {
     expect(started.presentationClass).toBe("command");
     expect(started.lifecycleGroupKey).toMatch(/^grp_[a-f0-9]{64}$/);
     expect(completed.lifecycleGroupKey).toBe(started.lifecycleGroupKey);
+    expect(started.lifecycle).toEqual({ domain: "item", phase: "started" });
+    expect(completed.lifecycle).toEqual({ domain: "item", phase: "completed" });
+    expect(projectTrajectoryEventV1(event({
+      source: { ...event().source, eventType: "item.progress" }
+    }), sourceRefs, "standard").lifecycle).toBeNull();
+    const serialized = JSON.stringify([started, completed]);
+    for (const raw of [event().source.itemId, event().source.toolId, "item.started", "item.completed"]) {
+      if (raw !== undefined) expect(serialized).not.toContain(raw);
+    }
 
     const insufficient = projectTrajectoryEventV1(event({
       source: {

@@ -37,6 +37,7 @@ function events(count: number): TrajectoryEventV1[] {
       derivation: null,
       nativePayload: { state: "unavailable", reason: "not_captured" },
       lifecycleGroupKey: null,
+      lifecycle: null,
       detail: sequence === count
         ? { state: "unavailable", reason: "unsupported_kind" }
         : { state: "available" }
@@ -181,6 +182,10 @@ describe("virtualized execution trajectory", () => {
       status: { state: "known" as const, value: index === 0 ? "in_progress" as const : "completed" as const },
       presentationClass: "lifecycle" as const,
       lifecycleGroupKey: groupKey,
+      lifecycle: {
+        domain: "turn" as const,
+        phase: index === 0 ? "started" as const : "completed" as const
+      },
       relationships: index === 1 ? [
         { type: "derived_from" as const, eventId: "event-900" },
         { type: "recovers" as const, eventId: "event-901" }
@@ -229,6 +234,10 @@ describe("virtualized execution trajectory", () => {
       status: { state: "known" as const, value: index === 0 ? "in_progress" as const : "completed" as const },
       presentationClass: "lifecycle" as const,
       lifecycleGroupKey: groupKey,
+      lifecycle: {
+        domain: "turn" as const,
+        phase: index === 0 ? "started" as const : "completed" as const
+      },
       relationships: index === 0 ? [{ type: "correlates_with" as const, eventId: "same-terminal" }] : []
     }));
     const { container } = render(
@@ -343,7 +352,11 @@ describe("virtualized execution trajectory", () => {
       kind: index === 0 ? "turn.started" : "turn.completed",
       status: { state: "known" as const, value: index === 0 ? "in_progress" as const : "completed" as const },
       presentationClass: "lifecycle" as const,
-      lifecycleGroupKey: groupKey
+      lifecycleGroupKey: groupKey,
+      lifecycle: {
+        domain: "turn" as const,
+        phase: index === 0 ? "started" as const : "completed" as const
+      }
     }));
     const second = first.map((item) => ({ ...item, runId: "run-b" }));
     const view = render(

@@ -70,6 +70,11 @@ export const detailAvailabilityV1Schema = z.discriminatedUnion("state", [
   z.object({ state: z.literal("unavailable"), reason: z.literal("unsupported_kind") }).strict()
 ]);
 
+export const trajectoryLifecycleV1Schema = z.object({
+  domain: z.enum(["item", "tool", "thread", "turn"]),
+  phase: z.enum(["started", "completed", "failed", "declined", "interrupted"])
+}).strict();
+
 export const trajectoryEventV1Schema = z.object({
   schemaVersion: z.literal(1),
   eventId: browserAddressableEventIdV1Schema,
@@ -90,6 +95,7 @@ export const trajectoryEventV1Schema = z.object({
   derivation: derivationV1Schema.nullable(),
   nativePayload: nativePayloadAvailabilityV1Schema,
   lifecycleGroupKey: z.string().regex(/^grp_[a-f0-9]{64}$/).nullable(),
+  lifecycle: trajectoryLifecycleV1Schema.nullable(),
   detail: detailAvailabilityV1Schema
 }).strict();
 
@@ -361,6 +367,7 @@ export type TimestampAvailabilityV1 = z.infer<typeof timestampAvailabilityV1Sche
 export type ContentAvailabilityV1 = z.infer<typeof contentAvailabilityV1Schema>;
 export type NativePayloadAvailabilityV1 = z.infer<typeof nativePayloadAvailabilityV1Schema>;
 export type TrajectoryEventV1 = z.infer<typeof trajectoryEventV1Schema>;
+export type TrajectoryLifecycleV1 = z.infer<typeof trajectoryLifecycleV1Schema>;
 export type EventDetailV1 = z.infer<typeof eventDetailV1Schema>;
 export type NormalizedContentV1 = z.infer<typeof normalizedContentV1Schema>;
 export type NormalizedContentResponseV1 = z.infer<typeof normalizedContentResponseV1Schema>;

@@ -42,6 +42,7 @@ function event(runId: string, eventId: string, sequence: number): TrajectoryEven
     derivation: null,
     nativePayload: { state: "unavailable", reason: "not_captured" },
     lifecycleGroupKey: null,
+    lifecycle: null,
     detail: { state: "available" }
   };
 }

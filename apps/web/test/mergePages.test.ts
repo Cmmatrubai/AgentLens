@@ -40,6 +40,7 @@ function event(eventId: string, sequence: number, summary = `Event ${sequence}`)
     derivation: null,
     nativePayload: { state: "unavailable", reason: "not_captured" },
     lifecycleGroupKey: null,
+    lifecycle: null,
     detail: { state: "available" }
   };
 }

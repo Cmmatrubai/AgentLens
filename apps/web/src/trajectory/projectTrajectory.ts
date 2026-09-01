@@ -7,39 +7,20 @@ function eventKey(event: TrajectoryEventV1): string {
 }
 
 function isGroupCandidate(event: TrajectoryEventV1): boolean {
-  return event.kind !== "recorder.recovery" &&
+  return (event.presentationClass === "lifecycle" ||
+      event.presentationClass === "command" || event.presentationClass === "tool") &&
     event.lifecycleGroupKey !== null &&
-    lifecyclePhase(event) !== null;
-}
-
-function lifecyclePhase(event: TrajectoryEventV1): Readonly<{
-  domain: "thread" | "turn" | "command" | "tool";
-  phase: "started" | "completed" | "failed" | "declined" | "interrupted";
-}> | null {
-  const match = /^(thread|turn)\.(started|completed|failed|declined|interrupted)$/.exec(event.kind);
-  if (match !== null && event.presentationClass === "lifecycle") {
-    return {
-      domain: match[1] as "thread" | "turn",
-      phase: match[2] as "started" | "completed" | "failed" | "declined" | "interrupted"
-    };
-  }
-  if (event.presentationClass !== "command" && event.presentationClass !== "tool") return null;
-  if (event.status.state !== "known" || event.status.value === "unknown") return null;
-  return {
-    domain: event.presentationClass,
-    phase: event.status.value === "in_progress" ? "started" : event.status.value
-  };
+    event.lifecycle !== null;
 }
 
 function compatibleLifecyclePair(start: TrajectoryEventV1, terminal: TrajectoryEventV1): boolean {
   if (!isGroupCandidate(start) || !isGroupCandidate(terminal) ||
       start.lifecycleGroupKey !== terminal.lifecycleGroupKey) return false;
-  const startPhase = lifecyclePhase(start);
-  const terminalPhase = lifecyclePhase(terminal);
-  if (startPhase?.phase !== "started" || terminalPhase === null ||
-      terminalPhase.phase === "started" || startPhase.domain !== terminalPhase.domain) return false;
-  return start.status.state === "known" && start.status.value === "in_progress" &&
-    terminal.status.state === "known" && terminal.status.value === terminalPhase.phase;
+  const startLifecycle = start.lifecycle;
+  const terminalLifecycle = terminal.lifecycle;
+  return startLifecycle?.phase === "started" && terminalLifecycle !== null &&
+    terminalLifecycle.phase !== "started" && startLifecycle.domain === terminalLifecycle.domain &&
+    start.presentationClass === terminal.presentationClass;
 }
 
 function lifecycleInstanceKey(start: TrajectoryEventV1, terminal: TrajectoryEventV1): string {

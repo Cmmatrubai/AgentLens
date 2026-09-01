@@ -454,6 +454,7 @@ describe("production run ledger", () => {
       derivation: null,
       nativePayload: { state: "unavailable", reason: "not_captured" },
       lifecycleGroupKey: null,
+      lifecycle: null,
       detail: { state: "available" }
     } satisfies TrajectoryEventV1;
     client.getEvents = vi.fn().mockResolvedValueOnce({

@@ -214,9 +214,28 @@ describe("closed v1 browser schemas", () => {
       },
       nativePayload: { state: "unavailable", reason: "capture_policy" },
       lifecycleGroupKey: null,
+      lifecycle: null,
       detail: { state: "available" }
     } as const;
     expect(trajectoryEventV1Schema.parse(safeTrajectory)).toEqual(safeTrajectory);
+    const lifecycleTrajectory = {
+      ...safeTrajectory,
+      provenance: "observed",
+      presentationClass: "command",
+      derivation: null,
+      lifecycleGroupKey: `grp_${"b".repeat(64)}`,
+      lifecycle: { domain: "item", phase: "completed" }
+    } as const;
+    expect(trajectoryEventV1Schema.parse(lifecycleTrajectory)).toEqual(lifecycleTrajectory);
+    for (const lifecycle of [
+      { domain: "future", phase: "completed" },
+      { domain: "item", phase: "future" },
+      { domain: "item", phase: "completed", eventType: "item.completed" },
+      { domain: "item", phase: "completed", itemId: "raw-item" },
+      { domain: "tool", phase: "failed", toolId: "raw-tool" }
+    ]) {
+      expect(() => trajectoryEventV1Schema.parse({ ...lifecycleTrajectory, lifecycle })).toThrow();
+    }
     for (const forbidden of [
       { normalizedPayload: { sentinel: "MUST_NOT_CROSS_HTTP" } },
       { nativePayloadContent: { sentinel: "NATIVE_MUST_NOT_CROSS_HTTP" } },

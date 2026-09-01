@@ -3,8 +3,9 @@
 > Review-fix updates (2026-08-31): the original implementation evidence below is
 > retained as history. The final sections record the focused fix rounds after review
 > rejected `69ccffa4ca95c85e974bdc4c20d5ef2018e0a68a` and then
-> `7efa195a2d88ddbf66d07794164e6b8b2627dade`; the latest results and residuals
-> supersede the earlier completion/browser claims.
+> `7efa195a2d88ddbf66d07794164e6b8b2627dade` and
+> `cf2463191a351322d45766eee3bdb89c7ad58e4a`; the latest results and
+> residuals supersede the earlier completion/browser claims.
 
 ## Result
 
@@ -180,6 +181,123 @@ the temporary server stopped after verification.
   `trajectory.test.tsx`: Task 7.10 pure and interaction coverage.
 - `apps/web/test/runList.test.tsx`: narrow route-integration fixture update and latest
   anchor/deep-link assertion after the inert shell became the real detail route.
+- this report.
+
+## Review-fix round 3 after `cf24631`
+
+The remaining Important finding was reproduced across the real server projector and
+browser trajectory before implementation. The root cause was status inference in the
+browser: any same-key command/tool records with `in_progress` then terminal-looking
+status compacted, even when the provider source names were non-lifecycle records such
+as `item.progress` and `item.snapshot`. Conversely, a real provider terminal with
+unknown or future canonical status could not compact.
+
+The fix adds one required, nullable, closed `TrajectoryLifecycleV1` descriptor to the
+strict trajectory DTO. The application projector derives it only from an exact
+allowlist of provider source event names for `item`, `tool`, `thread`, and `turn`, with
+the phases `started`, `completed`, `failed`, `declined`, and `interrupted`. Every other
+or future source event name projects `null`. Raw provider event names and item/tool IDs
+remain server-side. The browser now requires an exact same-domain, same-presentation
+start-to-terminal descriptor and opaque group key; status remains display evidence and
+is no longer lifecycle classification input.
+
+### Round-3 RED evidence
+
+```text
+pnpm vitest --run apps/web/test/projectTrajectory.test.ts \
+  packages/api-contract/test/contracts.test.ts \
+  -t "progress and snapshot|explicit item|true tool|trajectory events structural"
+Test Files  2 failed (2)
+Tests       5 failed, 34 skipped
+Failures    item.progress + item.snapshot collapsed to lifecycle_group;
+            real item.completed/item.failed with unknown or unsupported status
+            remained two rows; true tool lifecycle remained two rows; strict DTO
+            rejected the missing lifecycle contract field
+```
+
+The privacy assertion initially caught raw provider names placed by the test itself in
+browser event IDs/summaries. Those fixture-generated names were removed; the same
+projected response then proved that only the closed descriptor crosses the boundary.
+
+Final diff review added a real-projector unknown-kind case. It correctly failed RED
+because recognized `item.started`/`item.completed` descriptors still compacted two
+future presentation kinds:
+
+```text
+pnpm vitest --run apps/web/test/projectTrajectory.test.ts \
+  -t "projected unknown kinds"
+Test Files  1 failed (1)
+Tests       1 failed, 18 skipped
+Failure     projected unknown events collapsed to lifecycle_group
+```
+
+The smallest preservation fix restricts compactable presentations to the accepted
+closed `lifecycle`, `command`, and `tool` classes. The same test then passed `1/1`.
+
+### Round-3 GREEN and fresh verification
+
+```text
+Focused projector/contract/browser GREEN
+Test Files  2 passed (2)
+Tests       5 passed, 34 skipped
+
+Full Task 7.10 plus API contract/application projection matrix
+Test Files  8 passed (8)
+Tests       114 passed (114)
+
+Adjacent Tasks 7.6-7.9 matrix
+Test Files  13 passed (13)
+Tests       459 passed (459)
+
+pnpm typecheck
+$ tsc -b --pretty false
+exit 0
+
+pnpm build
+129 modules transformed
+bootstrap CSS 17.66 kB (gzip 4.13 kB)
+bootstrap JS 342.82 kB (gzip 101.57 kB)
+exit 0
+
+pnpm test
+Test Files  61 passed (61)
+Tests       1254 passed (1254)
+exit 0
+```
+
+Coverage includes non-lifecycle same-key progress/snapshot records; item completed,
+failed, declined, and interrupted terminals with unknown or unsupported status; true
+tool lifecycle; same-key mixed item/tool domains; repeated phase mismatches; repeated
+start/start/terminal and start/terminal/terminal segments; separated true pairs with
+unique instance keys; recorder recovery and unknown-kind independence; and strict DTO
+rejection of future descriptor values or raw event type/item/tool fields.
+
+Fresh `git diff --check` and scope/privacy/static scans passed. The round-3 production
+diff contains only the API contract descriptor, application projection, and Task 7.10
+browser grouping. Fixture migrations add the required nullable field. There are no
+content/native/evidence/artifact fetches, polling, browser storage, token handling,
+absolute user paths, source maps, prototype references, favicon work, or Task 7.11-7.14
+changes. `.scratch-e2e-ONFuP0/` remains untouched and untracked.
+
+### Round-3 browser limitation and residual
+
+The required in-app browser binding again returned `Module not found: agent/browser`.
+No standalone substitute was used. Fresh 1440/1100 visual confirmation that a true
+command pair compacts while progress/snapshot stays separate remains the only release
+residual. The exact projector-to-browser behaviors are covered automatically.
+
+### Round-3 changed files
+
+- `packages/api-contract/src/events.ts` and `packages/api-contract/test/contracts.test.ts`:
+  closed lifecycle descriptor and strict/privacy contract coverage.
+- `packages/application/src/api/projectors.ts` and
+  `packages/application/test/apiProjection.test.ts`: exact allowlisted source-event
+  projection with null fallback and raw-source privacy assertions.
+- `apps/web/src/trajectory/projectTrajectory.ts` and
+  `apps/web/test/projectTrajectory.test.ts`: descriptor-only grouping and end-to-end
+  projector-to-browser regression coverage.
+- `apps/web/test/mergePages.test.ts`, `runList.test.tsx`, `trajectory.test.tsx`, and
+  `trajectoryPages.test.tsx`: required closed DTO fixture migration only.
 - this report.
 
 ## Residual risk

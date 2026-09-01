@@ -21,6 +21,7 @@ import {
   type RunListItemV1,
   type RunSummaryV1,
   type TrajectoryEventV1,
+  type TrajectoryLifecycleV1,
   type TrajectoryPageV1
 } from "@agentlens/api-contract";
 import type { CapturePolicy, TraceEventV1 } from "@agentlens/core";
@@ -414,10 +415,38 @@ export function projectTrajectoryEventV1(
     derivation: derivation(event),
     nativePayload: nativePayloadAvailability(event, capturePolicy),
     lifecycleGroupKey: lifecycleGroupKey(event, sourceRefs),
+    lifecycle: trajectoryLifecycle(event),
     detail: presentationClass === "unknown"
       ? { state: "unavailable", reason: "unsupported_kind" }
       : { state: "available" }
   });
+}
+
+function trajectoryLifecycle(event: TraceEventV1): TrajectoryLifecycleV1 | null {
+  if (event.provenance !== "observed") return null;
+  switch (event.source.eventType) {
+    case "item.started": return { domain: "item", phase: "started" };
+    case "item.completed": return { domain: "item", phase: "completed" };
+    case "item.failed": return { domain: "item", phase: "failed" };
+    case "item.declined": return { domain: "item", phase: "declined" };
+    case "item.interrupted": return { domain: "item", phase: "interrupted" };
+    case "tool.started": return { domain: "tool", phase: "started" };
+    case "tool.completed": return { domain: "tool", phase: "completed" };
+    case "tool.failed": return { domain: "tool", phase: "failed" };
+    case "tool.declined": return { domain: "tool", phase: "declined" };
+    case "tool.interrupted": return { domain: "tool", phase: "interrupted" };
+    case "thread.started": return { domain: "thread", phase: "started" };
+    case "thread.completed": return { domain: "thread", phase: "completed" };
+    case "thread.failed": return { domain: "thread", phase: "failed" };
+    case "thread.declined": return { domain: "thread", phase: "declined" };
+    case "thread.interrupted": return { domain: "thread", phase: "interrupted" };
+    case "turn.started": return { domain: "turn", phase: "started" };
+    case "turn.completed": return { domain: "turn", phase: "completed" };
+    case "turn.failed": return { domain: "turn", phase: "failed" };
+    case "turn.declined": return { domain: "turn", phase: "declined" };
+    case "turn.interrupted": return { domain: "turn", phase: "interrupted" };
+    default: return null;
+  }
 }
 
 function lifecycleGroupKey(event: TraceEventV1, sourceRefs: SourceRefProjector): string | null {
