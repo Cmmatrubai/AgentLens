@@ -1,9 +1,16 @@
-import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { CompletedArtifact, TraceEventV1 } from "../../../packages/core/src/index.js";
+import {
+  ArtifactStore,
+  prepareNativePayload,
+  redactJson,
+  redactedTextBytes,
+  redactText,
+  type CompletedArtifact,
+  type TraceEventV1
+} from "../../../packages/core/src/index.js";
 import { buildTestDerivationDrafts } from "../../../packages/derivations/src/index.js";
 import {
   RunRepository,
@@ -73,30 +80,23 @@ function observedEvent(input: Readonly<{
 }
 
 async function completedArtifact(
-  artifactRoot: string,
+  dataRoot: string,
   runId: string,
   kind: string,
   mediaType: string,
   content: string
 ): Promise<CompletedArtifact> {
-  const bytes = Buffer.from(content, "utf8");
-  const id = createHash("sha256").update(bytes).digest("hex");
-  const directory = join(artifactRoot, id.slice(0, 2));
-  const path = join(directory, id);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(path, bytes, { mode: 0o600 });
-  return {
-    id,
+  const redacted = redactText(content, {
+    policy: "standard",
+    key: Buffer.alloc(32, 0x5a),
+    contentClass: kind.includes("diff") ? "git-diff" : "tool"
+  });
+  return new ArtifactStore(dataRoot).writeRedacted({
     runId,
     kind,
     mediaType,
-    path,
-    sha256: id,
-    byteLength: bytes.byteLength,
-    redactionState: "redacted",
-    truncated: false,
-    originalByteLength: bytes.byteLength
-  };
+    redactedBytes: redactedTextBytes(redacted)
+  });
 }
 
 function appendTestDerivations(
@@ -191,6 +191,8 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
   await mkdir(artifactRoot, { recursive: true, mode: 0o700 });
   const database = openDatabase(join(dataRoot, "agentlens.sqlite"));
   const repository = new RunRepository(database, { artifactRoot });
+  const artifactStore = new ArtifactStore(dataRoot);
+  const redactionKey = Buffer.alloc(32, 0x5a);
   const create = (input: CreateRunInput, recorderInstanceId: string) => repository.createRun(input, {
     recorderInstanceId,
     recorderPid: process.pid,
@@ -207,6 +209,20 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
   }), completedRecorder);
   let sequence = 0;
   const failedCommandId = `${completedId}-command-failed`;
+  const standardOutput = redactText(
+    "Bearer RAW_STANDARD_SECRET_SENTINEL_RELEASE",
+    { policy: "standard", key: redactionKey, contentClass: "output" }
+  );
+  const standardNative = await prepareNativePayload(redactJson({
+    type: "item.failed",
+    command: "pnpm test",
+    output: "Bearer RAW_STANDARD_SECRET_SENTINEL_RELEASE"
+  }, {
+    policy: "standard",
+    key: redactionKey,
+    contentClass: "native",
+    runId: completedId
+  }), artifactStore);
   repository.appendEvent(observedEvent({
     runId: completedId,
     id: failedCommandId,
@@ -217,12 +233,9 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     normalizedPayload: {
       commandEvidence: { state: "available", redactedCommand: "pnpm test" },
       exitCode: 1,
-      aggregatedOutput: "FAIL synthetic fixture: expected true to be false\n"
+      aggregatedOutput: `FAIL synthetic fixture: expected true to be false\n${standardOutput.text}\n${"synthetic bounded output\n".repeat(4_000)}`
     },
-    nativePayload: {
-      storage: "inline",
-      redacted: { type: "item.failed", command: "pnpm test", output: "[REDACTED]" }
-    }
+    nativePayload: standardNative
   }));
   sequence = appendTestDerivations(repository, {
     runId: completedId,
@@ -290,10 +303,10 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     providerCompleted: true
   });
   const statusInitial = await completedArtifact(
-    artifactRoot, completedId, "git-initial-status", "text/plain", ""
+    dataRoot, completedId, "git-initial-status", "text/plain", ""
   );
   const statusFinal = await completedArtifact(
-    artifactRoot, completedId, "git-final-status", "text/plain", "? notes.txt\n"
+    dataRoot, completedId, "git-final-status", "text/plain", "? notes.txt\n"
   );
   const diffPreamble = [
     "diff --git a/apps/web/src/example.ts b/apps/web/src/example.ts",
@@ -304,21 +317,21 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     "+new fixture value"
   ].join("\n");
   const diff = await completedArtifact(
-    artifactRoot,
+    dataRoot,
     completedId,
     "git-tracked-final-diff",
     "text/x-diff",
     `${diffPreamble}\n`
   );
   const diffCheck = await completedArtifact(
-    artifactRoot,
+    dataRoot,
     completedId,
     "git-diff-check",
     "application/json",
     JSON.stringify({ passed: true, output: "" })
   );
   const untracked = await completedArtifact(
-    artifactRoot,
+    dataRoot,
     completedId,
     "git-untracked-file-metadata",
     "application/json",
@@ -365,6 +378,22 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     exitCode: null,
     signal: "SIGINT",
     providerCompleted: false
+  });
+
+  const failedId = "fixture-failed";
+  const failedRecorder = `recorder-${failedId}`;
+  create(runInput({
+    id: failedId,
+    startedAt: baseTime + 25_000,
+    label: "Provider and process failure evidence"
+  }), failedRecorder);
+  finishRun(repository, {
+    runId: failedId,
+    recorderInstanceId: failedRecorder,
+    sequence: 0,
+    exitCode: 1,
+    signal: null,
+    providerCompleted: true
   });
 
   const recorderErrorId = "fixture-recorder-error";
@@ -417,13 +446,63 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     repositoryFingerprint: "repo-private-redacted",
     repositoryDisplay: "Redacted repository"
   }), "recorder-fixture-metadata-only");
+  const metadataNative = await prepareNativePayload(redactJson({
+    prompt: "OMITTED_PROMPT_SENTINEL_RELEASE",
+    message: "OMITTED_MESSAGE_SENTINEL_RELEASE",
+    command: "OMITTED_COMMAND_SENTINEL_RELEASE",
+    output: "OMITTED_OUTPUT_SENTINEL_RELEASE",
+    diff: "OMITTED_DIFF_SENTINEL_RELEASE",
+    note: "OMITTED_NOTE_SENTINEL_RELEASE",
+    sourceId: "OMITTED_SOURCE_ID_SENTINEL_RELEASE",
+    databasePath: "OMITTED_DATABASE_PATH_SENTINEL_RELEASE",
+    artifactPath: "OMITTED_ARTIFACT_PATH_SENTINEL_RELEASE",
+    repositoryPath: "OMITTED_REPOSITORY_PATH_SENTINEL_RELEASE"
+  }, {
+    policy: "metadata-only",
+    key: redactionKey,
+    contentClass: "native",
+    runId: metadataOnlyId
+  }), artifactStore);
   repository.appendEvent(observedEvent({
     runId: metadataOnlyId,
     id: `${metadataOnlyId}-message`,
     sequence: 0,
     kind: "message.agent",
     status: "completed",
-    summary: "Metadata-only evidence remains explicit"
+    summary: "Metadata-only evidence remains explicit",
+    normalizedPayload: {
+      prompt: redactText("OMITTED_PROMPT_SENTINEL_RELEASE", {
+        policy: "metadata-only", key: redactionKey, contentClass: "prompt"
+      }).text,
+      message: redactText("OMITTED_MESSAGE_SENTINEL_RELEASE", {
+        policy: "metadata-only", key: redactionKey, contentClass: "message"
+      }).text,
+      command: redactText("OMITTED_COMMAND_SENTINEL_RELEASE", {
+        policy: "metadata-only", key: redactionKey, contentClass: "command"
+      }).text,
+      output: redactText("OMITTED_OUTPUT_SENTINEL_RELEASE", {
+        policy: "metadata-only", key: redactionKey, contentClass: "output"
+      }).text,
+      diff: redactText("OMITTED_DIFF_SENTINEL_RELEASE", {
+        policy: "metadata-only", key: redactionKey, contentClass: "git-diff"
+      }).text,
+      note: redactText("OMITTED_NOTE_SENTINEL_RELEASE", {
+        policy: "metadata-only", key: redactionKey, contentClass: "message"
+      }).text,
+      sourceId: redactText("OMITTED_SOURCE_ID_SENTINEL_RELEASE", {
+        policy: "metadata-only", key: redactionKey, contentClass: "native"
+      }).text,
+      databasePath: redactText("OMITTED_DATABASE_PATH_SENTINEL_RELEASE", {
+        policy: "metadata-only", key: redactionKey, contentClass: "path"
+      }).text,
+      artifactPath: redactText("OMITTED_ARTIFACT_PATH_SENTINEL_RELEASE", {
+        policy: "metadata-only", key: redactionKey, contentClass: "path"
+      }).text,
+      repositoryPath: redactText("OMITTED_REPOSITORY_PATH_SENTINEL_RELEASE", {
+        policy: "metadata-only", key: redactionKey, contentClass: "path"
+      }).text
+    },
+    nativePayload: metadataNative
   }));
   repository.saveGitEvidence(metadataOnlyId, {
     initialHead: "c".repeat(40),
@@ -440,6 +519,39 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     branchChanged: false,
     capturedAt: baseTime + 1_000
   });
+
+  const strictId = "fixture-strict-omitted";
+  create(runInput({
+    id: strictId,
+    startedAt: baseTime - 1_000,
+    label: "Strict capture with omitted content",
+    capturePolicy: "strict",
+    repositoryFingerprint: "repo-private-strict",
+    repositoryDisplay: "Redacted repository"
+  }), "recorder-fixture-strict");
+  const strictNative = await prepareNativePayload(redactJson({
+    prompt: "OMITTED_PROMPT_SENTINEL_RELEASE",
+    output: "OMITTED_OUTPUT_SENTINEL_RELEASE"
+  }, {
+    policy: "strict",
+    key: redactionKey,
+    contentClass: "native",
+    runId: strictId
+  }), artifactStore);
+  repository.appendEvent(observedEvent({
+    runId: strictId,
+    id: `${strictId}-message`,
+    sequence: 0,
+    kind: "message.agent",
+    status: "completed",
+    summary: "Strict evidence retains only policy-safe metadata",
+    normalizedPayload: {
+      prompt: redactText("OMITTED_PROMPT_SENTINEL_RELEASE", {
+        policy: "strict", key: redactionKey, contentClass: "prompt"
+      }).text
+    },
+    nativePayload: strictNative
+  }));
 
   const boundedDiffId = "fixture-bounded-2mib-diff";
   const boundedRecorder = `recorder-${boundedDiffId}`;
@@ -470,10 +582,15 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     "--- a/large.txt",
     "+++ b/large.txt",
     "@@ -0,0 +1 @@",
-    "+"
+    "+first bounded file",
+    "diff --git a/second.txt b/second.txt",
+    "--- a/second.txt",
+    "+++ b/second.txt",
+    "@@ -0,0 +1 @@",
+    "+second bounded file"
   ].join("\n");
   const boundedDiff = await completedArtifact(
-    artifactRoot,
+    dataRoot,
     boundedDiffId,
     "git-tracked-final-diff",
     "text/x-diff",

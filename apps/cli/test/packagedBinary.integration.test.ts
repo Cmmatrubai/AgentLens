@@ -1,7 +1,7 @@
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { delimiter, join, relative } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -52,6 +52,20 @@ async function waitForFile(path: string): Promise<void> {
   throw new Error(`Timed out waiting for ${path}.`);
 }
 
+async function copyTrackedWorkspace(checkout: string): Promise<void> {
+  await mkdir(checkout, { recursive: true });
+  const listed = await execFile("git", ["ls-files", "-z"], {
+    cwd: workspaceRoot,
+    encoding: "utf8",
+    maxBuffer: 10 * 1024 * 1024
+  });
+  for (const path of listed.stdout.split("\0").filter(Boolean)) {
+    const destination = join(checkout, path);
+    await mkdir(dirname(destination), { recursive: true });
+    await copyFile(join(workspaceRoot, path), destination);
+  }
+}
+
 beforeAll(async () => {
   await execFile("pnpm", ["typecheck"], { cwd: workspaceRoot });
 }, 30_000);
@@ -65,13 +79,7 @@ describe("packaged AgentLens binary", () => {
     const root = await mkdtemp(join(tmpdir(), "agentlens-cli-development-"));
     roots.push(root);
     const checkout = join(root, "checkout");
-    await cp(workspaceRoot, checkout, {
-      recursive: true,
-      filter: (source) => {
-        const parts = relative(workspaceRoot, source).split("/");
-        return !parts.some((part) => [".git", ".superpowers", "dist", "node_modules"].includes(part));
-      }
-    });
+    await copyTrackedWorkspace(checkout);
     await execFile("pnpm", ["install", "--offline", "--frozen-lockfile"], {
       cwd: checkout,
       maxBuffer: 10 * 1024 * 1024
