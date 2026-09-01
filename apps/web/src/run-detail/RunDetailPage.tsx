@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { useAgentLensApi } from "../api/queries.js";
+import { queryKeys } from "../api/queryKeys.js";
 import { ErrorState } from "../app/ErrorState.js";
 import { TrajectoryToolbar } from "../trajectory/TrajectoryToolbar.js";
 import { useTrajectoryPages } from "../trajectory/useTrajectoryPages.js";
@@ -19,7 +20,7 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
   const selectedEventId = parsedEventId?.success ? parsedEventId.data : null;
   const invalidEventQuery = hasEventQuery && (eventValues.length !== 1 || parsedEventId?.success !== true);
   const run = useQuery({
-    queryKey: ["run", runId],
+    queryKey: queryKeys.run(runId),
     queryFn: ({ signal }) => client.getRun(runId, signal)
   });
   const trajectory = useTrajectoryPages(runId, selectedEventId);
@@ -30,7 +31,7 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
   return (
     <section className="run-detail-page">
       <Link className="run-detail-page__back" to="/runs">← Run ledger</Link>
-      <RunHeader run={run.data} />
+      <RunHeader run={run.data} onAssessmentSaved={select} />
       {invalidEventQuery && (
         <section className="trajectory-selection-error" role="alert">The selected event link is invalid.</section>
       )}

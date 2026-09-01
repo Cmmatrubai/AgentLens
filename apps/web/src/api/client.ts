@@ -1,6 +1,9 @@
 import {
   apiErrorV1Schema,
+  assessmentConflictResponseV1Schema,
   assessmentNoteContentV1Schema,
+  assessmentResponseV1Schema,
+  assessmentUpdateRequestV1Schema,
   browserAddressableEventIdV1Schema,
   browserAddressableRunIdV1Schema,
   eventDetailV1Schema,
@@ -8,13 +11,16 @@ import {
   gitDiffContentV1Schema,
   gitStatusContentV1Schema,
   gitUntrackedContentV1Schema,
+  maximumAssessmentRevisionEtagCharacters,
   nativeContentResponseV1Schema,
   normalizedContentResponseV1Schema,
   runDetailV1Schema,
   runPageV1Schema,
   trajectoryPageV1Schema,
   type ApiErrorCodeV1,
+  type AssessmentConflictResponseV1,
   type AssessmentNoteContentV1,
+  type AssessmentResponseV1,
   type EventDetailV1,
   type GitDiffCheckContentV1,
   type GitDiffContentV1,
@@ -62,6 +68,18 @@ export interface EventPageQueryV1 {
   readonly aroundSequence?: number;
 }
 
+export interface AssessmentDraft {
+  readonly verdict: "unreviewed" | "success" | "partial" | "failure";
+  readonly taskCompleted: "yes" | "no" | "uncertain";
+  readonly note: string;
+}
+
+export interface AssessmentMutationInput {
+  readonly runId: string;
+  readonly etag: string;
+  readonly draft: AssessmentDraft;
+}
+
 export interface AgentLensApiClient {
   listRuns(query: RunListQueryV1, signal?: AbortSignal): Promise<RunPageV1>;
   getRun(runId: string, signal?: AbortSignal): Promise<RunDetailV1>;
@@ -78,6 +96,7 @@ export interface AgentLensApiClient {
   getGitStatus(runId: string, phase: "initial" | "final", signal?: AbortSignal): Promise<GitStatusContentV1>;
   getGitDiffCheck(runId: string, signal?: AbortSignal): Promise<GitDiffCheckContentV1>;
   getGitUntracked(runId: string, signal?: AbortSignal): Promise<GitUntrackedContentV1>;
+  updateAssessment(input: AssessmentMutationInput): Promise<AssessmentResponseV1>;
 }
 
 export type AgentLensClientErrorCode =
@@ -103,6 +122,23 @@ export class AgentLensClientError extends Error {
     this.code = input.code;
     this.status = input.status;
     this.retryable = input.retryable;
+  }
+}
+
+export class AgentLensAssessmentConflictError extends AgentLensClientError {
+  readonly assessment: AssessmentConflictResponseV1["assessment"];
+  readonly etag: string;
+
+  constructor(conflict: AssessmentConflictResponseV1) {
+    super({
+      code: "assessment_conflict",
+      status: 412,
+      retryable: false,
+      message: "AgentLens could not complete the request."
+    });
+    this.name = "AgentLensAssessmentConflictError";
+    this.assessment = conflict.assessment;
+    this.etag = conflict.etag;
   }
 }
 
@@ -318,6 +354,43 @@ async function parseResponse<T>(
   return parsed.data;
 }
 
+function assessmentRequest(input: AssessmentMutationInput) {
+  const note = input.draft.note.length === 0
+    ? { state: "absent" as const }
+    : { state: "text" as const, text: input.draft.note };
+  const parsed = assessmentUpdateRequestV1Schema.safeParse({
+    schemaVersion: 1,
+    verdict: input.draft.verdict,
+    taskCompleted: input.draft.taskCompleted,
+    note
+  });
+  if (!parsed.success) {
+    throw clientFailure("invalid_client_input", "AgentLens assessment input is invalid.");
+  }
+  return parsed.data;
+}
+
+function validAssessmentEtag(value: string): boolean {
+  return value === '"assessment:projected"' ||
+    (/^"assessment:[A-Za-z0-9_-]+"$/.test(value) &&
+      value.length <= maximumAssessmentRevisionEtagCharacters);
+}
+
+export function assessmentEtagFor(currentEventId: string | null): string {
+  if (currentEventId === null) return '"assessment:projected"';
+  if (!browserAddressableEventIdV1Schema.safeParse(currentEventId).success) {
+    throw clientFailure("invalid_client_input", "AgentLens assessment revision is invalid.");
+  }
+  const bytes = new TextEncoder().encode(currentEventId);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const encoded = btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/u, "");
+  return `"assessment:${encoded}"`;
+}
+
 export function createAgentLensApiClient(input: Readonly<{
   origin: string;
   bearerToken: string;
@@ -355,6 +428,54 @@ export function createAgentLensApiClient(input: Readonly<{
       }
       throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
     }
+  };
+
+  const updateAssessment = async (inputValue: AssessmentMutationInput): Promise<AssessmentResponseV1> => {
+    const body = assessmentRequest(inputValue);
+    if (!validAssessmentEtag(inputValue.etag)) {
+      throw clientFailure("invalid_client_input", "AgentLens assessment revision is invalid.");
+    }
+    let response: Response;
+    try {
+      response = await fetchImpl(`${origin}/api/v1/runs/${runId(inputValue.runId)}/assessment`, {
+        method: "PUT",
+        redirect: "error",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${input.bearerToken}`,
+          "Content-Type": "application/json",
+          "If-Match": inputValue.etag
+        },
+        body: JSON.stringify(body)
+      });
+    } catch {
+      throw clientFailure("network_error", "AgentLens could not reach the local server.", null, true);
+    }
+    if (response.redirected) {
+      await cancelBodyBestEffort(response.body);
+      throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+    }
+    const responseBody = await readBoundedJson(response);
+    if (response.status === 412) {
+      const conflict = assessmentConflictResponseV1Schema.safeParse(responseBody);
+      if (!conflict.success) {
+        throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+      }
+      throw new AgentLensAssessmentConflictError(conflict.data);
+    }
+    if (!response.ok) {
+      const parsedError = apiErrorV1Schema.safeParse(responseBody);
+      if (!parsedError.success) {
+        throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+      }
+      const { code, retryable } = parsedError.data.error;
+      throw clientFailure(code, safeApiMessage(code), response.status, retryable);
+    }
+    const parsed = assessmentResponseV1Schema.safeParse(responseBody);
+    if (!parsed.success) {
+      throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
+    }
+    return parsed.data;
   };
 
   return Object.freeze({
@@ -407,6 +528,7 @@ export function createAgentLensApiClient(input: Readonly<{
     getGitDiffCheck: (runIdValue: string, signal?: AbortSignal) =>
       request(`/api/v1/runs/${runId(runIdValue)}/git/diff-check`, gitDiffCheckContentV1Schema, signal),
     getGitUntracked: (runIdValue: string, signal?: AbortSignal) =>
-      request(`/api/v1/runs/${runId(runIdValue)}/git/untracked`, gitUntrackedContentV1Schema, signal)
+      request(`/api/v1/runs/${runId(runIdValue)}/git/untracked`, gitUntrackedContentV1Schema, signal),
+    updateAssessment
   });
 }

@@ -1,6 +1,8 @@
 import type { RunDetailV1 } from "@agentlens/api-contract";
 
-import { durationText, likelyTestsText, providerText, reviewText, words } from "../runs/runFacts.js";
+import { AssessmentEditor } from "../assessment/AssessmentEditor.js";
+import { AssessmentSummary } from "../assessment/AssessmentSummary.js";
+import { durationText, likelyTestsText, providerText, words } from "../runs/runFacts.js";
 
 function statusLabel(run: RunDetailV1): string {
   return run.status.state === "known"
@@ -8,7 +10,10 @@ function statusLabel(run: RunDetailV1): string {
     : `Unsupported status: ${run.status.safeToken}`;
 }
 
-export function RunHeader({ run }: Readonly<{ run: RunDetailV1 }>) {
+export function RunHeader({ run, onAssessmentSaved }: Readonly<{
+  run: RunDetailV1;
+  onAssessmentSaved?: (eventId: string) => void;
+}>) {
   const recorderDuration = durationText(run);
   const startedAt = new Date(run.startedAt).toISOString();
   const endedAt = run.endedAt === null ? null : new Date(run.endedAt).toISOString();
@@ -28,8 +33,15 @@ export function RunHeader({ run }: Readonly<{ run: RunDetailV1 }>) {
         <div><dt>Recorder ended</dt><dd>{endedAt === null ? "Not yet ended" : <time dateTime={endedAt}>{endedAt}</time>}</dd></div>
         <div><dt>Recorder duration</dt><dd>{recorderDuration ?? `Unavailable · ${words(run.summary.elapsedRecorderTimeMs.state === "unavailable" ? run.summary.elapsedRecorderTimeMs.reason : "not_captured")}`}</dd></div>
         <div><dt>Likely tests</dt><dd>{likelyTestsText(run)}</dd></div>
-        <div><dt>Assessment</dt><dd>{reviewText(run, true)}</dd></div>
+        <div><dt>Assessment</dt><dd><AssessmentSummary assessment={run.summary.assessment} /></dd></div>
       </dl>
+      {onAssessmentSaved !== undefined && (
+        <AssessmentEditor
+          runId={run.runId}
+          assessment={run.summary.assessment}
+          onConfirmed={onAssessmentSaved}
+        />
+      )}
       {(run.warningCodes.length > 0 || run.contradictionCodes.length > 0) && (
         <div className="run-detail-header__signals" aria-label="Run warnings and contradictions">
           {run.contradictionCodes.map((code) => (

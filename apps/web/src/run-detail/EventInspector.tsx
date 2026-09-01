@@ -68,6 +68,21 @@ function DetailFacts({ detail }: Readonly<{ detail: EventDetailV1 }>) {
   );
 }
 
+function AssessmentFacts({ detail }: Readonly<{
+  detail: Extract<EventDetailV1, { presentationClass: "assessment" }>;
+}>) {
+  const note = detail.note.state === "unavailable"
+    ? `unavailable · ${detail.note.reason.replaceAll("_", " ")}`
+    : detail.note.state;
+  return (
+    <dl className="evidence-facts assessment-evidence-facts">
+      <div><dt>Reviewer</dt><dd>Reviewer: {detail.verdict}</dd></div>
+      <div><dt>Task completion</dt><dd>Task completed: {detail.taskCompleted}</dd></div>
+      <div><dt>Reviewer note</dt><dd>Reviewer note: {note}</dd></div>
+    </dl>
+  );
+}
+
 export function EventInspector(props: Readonly<{
   event: TrajectoryEventV1;
   runId: string;
@@ -131,6 +146,7 @@ export function EventInspector(props: Readonly<{
           {detail.data !== undefined && (
             <>
               <DetailFacts detail={detail.data} />
+              {detail.data.presentationClass === "assessment" && <AssessmentFacts detail={detail.data} />}
               {detail.data.presentationClass === "command" ? (
                 <CommandEvidence
                   detail={detail.data}
