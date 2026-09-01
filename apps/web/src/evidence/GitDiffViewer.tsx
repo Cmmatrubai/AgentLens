@@ -166,7 +166,7 @@ export function GitDiffViewer(props: Readonly<{
                 {page.hunks.length > 0 && <div className="git-diff__code-scroll" tabIndex={0}>
                   {page.hunks.map(({ hunk, hunkIndex, lines }) => (
                     <section className="git-diff__hunk" key={`${hunk.header}:${hunkIndex}`}>
-                      <h5>{hunk.header}</h5>
+                      <h3>{hunk.header}</h3>
                       <ol>
                         {lines.map((line, lineOffset) => (
                           <li className={`git-diff__line git-diff__line--${line.type}`} data-diff-line

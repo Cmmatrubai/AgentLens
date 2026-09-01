@@ -99,12 +99,26 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
   const pages = useMemo(() => entries.map(({ page }) => page), [entries]);
   const events = useMemo(() => mergeTrajectoryPages(pages), [pages]);
 
-  const commitPage = useCallback((page: TrajectoryPageV1, request: TrajectoryCursorRequest | null = null): void => {
-    const candidate = [...entriesRef.current, { page, request }];
-    mergeTrajectoryPages(candidate.map((entry) => entry.page));
+  const commitPage = useCallback((page: TrajectoryPageV1, request: TrajectoryCursorRequest | null = null): number => {
+    const before = mergeTrajectoryPages(entriesRef.current.map((entry) => entry.page));
+    if (page.mode === "after" && page.items.length === 0) return 0;
+    const base = page.mode === "tail" && before.length === 0
+      ? entriesRef.current.filter((entry) => entry.page.mode !== "tail")
+      : entriesRef.current;
+    const candidate = [...base, { page, request }];
+    const after = mergeTrajectoryPages(candidate.map((entry) => entry.page));
     entriesRef.current = candidate;
     setEntries(candidate);
+    const previous = new Set(before.map(({ eventId, sequence }) => `${eventId}:${sequence}`));
+    return after.filter(({ eventId, sequence }) => !previous.has(`${eventId}:${sequence}`)).length;
   }, []);
+
+  const appendPage = useCallback((page: TrajectoryPageV1): number => {
+    if (page.mode !== "tail" && page.mode !== "after") {
+      throw new Error("Active trajectory polling returned an incompatible page mode.");
+    }
+    return commitPage(page);
+  }, [commitPage]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -207,6 +221,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     error,
     selectionState,
     pagingState,
+    appendPage,
     hasEarlier: cursors.earlier !== null && pagingState !== "loading",
     hasLater: cursors.later !== null && pagingState !== "loading",
     loadEarlier: cursors.earlier === null ? null : () => loadCursor("earlier", cursors.earlier!),

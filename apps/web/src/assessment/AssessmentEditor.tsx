@@ -64,6 +64,7 @@ export function AssessmentEditor(props: Readonly<{
   const [draft, setDraft] = useState<AssessmentDraft>(() => initialDraft(props.assessment));
   const [validation, setValidation] = useState<ReturnType<typeof errors>>({});
   const openButtonRef = useRef<HTMLButtonElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const mutation = useAssessmentMutation({
     runId: props.runId,
     assessment: props.assessment,
@@ -91,6 +92,10 @@ export function AssessmentEditor(props: Readonly<{
       restoreButtonFocus();
     }
   };
+  const reviewLatest = (): void => {
+    mutation.reviewLatest();
+    queueMicrotask(() => formRef.current?.focus());
+  };
 
   return (
     <section className="assessment-workflow" aria-label="Human assessment workflow">
@@ -108,7 +113,13 @@ export function AssessmentEditor(props: Readonly<{
         {props.assessment.state === "projected" ? "Add human assessment" : "Edit human assessment"}
       </button>
       {open && (
-        <form className="assessment-editor" aria-label="Human assessment" onSubmit={(event) => { void submit(event); }}>
+        <form
+          ref={formRef}
+          className="assessment-editor"
+          aria-label="Human assessment"
+          tabIndex={-1}
+          onSubmit={(event) => { void submit(event); }}
+        >
           <div className="assessment-editor__groups">
             <fieldset>
               <legend>Reviewer verdict</legend>
@@ -176,7 +187,7 @@ export function AssessmentEditor(props: Readonly<{
             <section className="assessment-editor__conflict" aria-label="Latest server assessment">
               <p role="alert">This assessment changed before your save completed. Your draft has not been applied.</p>
               <AssessmentSummary assessment={mutation.conflict.assessment} />
-              <button type="button" onClick={mutation.reviewLatest}>Review latest assessment</button>
+              <button type="button" onClick={reviewLatest}>Review latest assessment</button>
             </section>
           )}
           {failureText(mutation.error) !== null && <p className="assessment-editor__error" role="alert">{failureText(mutation.error)}</p>}

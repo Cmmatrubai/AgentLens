@@ -212,7 +212,7 @@
 }
 
 .git-diff__hunk { min-width: max-content; }
-.git-diff__hunk h5 {
+.git-diff__hunk h3 {
   position: sticky;
   left: 0;
   margin: 0;

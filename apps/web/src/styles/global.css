@@ -1,3 +1,5 @@
+@import "./responsive.css";
+
 * {
   box-sizing: border-box;
 }
@@ -37,6 +39,23 @@ a:focus-visible,
 input:focus-visible,
 select:focus-visible {
   box-shadow: 0 0 0 2px var(--canvas), 0 0 0 4px var(--focus);
+}
+
+.assessment-editor:focus-visible {
+  outline: 2px dashed var(--focus);
+  outline-offset: 3px;
+}
+
+.live-evidence-state {
+  margin: var(--space-4) 0 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--amber);
+  color: var(--text-muted);
+  background: rgb(223 173 92 / 8%);
+}
+
+.live-evidence-state--error {
+  border-left-color: var(--coral);
 }
 
 a {

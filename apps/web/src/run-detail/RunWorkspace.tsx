@@ -1,7 +1,9 @@
 import type { RunDetailV1, TrajectoryEventV1 } from "@agentlens/api-contract";
+import { motion } from "motion/react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { GitEvidenceSummary } from "../evidence/GitEvidenceSummary.js";
+import { useMotionPolicy } from "../motion/motionPolicy.js";
 import {
   initialGitDiffViewState,
   type GitDiffViewState
@@ -47,6 +49,7 @@ export function RunWorkspace(props: Readonly<{
   onSelect: (eventId: string) => void;
 }>) {
   const [expandedGroupKeys, setExpandedGroupKeys] = useState<ReadonlySet<string>>(new Set());
+  const motionPolicy = useMotionPolicy();
   const [deepEvidence, setDeepEvidence] = useState<{
     identity: string;
     open: boolean;
@@ -127,16 +130,20 @@ export function RunWorkspace(props: Readonly<{
     </>
   );
   const inlineInspector = narrow && selected !== null ? (
-    <section
+    <motion.section
       className="trajectory-inline-inspector"
       data-testid="inline-event-inspector"
       data-inline-inspector-for={selected.eventId}
       ref={restoreFocusWithin}
+      initial={false}
+      layout="position"
+      transition={motionPolicy.inspector}
+      data-motion={motionPolicy.reduced ? "reduced" : "standard"}
       onClick={(event) => event.stopPropagation()}
     >
       {inspector}
       {deepPanel}
-    </section>
+    </motion.section>
   ) : null;
   return (
     <div className="run-workspace">
@@ -154,7 +161,15 @@ export function RunWorkspace(props: Readonly<{
           return next;
         })}
       />
-      {!narrow && <aside ref={restoreFocusWithin} className="trajectory-inspector" aria-label="Selected evidence inspector">
+      {!narrow && <motion.aside
+        ref={restoreFocusWithin}
+        className="trajectory-inspector"
+        aria-label="Selected evidence inspector"
+        initial={false}
+        layout="position"
+        transition={motionPolicy.inspector}
+        data-motion={motionPolicy.reduced ? "reduced" : "standard"}
+      >
         {props.selectionState === "resolving" && <p role="status">Resolving selected event…</p>}
         {props.selectionState === "unavailable" && (
           <p role="alert">The selected event is unavailable in this run.</p>
@@ -163,7 +178,7 @@ export function RunWorkspace(props: Readonly<{
           <p>Select a trajectory row to inspect its bounded evidence.</p>
         )}
         {inspector}
-      </aside>}
+      </motion.aside>}
       {!narrow && props.run !== undefined && (
         <>{deepPanel}</>
       )}

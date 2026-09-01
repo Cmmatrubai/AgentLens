@@ -1,10 +1,11 @@
 import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import { findTrajectoryRowIndex, projectTrajectory } from "./projectTrajectory.js";
 import { RelationshipOverlay } from "./RelationshipOverlay.js";
 import { TrajectoryRow } from "./TrajectoryRow.js";
+import { useFollowTail } from "./useFollowTail.js";
 
 import type { TrajectoryEventV1 } from "@agentlens/api-contract";
 
@@ -81,6 +82,11 @@ export function Trajectory(props: Readonly<{
     return ids;
   }, [rows, virtualItems, virtualizer.scrollOffset]);
   const selected = props.events.find(({ eventId }) => eventId === props.selectedEventId) ?? null;
+  const scrollToLatest = useCallback((): void => {
+    if (rows.length === 0) return;
+    virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
+  }, [rows.length, virtualizer]);
+  const followTail = useFollowTail({ events: props.events, onFollowTail: scrollToLatest });
 
   useLayoutEffect(() => {
     const anchor = anchorRef.current;
@@ -139,13 +145,29 @@ export function Trajectory(props: Readonly<{
     return <section className="trajectory-empty" role="status">No trajectory events are available for this run.</section>;
   }
   return (
-    <div
-      ref={scrollRef}
-      className="trajectory-viewport"
-      role="listbox"
-      aria-label="Execution trajectory"
-    >
-      <div ref={stageRef} className="trajectory-stage" style={{ height: virtualizer.getTotalSize() }}>
+    <section className="trajectory-shell" aria-label="Live execution trajectory">
+      {followTail.newEventCount > 0 && (
+        <div className="trajectory-new-events">
+          <button type="button" onClick={() => {
+            followTail.jumpToLatest();
+            const latest = props.events.at(-1);
+            if (latest !== undefined) props.onSelect(latest.eventId);
+          }}>
+            {followTail.newEventCount} new {followTail.newEventCount === 1 ? "event" : "events"}
+          </button>
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            {followTail.newEventCount} new {followTail.newEventCount === 1 ? "event" : "events"} available
+          </span>
+        </div>
+      )}
+      <div
+        ref={scrollRef}
+        className="trajectory-viewport"
+        role="listbox"
+        aria-label="Execution trajectory"
+        onScroll={(event) => followTail.observeViewport(event.currentTarget)}
+      >
+        <div ref={stageRef} className="trajectory-stage" style={{ height: virtualizer.getTotalSize() }}>
         {virtualItems.map((item) => {
           const row = rows[item.index]!;
           const containsSelection = row.type === "event"
@@ -198,15 +220,16 @@ export function Trajectory(props: Readonly<{
             </div>
           );
         })}
-        <RelationshipOverlay
-          selected={selected}
-          visibleEventIds={visibleEventIds}
-          rowElements={eventRowRefs.current}
-          stageRef={stageRef}
-          viewportRef={scrollRef}
-          layoutKey={virtualItems.map(({ index, start, size }) => `${index}:${start}:${size}`).join("|")}
-        />
+          <RelationshipOverlay
+            selected={selected}
+            visibleEventIds={visibleEventIds}
+            rowElements={eventRowRefs.current}
+            stageRef={stageRef}
+            viewportRef={scrollRef}
+            layoutKey={virtualItems.map(({ index, start, size }) => `${index}:${start}:${size}`).join("|")}
+          />
+        </div>
       </div>
-    </div>
+    </section>
   );
 }

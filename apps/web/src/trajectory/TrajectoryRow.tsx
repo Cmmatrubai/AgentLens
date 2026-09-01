@@ -1,7 +1,9 @@
 import type { TrajectoryEventV1 } from "@agentlens/api-contract";
+import { motion, type MotionStyle } from "motion/react";
 import { useState } from "react";
 import type { KeyboardEvent, Ref } from "react";
 
+import { useMotionPolicy } from "../motion/motionPolicy.js";
 import { uniqueRelationships } from "./relationships.js";
 import type { TrajectoryLayoutRow } from "./types.js";
 
@@ -71,6 +73,7 @@ export function TrajectoryRow(props: Readonly<{
   const activeEvent = selectedMember ?? primary;
   const selected = selectedMember !== undefined;
   const presentation = status(activeEvent);
+  const motionPolicy = useMotionPolicy();
   const relationships = selected ? uniqueRelationships(activeEvent.relationships) : [];
   const actions: Array<Readonly<{
     kind: "select" | "expand" | "relationship";
@@ -118,16 +121,21 @@ export function TrajectoryRow(props: Readonly<{
   const actionLabel = actions.length <= 1 ? "" :
     ` Use Left and Right Arrow to choose a row action. Actions: ${actions.map(({ label }) => label).join("; ")}. Current action: ${currentAction.label}.`;
   return (
-    <div
+    <motion.div
       ref={props.rowRef}
       role="option"
       aria-selected={selected}
+      aria-expanded={props.row.type === "lifecycle_group" ? props.row.expanded : undefined}
       aria-label={`${activeEvent.safeSummary}. ${provenanceLabels[activeEvent.provenance]}. ${presentation.label}.${actionLabel}`}
       aria-keyshortcuts={actions.length > 1 ? "ArrowLeft ArrowRight Enter Space" : "Enter Space"}
       className={`trajectory-row trajectory-row--${activeEvent.provenance}${selected ? " trajectory-row--selected" : ""}`}
       data-event-id={activeEvent.eventId}
       data-expanded={props.row.type === "lifecycle_group" ? props.row.expanded : undefined}
       data-sequence={activeEvent.sequence}
+      data-motion={motionPolicy.reduced ? "reduced" : "standard"}
+      style={{
+        "--selection-duration": `${motionPolicy.selectionDurationMs}ms`
+      } as unknown as MotionStyle}
       tabIndex={props.tabIndex}
       onClick={() => props.onSelect(activeEvent.eventId)}
       onKeyDown={(keyboard) => {
@@ -156,9 +164,25 @@ export function TrajectoryRow(props: Readonly<{
         <span>{provenanceLabels[activeEvent.provenance]}</span>
       </span>
       <span aria-hidden="true" className="trajectory-row__spine-node" />
-      <article className="trajectory-row__card">
+      <motion.article
+        className="trajectory-row__card"
+        initial={false}
+        animate={{
+          boxShadow: selected
+            ? "inset 3px 0 0 var(--cyan)"
+            : "inset 0 0 0 rgb(0 0 0 / 0)"
+        }}
+        transition={motionPolicy.selection}
+        layout="size"
+      >
         {props.row.type === "lifecycle_group" && props.row.expanded ? (
-          <div className="trajectory-row__members" aria-hidden="true">
+          <motion.div
+            className="trajectory-row__members"
+            aria-hidden="true"
+            initial={false}
+            layout="size"
+            transition={motionPolicy.lifecycle}
+          >
             {props.row.events.map((event) => (
               <section
                 className={`trajectory-row__member${event.eventId === props.selectedEventId
@@ -173,7 +197,7 @@ export function TrajectoryRow(props: Readonly<{
                 <EventPresentation event={event} />
               </section>
             ))}
-          </div>
+          </motion.div>
         ) : <EventPresentation event={activeEvent} />}
         {props.row.type === "lifecycle_group" && (
           <div className="trajectory-row__group">
@@ -210,7 +234,7 @@ export function TrajectoryRow(props: Readonly<{
             ))}
           </div>
         )}
-      </article>
-    </div>
+      </motion.article>
+    </motion.div>
   );
 }

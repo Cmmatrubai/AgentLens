@@ -1,5 +1,5 @@
 import { browserAddressableEventIdV1Schema } from "@agentlens/api-contract";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { useAgentLensApi } from "../api/queries.js";
@@ -9,9 +9,11 @@ import { TrajectoryToolbar } from "../trajectory/TrajectoryToolbar.js";
 import { useTrajectoryPages } from "../trajectory/useTrajectoryPages.js";
 import { RunHeader } from "./RunHeader.js";
 import { RunWorkspace } from "./RunWorkspace.js";
+import { useActiveRunPolling } from "./useActiveRunPolling.js";
 
 function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
   const client = useAgentLensApi();
+  const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const eventValues = searchParams.getAll("event");
   const hasEventQuery = searchParams.has("event");
@@ -24,6 +26,14 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
     queryFn: ({ signal }) => client.getRun(runId, signal)
   });
   const trajectory = useTrajectoryPages(runId, selectedEventId);
+  const polling = useActiveRunPolling({
+    client,
+    runId,
+    status: trajectory.state === "ready" ? run.data?.status : undefined,
+    events: trajectory.events,
+    onRun: (nextRun) => queryClient.setQueryData(queryKeys.run(runId), nextRun),
+    onPage: trajectory.appendPage
+  });
   const select = (eventId: string): void => setSearchParams({ event: eventId });
 
   if (run.isPending) return <div className="loading-state" role="status">Loading run evidence…</div>;
@@ -34,6 +44,16 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
       <RunHeader run={run.data} onAssessmentSaved={select} />
       {invalidEventQuery && (
         <section className="trajectory-selection-error" role="alert">The selected event link is invalid.</section>
+      )}
+      {polling.degraded && (
+        <p className="live-evidence-state live-evidence-state--degraded" role="status" aria-label="Live evidence status">
+          Live evidence temporarily unavailable · retrying automatically.
+        </p>
+      )}
+      {polling.error !== null && (
+        <p className="live-evidence-state live-evidence-state--error" role="alert">
+          Live evidence polling stopped because the local read contract failed.
+        </p>
       )}
       <TrajectoryToolbar
         eventCount={trajectory.events.length}
