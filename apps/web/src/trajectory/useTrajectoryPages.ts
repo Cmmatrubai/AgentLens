@@ -196,6 +196,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
       signal: controller.signal
     }).then((resolution) => {
       if (controller.signal.aborted || selectionRequestRef.current !== identity) return;
+      selectionRequestRef.current = null;
       if (resolution.state === "resolved" && resolution.page !== null) {
         try {
           commitPage(resolution.page);
@@ -209,12 +210,15 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
       }
     }).catch(() => {
       if (!controller.signal.aborted && selectionRequestRef.current === identity) {
+        selectionRequestRef.current = null;
         setSelectionState("unavailable");
       }
     });
     return () => {
-      controller.abort();
-      if (selectionRequestRef.current === identity) selectionRequestRef.current = null;
+      if (selectionRequestRef.current === identity) {
+        controller.abort();
+        selectionRequestRef.current = null;
+      }
     };
   }, [client, commitPage, events, runId, selectedEventId, state]);
 

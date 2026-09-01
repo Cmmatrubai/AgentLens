@@ -130,7 +130,8 @@ describe("trajectory request ownership", () => {
     const detailY = deferred<EventDetailV1>();
     const client = {
       listRuns: vi.fn(), getRun: vi.fn(),
-      getEvent: vi.fn((_runId: string, eventId: string) => eventId === "event-x" ? detailX.promise : detailY.promise),
+      getEvent: vi.fn((_runId: string, eventId: string, _signal?: AbortSignal) =>
+        eventId === "event-x" ? detailX.promise : detailY.promise),
       getEvents: vi.fn((_runId: string, query: { aroundSequence?: number }) => Promise.resolve(
         query.aroundSequence === 40
           ? { ...page("run-a", [selectedX], { hasEarlier: true, latest: 100 }), mode: "around" as const }
@@ -158,6 +159,8 @@ describe("trajectory request ownership", () => {
 
     expect(view.result.current.events.some(({ eventId }) => eventId === "event-x")).toBe(false);
     expect(view.result.current.selectionState).toBe("idle");
+    const selectedYSignal = client.getEvent.mock.calls.find(([, eventId]) => eventId === "event-y")?.[2];
+    expect(selectedYSignal?.aborted).toBe(false);
   });
 
   it("aborts and ignores a cursor page after navigation resets every run-scoped state", async () => {
