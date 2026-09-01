@@ -1,5 +1,5 @@
 import type { TrajectoryEventV1 } from "@agentlens/api-contract";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { KeyboardEvent, Ref } from "react";
 
 import { uniqueRelationships } from "./relationships.js";
@@ -67,22 +67,23 @@ export function TrajectoryRow(props: Readonly<{
 }>) {
   const events = props.row.type === "event" ? [props.row.event] : props.row.events;
   const primary = events.at(-1)!;
-  const selected = events.some(({ eventId }) => eventId === props.selectedEventId);
-  const relationshipSource = events.find(({ eventId }) => eventId === props.selectedEventId) ?? primary;
-  const presentation = status(primary);
-  const relationships = selected ? uniqueRelationships(relationshipSource.relationships) : [];
+  const selectedMember = events.find(({ eventId }) => eventId === props.selectedEventId);
+  const activeEvent = selectedMember ?? primary;
+  const selected = selectedMember !== undefined;
+  const presentation = status(activeEvent);
+  const relationships = selected ? uniqueRelationships(activeEvent.relationships) : [];
   const actions: Array<Readonly<{
     kind: "select" | "expand" | "relationship";
     label: string;
     invoke: () => void;
   }>> = [{
     kind: "select",
-    label: `Select event ${primary.eventId}`,
-    invoke: () => props.onSelect(primary.eventId)
+    label: `Select event ${activeEvent.eventId}`,
+    invoke: () => props.onSelect(activeEvent.eventId)
   }];
   if (props.row.type === "lifecycle_group") {
     for (const event of props.row.events) {
-      if (event.eventId === primary.eventId) continue;
+      if (event.eventId === activeEvent.eventId) continue;
       actions.push({
         kind: "select",
         label: `Select immutable event ${event.eventId}`,
@@ -102,9 +103,18 @@ export function TrajectoryRow(props: Readonly<{
       invoke: () => props.onRelationshipJump(relationship.eventId)
     });
   }
-  const [actionIndex, setActionIndex] = useState(0);
-  useEffect(() => setActionIndex(0), [props.row.key, props.selectedEventId]);
-  const currentAction = actions[Math.min(actionIndex, actions.length - 1)]!;
+  const actionContext = `${props.row.key}:${activeEvent.eventId}`;
+  const [actionCursor, setActionCursor] = useState<Readonly<{ context: string; index: number }>>({
+    context: actionContext,
+    index: 0
+  });
+  if (actionCursor.context !== actionContext) {
+    setActionCursor({ context: actionContext, index: 0 });
+  }
+  const actionIndex = actionCursor.context === actionContext
+    ? Math.min(actionCursor.index, actions.length - 1)
+    : 0;
+  const currentAction = actions[actionIndex]!;
   const actionLabel = actions.length <= 1 ? "" :
     ` Use Left and Right Arrow to choose a row action. Actions: ${actions.map(({ label }) => label).join("; ")}. Current action: ${currentAction.label}.`;
   return (
@@ -112,21 +122,24 @@ export function TrajectoryRow(props: Readonly<{
       ref={props.rowRef}
       role="option"
       aria-selected={selected}
-      aria-label={`${primary.safeSummary}. ${provenanceLabels[primary.provenance]}. ${presentation.label}.${actionLabel}`}
+      aria-label={`${activeEvent.safeSummary}. ${provenanceLabels[activeEvent.provenance]}. ${presentation.label}.${actionLabel}`}
       aria-keyshortcuts={actions.length > 1 ? "ArrowLeft ArrowRight Enter Space" : "Enter Space"}
-      className={`trajectory-row trajectory-row--${primary.provenance}${selected ? " trajectory-row--selected" : ""}`}
-      data-event-id={primary.eventId}
+      className={`trajectory-row trajectory-row--${activeEvent.provenance}${selected ? " trajectory-row--selected" : ""}`}
+      data-event-id={activeEvent.eventId}
       data-expanded={props.row.type === "lifecycle_group" ? props.row.expanded : undefined}
-      data-sequence={primary.sequence}
+      data-sequence={activeEvent.sequence}
       tabIndex={props.tabIndex}
-      onClick={() => props.onSelect(primary.eventId)}
+      onClick={() => props.onSelect(activeEvent.eventId)}
       onKeyDown={(keyboard) => {
         if ((keyboard.key === "ArrowLeft" || keyboard.key === "ArrowRight") && actions.length > 1) {
           keyboard.preventDefault();
           keyboard.stopPropagation();
-          setActionIndex((current) => keyboard.key === "ArrowRight"
-            ? (current + 1) % actions.length
-            : (current - 1 + actions.length) % actions.length);
+          setActionCursor({
+            context: actionContext,
+            index: keyboard.key === "ArrowRight"
+              ? (actionIndex + 1) % actions.length
+              : (actionIndex - 1 + actions.length) % actions.length
+          });
           return;
         }
         if (keyboard.key === "Enter" || keyboard.key === " ") {
@@ -140,7 +153,7 @@ export function TrajectoryRow(props: Readonly<{
     >
       <span className="trajectory-row__gutter">
         <span aria-hidden="true" className="trajectory-row__shape" />
-        <span>{provenanceLabels[primary.provenance]}</span>
+        <span>{provenanceLabels[activeEvent.provenance]}</span>
       </span>
       <span aria-hidden="true" className="trajectory-row__spine-node" />
       <article className="trajectory-row__card">
@@ -161,7 +174,7 @@ export function TrajectoryRow(props: Readonly<{
               </section>
             ))}
           </div>
-        ) : <EventPresentation event={primary} />}
+        ) : <EventPresentation event={activeEvent} />}
         {props.row.type === "lifecycle_group" && (
           <div className="trajectory-row__group">
             <span>{props.row.events.length} immutable lifecycle events</span>
@@ -182,7 +195,7 @@ export function TrajectoryRow(props: Readonly<{
             >{props.row.expanded ? "Collapse lifecycle events" : "Expand lifecycle events"}</span>
           </div>
         )}
-        {primary.presentationClass === "unknown" && (
+        {activeEvent.presentationClass === "unknown" && (
           <p className="trajectory-row__unsupported">Unsupported event kind · detail unavailable</p>
         )}
         {relationships.length > 0 && (

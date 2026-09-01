@@ -740,3 +740,106 @@ visual browser evidence.
   pure identity, repeatable interaction, measurement, focus, selection, relationship,
   separated-group, and run-reset regressions.
 - this report.
+
+## Review-fix round 6 after `e878bed`
+
+The final accessibility finding was reproduced with real controlled selection state.
+Although the URL/inspector selection could move to the immutable start event, the
+stable composite row continued to derive its presentation and first action from the
+terminal member. Its selection-change effect also reset the action cursor to that
+terminal action. The focused option therefore announced and reselected the terminal
+event after the start event had become the actual selection.
+
+The narrow fix derives an active member from the controlled `selectedEventId`, falling
+back to the terminal presentation only when no group member is selected. Presentation,
+metadata, relationships, click behavior, and the first select action now use that
+active member. A member-scoped action cursor is reset synchronously when the controlled
+member changes, so no effect race can revive an action belonging to a previously
+selected member. Stable group identity, canonical member order, the single tab stop,
+repeatable Expand/Collapse, wrapper measurement, and relationship geometry remain
+unchanged.
+
+### Round-6 RED evidence
+
+```text
+pnpm exec vitest --run apps/web/test/trajectory.test.tsx \
+  -t "controlled selected lifecycle member"
+Test Files  1 failed (1)
+Tests       1 failed, 16 skipped (17)
+Failure     controlled selection changed to controlled-start, but the focused option
+            still exposed data-event-id="controlled-terminal"
+```
+
+The first GREEN attempt correctly changed the row presentation but exposed a second
+part of the same action-cursor bug: after switching terminal -> start, the old start
+context resumed its prior Collapse action. The final member-scoped cursor reset keeps
+the current action at `Select event <selected member>` for every external or internal
+selection transition.
+
+### Round-6 GREEN and fresh verification
+
+```text
+Focused controlled-selection regression
+Test Files  1 passed (1)
+Tests       1 passed, 16 skipped (17)
+
+Direct projector/trajectory GREEN
+Test Files  2 passed (2)
+Tests       36 passed (36)
+
+Full Task 7.10 plus contract/projection matrix
+Test Files  8 passed (8)
+Tests       118 passed (118)
+
+Adjacent Tasks 7.6-7.9 matrix
+Test Files  13 passed (13)
+Tests       459 passed (459)
+
+pnpm typecheck
+$ tsc -b --pretty false
+exit 0
+
+pnpm build
+129 modules transformed
+bootstrap CSS 18.04 kB (gzip 4.18 kB)
+bootstrap JS 343.66 kB (gzip 101.77 kB)
+exit 0
+
+pnpm test
+Test Files  61 passed (61)
+Tests       1258 passed (1258)
+exit 0
+
+git diff --check
+exit 0
+```
+
+The new controlled regression exercises the production rerender path rather than
+merely spying on `onSelect`. It proves terminal default presentation, keyboard
+selection of the start member, active start summary/status/sequence/relationship and
+current-action announcements, Enter stability, external movement between both
+members, expanded mouse selection of both immutable members, stable focus, and exactly
+one roving tab stop.
+
+Fresh source-addition scans found no polling/timers, browser storage/cookies,
+bearer/bootstrap-token handling, unsafe HTML, content/native/artifact/evidence fetches,
+external URLs, or absolute user paths. The production build contains no source maps,
+absolute user paths, scratch/prototype references, or source-map trailers. The source
+still reserves `data-index` exclusively for virtual wrappers and uses `data-sequence`
+for inner event metadata. The round-6 diff is limited to the grouped-row component,
+its focused trajectory regression, and this report; `.scratch-e2e-ONFuP0/` remains
+untouched, untracked, and excluded from staging.
+
+### Round-6 browser evidence boundary and residual
+
+No browser verification was performed or claimed in this round; the reviewer owns the
+real-browser acceptance evidence. Automated controlled-state coverage verifies the
+reported semantics but is not a substitute for confirming the focused option's spoken
+announcement in the in-app browser.
+
+### Round-6 changed files
+
+- `apps/web/src/trajectory/TrajectoryRow.tsx`: selected-member presentation and
+  deterministic member-scoped current action.
+- `apps/web/test/trajectory.test.tsx`: controlled keyboard/mouse selection regression.
+- this report.

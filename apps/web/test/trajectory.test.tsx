@@ -1,6 +1,7 @@
 import type { TrajectoryEventV1 } from "@agentlens/api-contract";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { Trajectory } from "../src/trajectory/Trajectory.js";
@@ -352,6 +353,77 @@ describe("virtualized execution trajectory", () => {
     await userEvent.keyboard("{ArrowRight}{Enter}");
     expect(onRelationshipJump).toHaveBeenCalledWith("event-901");
     expect(document.querySelectorAll('[role="option"][tabindex="0"]')).toHaveLength(1);
+  });
+
+  it("presents the controlled selected lifecycle member as the current row action", async () => {
+    const groupKey = `grp_${"f".repeat(64)}`;
+    const fixture = events(2).map((item, index) => ({
+      ...item,
+      eventId: index === 0 ? "controlled-start" : "controlled-terminal",
+      kind: index === 0 ? "turn.started" : "turn.completed",
+      status: { state: "known" as const, value: index === 0 ? "in_progress" as const : "completed" as const },
+      presentationClass: "lifecycle" as const,
+      lifecycleGroupKey: groupKey,
+      lifecycle: {
+        domain: "turn" as const,
+        phase: index === 0 ? "started" as const : "completed" as const
+      },
+      relationships: index === 0
+        ? [{ type: "correlates_with" as const, eventId: "controlled-terminal" }]
+        : []
+    }));
+    function ControlledWorkspace() {
+      const [selectedEventId, setSelectedEventId] = useState("controlled-terminal");
+      return (
+        <>
+          <output aria-label="Controlled selection">{selectedEventId}</output>
+          <RunWorkspace
+            runId="run-controlled-selection"
+            events={fixture}
+            selectedEventId={selectedEventId}
+            selectionState="idle"
+            onSelect={setSelectedEventId}
+          />
+        </>
+      );
+    }
+
+    const { container } = render(<ControlledWorkspace />);
+    const row = screen.getByRole("option");
+    row.focus();
+    expect(row).toHaveAttribute("data-event-id", "controlled-terminal");
+    expect(row).toHaveAccessibleName(/Safe event 2.*Completed.*Current action: Select event controlled-terminal/);
+
+    await userEvent.keyboard("{ArrowRight}{Enter}");
+    await waitFor(() => expect(screen.getByRole("status", { name: "Controlled selection" }))
+      .toHaveTextContent("controlled-start"));
+    expect(screen.getByRole("option")).toBe(row);
+    expect(row).toHaveAttribute("data-event-id", "controlled-start");
+    expect(row).toHaveAttribute("data-sequence", "1");
+    expect(row).toHaveAccessibleName(/Safe event 1.*In progress.*Current action: Select event controlled-start/);
+    expect(row).toHaveAccessibleName(/Jump to correlates with event controlled-terminal/);
+    expect(document.activeElement).toBe(row);
+
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("status", { name: "Controlled selection" })).toHaveTextContent("controlled-start");
+    await userEvent.keyboard("{ArrowRight}{Enter}");
+    await waitFor(() => expect(row).toHaveAttribute("data-event-id", "controlled-terminal"));
+    expect(row).toHaveAccessibleName(/Current action: Select event controlled-terminal/);
+    await userEvent.keyboard("{ArrowRight}{Enter}");
+    await waitFor(() => expect(row).toHaveAttribute("data-event-id", "controlled-start"));
+
+    await userEvent.keyboard("{ArrowRight}{ArrowRight}{Enter}");
+    await waitFor(() => expect(container.querySelectorAll("[data-lifecycle-member]")).toHaveLength(2));
+    await userEvent.click(container.querySelector<HTMLElement>('[data-lifecycle-member="controlled-terminal"]')!);
+    await waitFor(() => expect(row).toHaveAttribute("data-event-id", "controlled-terminal"));
+    expect(row).toHaveAccessibleName(/Safe event 2.*Current action: Select event controlled-terminal/);
+    await userEvent.click(container.querySelector<HTMLElement>('[data-lifecycle-member="controlled-start"]')!);
+    await waitFor(() => expect(row).toHaveAttribute("data-event-id", "controlled-start"));
+    expect(row).toHaveAccessibleName(/Safe event 1.*Current action: Select event controlled-start/);
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("status", { name: "Controlled selection" })).toHaveTextContent("controlled-start");
+    expect(document.querySelectorAll('[role="option"][tabindex="0"]')).toHaveLength(1);
+    expect(document.activeElement).toBe(row);
   });
 
   it("expands, collapses, and re-expands one stable measured lifecycle composite", async () => {
