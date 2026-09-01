@@ -217,6 +217,42 @@ describe("trajectory request ownership", () => {
     expect(view.result.current.events.map(({ sequence }) => sequence)).toEqual([1, 50]);
     expect(view.result.current.pagingState).toBe("idle");
   });
+
+  it("records cursor direction so an empty response consumes only that outer boundary", async () => {
+    const emptyLater = {
+      schemaVersion: 1,
+      runId: "run-a",
+      mode: "cursor",
+      items: [],
+      window: {
+        state: "empty",
+        latestCommittedSequence: 100,
+        hasEarlier: false,
+        hasLater: false,
+        earlierCursor: null,
+        laterCursor: null
+      }
+    } satisfies TrajectoryPageV1;
+    const getEvents = vi.fn((_runId: string, query: { cursor?: string }) =>
+      Promise.resolve(query.cursor === undefined
+        ? page("run-a", [event("run-a", "event-50", 50)], {
+            hasEarlier: true, hasLater: true, latest: 100
+          })
+        : emptyLater));
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    await waitFor(() => expect(view.result.current.hasLater).toBe(true));
+
+    await act(async () => { await view.result.current.loadLater?.(); });
+
+    expect(view.result.current.hasLater).toBe(false);
+    expect(view.result.current.hasEarlier).toBe(true);
+    expect(getEvents).toHaveBeenLastCalledWith(
+      "run-a",
+      { limit: 100, cursor: "later-run-a" },
+      expect.any(AbortSignal)
+    );
+  });
 });
 
 describe("trajectory merge containment", () => {

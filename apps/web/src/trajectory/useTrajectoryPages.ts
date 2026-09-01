@@ -32,8 +32,14 @@ export async function resolveTrajectorySelection(input: Readonly<{
 
 const pageLimit = 100;
 
+export type TrajectoryCursorRequest = Readonly<{
+  direction: "earlier" | "later";
+  cursor: string;
+}>;
+
 export function trajectoryPageCursors(
-  pages: readonly TrajectoryPageV1[]
+  pages: readonly TrajectoryPageV1[],
+  requests: readonly (TrajectoryCursorRequest | null)[] = []
 ): Readonly<{ earlier: string | null; later: string | null }> {
   const nonempty = pages.filter((page) => page.window.state === "nonempty");
   if (nonempty.length === 0) {
@@ -63,15 +69,22 @@ export function trajectoryPageCursors(
       earlier ??= right.window.earlierCursor;
     }
   }
-  return {
-    earlier,
-    later
-  };
+  for (let index = 0; index < pages.length; index += 1) {
+    const page = pages[index]!;
+    const request = requests[index];
+    if (page.mode !== "cursor" || page.window.state !== "empty" || request == null) continue;
+    if (request.direction === "earlier" && earlier === request.cursor) earlier = null;
+    if (request.direction === "later" && later === request.cursor) later = null;
+  }
+  return { earlier, later };
 }
 
 export function useTrajectoryPages(runId: string, selectedEventId: string | null) {
   const client = useAgentLensApi();
-  const [pages, setPages] = useState<readonly TrajectoryPageV1[]>([]);
+  const [entries, setEntries] = useState<readonly Readonly<{
+    page: TrajectoryPageV1;
+    request: TrajectoryCursorRequest | null;
+  }>[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<unknown>(null);
   const [selectionState, setSelectionState] = useState<"idle" | "resolving" | "unavailable">("idle");
@@ -79,14 +92,18 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
   const initialRequestRef = useRef<object | null>(null);
   const selectionRequestRef = useRef<object | null>(null);
   const cursorRequestRef = useRef<Readonly<{ identity: object; controller: AbortController }> | null>(null);
-  const pagesRef = useRef<readonly TrajectoryPageV1[]>([]);
+  const entriesRef = useRef<readonly Readonly<{
+    page: TrajectoryPageV1;
+    request: TrajectoryCursorRequest | null;
+  }>[]>([]);
+  const pages = useMemo(() => entries.map(({ page }) => page), [entries]);
   const events = useMemo(() => mergeTrajectoryPages(pages), [pages]);
 
-  const commitPage = useCallback((page: TrajectoryPageV1): void => {
-    const candidate = [...pagesRef.current, page];
-    mergeTrajectoryPages(candidate);
-    pagesRef.current = candidate;
-    setPages(candidate);
+  const commitPage = useCallback((page: TrajectoryPageV1, request: TrajectoryCursorRequest | null = null): void => {
+    const candidate = [...entriesRef.current, { page, request }];
+    mergeTrajectoryPages(candidate.map((entry) => entry.page));
+    entriesRef.current = candidate;
+    setEntries(candidate);
   }, []);
 
   useEffect(() => {
@@ -96,8 +113,8 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     cursorRequestRef.current?.controller.abort();
     cursorRequestRef.current = null;
     selectionRequestRef.current = null;
-    pagesRef.current = [];
-    setPages([]);
+    entriesRef.current = [];
+    setEntries([]);
     setState("loading");
     setError(null);
     setSelectionState("idle");
@@ -161,7 +178,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     };
   }, [client, commitPage, events, runId, selectedEventId, state]);
 
-  const loadCursor = useCallback(async (cursor: string) => {
+  const loadCursor = useCallback(async (direction: "earlier" | "later", cursor: string) => {
     cursorRequestRef.current?.controller.abort();
     const controller = new AbortController();
     const identity = {};
@@ -170,7 +187,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     try {
       const page = await client.getEvents(runId, { limit: pageLimit, cursor }, controller.signal);
       if (controller.signal.aborted || cursorRequestRef.current?.identity !== identity) return;
-      commitPage(page);
+      commitPage(page, { direction, cursor });
       setPagingState("idle");
     } catch {
       if (!controller.signal.aborted && cursorRequestRef.current?.identity === identity) {
@@ -179,7 +196,10 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     }
   }, [client, commitPage, runId]);
 
-  const cursors = useMemo(() => trajectoryPageCursors(pages), [pages]);
+  const cursors = useMemo(() => trajectoryPageCursors(
+    pages,
+    entries.map(({ request }) => request)
+  ), [entries, pages]);
 
   return {
     events,
@@ -189,7 +209,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     pagingState,
     hasEarlier: cursors.earlier !== null && pagingState !== "loading",
     hasLater: cursors.later !== null && pagingState !== "loading",
-    loadEarlier: cursors.earlier === null ? null : () => loadCursor(cursors.earlier!),
-    loadLater: cursors.later === null ? null : () => loadCursor(cursors.later!)
+    loadEarlier: cursors.earlier === null ? null : () => loadCursor("earlier", cursors.earlier!),
+    loadLater: cursors.later === null ? null : () => loadCursor("later", cursors.later!)
   } as const;
 }

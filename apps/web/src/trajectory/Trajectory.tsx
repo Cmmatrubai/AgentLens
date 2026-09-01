@@ -37,7 +37,8 @@ export function Trajectory(props: Readonly<{
     overscan: 3,
     rangeExtractor: (range) => {
       const indexes = defaultRangeExtractor(range);
-      if (focusIndex >= 0 && focusIndex < rows.length && !indexes.includes(focusIndex)) {
+      if (pendingFocusRef.current !== null && focusIndex >= 0 && focusIndex < rows.length &&
+          !indexes.includes(focusIndex)) {
         indexes.push(focusIndex);
         indexes.sort((left, right) => left - right);
       }
@@ -87,16 +88,23 @@ export function Trajectory(props: Readonly<{
   }, [rows, virtualizer]);
 
   useEffect(() => {
-    const first = virtualItems[0];
-    if (first === undefined || scrollRef.current === null) return;
+    const viewport = scrollRef.current;
+    if (viewport === null) return;
+    const viewportStart = viewport.scrollTop;
+    const viewportEnd = viewportStart + (viewport.clientHeight || 520);
+    const first = virtualItems.find((item) => item.end > viewportStart && item.start < viewportEnd);
+    if (first === undefined) return;
     const firstRow = rows[first.index]!;
     anchorRef.current = {
       eventId: firstRow.type === "event"
         ? firstRow.event.eventId
         : firstRow.events[0]!.eventId,
-      offset: first.start - scrollRef.current.scrollTop
+      offset: first.start - viewportStart
     };
-    if (!virtualItems.some(({ index }) => index === focusIndex)) setFocusIndex(first.index);
+    const focusInside = viewport.contains(document.activeElement);
+    if (pendingFocusRef.current === null && !focusInside && first.index !== focusIndex) {
+      setFocusIndex(first.index);
+    }
   }, [focusIndex, rows, virtualItems]);
 
   useEffect(() => {
@@ -163,7 +171,6 @@ export function Trajectory(props: Readonly<{
                 onSelect={props.onSelect}
                 onExpandGroup={(key) => props.onExpandGroup?.(key)}
                 onRelationshipJump={props.onRelationshipJump}
-                visibleEventIds={visibleEventIds}
                 onKeyDown={(keyboard) => {
                   if (keyboard.key === "ArrowDown" || keyboard.key === "ArrowUp" ||
                       keyboard.key === "Home" || keyboard.key === "End") {
@@ -172,9 +179,6 @@ export function Trajectory(props: Readonly<{
                     if (keyboard.key === "ArrowUp") focus(item.index - 1);
                     if (keyboard.key === "Home") focus(0);
                     if (keyboard.key === "End") focus(rows.length - 1);
-                  } else if (keyboard.key === "Enter" || keyboard.key === " ") {
-                    keyboard.preventDefault();
-                    props.onSelect(primary.eventId);
                   } else if (keyboard.key === "Escape") {
                     keyboard.preventDefault();
                     props.onEscapeDeepEvidence();

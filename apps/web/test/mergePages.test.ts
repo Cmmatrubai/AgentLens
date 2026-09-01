@@ -150,6 +150,34 @@ describe("mergeTrajectoryPages", () => {
     ])).toEqual({ earlier: null, later: null });
   });
 
+  it("clears only the exact consumed outer boundary after an empty cursor response", () => {
+    const middle = page("head", [event("event-50", 50)], {
+      hasEarlier: true, hasLater: true, latest: 100
+    });
+    const empty = page("cursor", [], { latest: 100 });
+
+    expect(trajectoryPageCursors(
+      [middle, empty],
+      [null, { direction: "later", cursor: "later" }]
+    )).toEqual({ earlier: "earlier", later: null });
+    expect(trajectoryPageCursors(
+      [middle, empty],
+      [null, { direction: "earlier", cursor: "earlier" }]
+    )).toEqual({ earlier: null, later: "later" });
+  });
+
+  it("does not let a repeated or nonmatching empty response erase another boundary", () => {
+    const middle = page("head", [event("event-50", 50)], {
+      hasEarlier: true, hasLater: true, latest: 100
+    });
+    const empty = page("cursor", [], { latest: 100 });
+
+    expect(trajectoryPageCursors(
+      [middle, empty, empty],
+      [null, { direction: "later", cursor: "already-consumed" }, { direction: "earlier", cursor: "earlier" }]
+    )).toEqual({ earlier: null, later: "later" });
+  });
+
   it("retains bounded cursors into a gap between head and around windows", () => {
     expect(trajectoryPageCursors([
       page("head", [event("event-1", 1), event("event-2", 2)], { hasLater: true, latest: 100 }),

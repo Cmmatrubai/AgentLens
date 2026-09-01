@@ -245,6 +245,15 @@
   margin-top: var(--space-3);
 }
 
+.trajectory-row__action {
+  padding: 4px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
 .trajectory-row__unsupported,
 .trajectory-inspector__boundary {
   color: var(--amber);

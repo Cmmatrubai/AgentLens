@@ -82,6 +82,77 @@ describe("projectTrajectory", () => {
       ]);
   });
 
+  it.each([
+    ["command", "command"],
+    ["tool", "tool"]
+  ] as const)("compacts an exact contiguous %s item start and terminal", (_label, presentationClass) => {
+    const start = event(`${presentationClass}-start`, 1, {
+      kind: presentationClass,
+      presentationClass,
+      status: { state: "known", value: "in_progress" },
+      lifecycleGroupKey: groupA
+    });
+    const terminal = event(`${presentationClass}-terminal`, 2, {
+      kind: presentationClass,
+      presentationClass,
+      status: { state: "known", value: "completed" },
+      lifecycleGroupKey: groupA
+    });
+
+    expect(projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set() }))
+      .toEqual([{
+        type: "lifecycle_group",
+        key: `lifecycle:${groupA}:${presentationClass}-start:1:${presentationClass}-terminal:2`,
+        events: [start, terminal],
+        expanded: false
+      }]);
+  });
+
+  it("does not compact mismatched command/tool item domains with the same opaque key", () => {
+    const rows = projectTrajectory({
+      events: [
+        event("command-start", 1, {
+          kind: "command", presentationClass: "command",
+          status: { state: "known", value: "in_progress" }, lifecycleGroupKey: groupA
+        }),
+        event("tool-terminal", 2, {
+          kind: "tool", presentationClass: "tool",
+          status: { state: "known", value: "completed" }, lifecycleGroupKey: groupA
+        })
+      ],
+      expandedGroupKeys: new Set()
+    });
+
+    expect(rows.map(({ type }) => type)).toEqual(["event", "event"]);
+  });
+
+  it("does not compact repeated command starts or terminals", () => {
+    const command = (eventId: string, sequence: number, status: "in_progress" | "completed") =>
+      event(eventId, sequence, {
+        kind: "command",
+        presentationClass: "command",
+        status: { state: "known", value: status },
+        lifecycleGroupKey: groupA
+      });
+
+    expect(projectTrajectory({
+      events: [
+        command("command-start-1", 1, "in_progress"),
+        command("command-start-2", 2, "in_progress"),
+        command("command-terminal", 3, "completed")
+      ],
+      expandedGroupKeys: new Set()
+    }).every(({ type }) => type === "event")).toBe(true);
+    expect(projectTrajectory({
+      events: [
+        command("command-start", 1, "in_progress"),
+        command("command-terminal-1", 2, "completed"),
+        command("command-terminal-2", 3, "completed")
+      ],
+      expandedGroupKeys: new Set()
+    }).every(({ type }) => type === "event")).toBe(true);
+  });
+
   it("uses stable unique instance keys for separated pairs that reuse one opaque key", () => {
     const firstStart = event("start-1", 1, { lifecycleGroupKey: groupA });
     const firstTerminal = event("terminal-1", 2, {

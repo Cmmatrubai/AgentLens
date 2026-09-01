@@ -113,6 +113,7 @@ describe("virtualized execution trajectory", () => {
   });
 
   it("renders only selected visible connectors and uses a labeled jump for an unloaded target", async () => {
+    let targetTop = 180;
     const rect = (top: number, bottom: number, left = 0, right = 800): DOMRect => ({
       x: left, y: top, top, bottom, left, right, width: right - left, height: bottom - top,
       toJSON: () => ({})
@@ -122,7 +123,7 @@ describe("virtualized execution trajectory", () => {
         return rect(0, 520);
       }
       if (this.dataset.eventId === "event-1") return rect(40, 140, 100, 700);
-      if (this.dataset.eventId === "event-2") return rect(180, 280, 100, 700);
+      if (this.dataset.eventId === "event-2") return rect(targetTop, targetTop + 100, 100, 700);
       return rect(0, 132);
     });
     const fixture = events(50);
@@ -157,12 +158,94 @@ describe("virtualized execution trajectory", () => {
       .toBe("none");
     expect(container.querySelector("[data-global-relationship-graph]")).toBeNull();
 
-    await userEvent.click(screen.getByRole("button", {
-      name: "Jump to derived from event event-900"
-    }));
+    const jump = [...container.querySelectorAll<HTMLElement>('[data-row-action="relationship"]')]
+      .find((action) => action.textContent === "Jump to derived from event event-900");
+    expect(jump).toBeDefined();
+    await userEvent.click(jump!);
     expect(onRelationshipJump).toHaveBeenCalledWith("event-900");
-    expect(screen.getAllByRole("button", { name: "Jump to derived from event event-900" })).toHaveLength(1);
+    expect([...container.querySelectorAll('[data-row-action="relationship"]')].filter(
+      (action) => action.textContent === "Jump to derived from event event-900"
+    )).toHaveLength(1);
+    targetTop = 300;
+    fireEvent(window, new Event("resize"));
+    await waitFor(() => expect(connector).toHaveAttribute("y2", "350"));
     rectSpy.mockRestore();
+  });
+
+  it("offers grouped-event, expansion, and relationship actions through the one row tab stop", async () => {
+    const groupKey = `grp_${"b".repeat(64)}`;
+    const fixture = events(2).map((item, index) => ({
+      ...item,
+      eventId: index === 0 ? "group-start" : "group-terminal",
+      kind: index === 0 ? "turn.started" : "turn.completed",
+      status: { state: "known" as const, value: index === 0 ? "in_progress" as const : "completed" as const },
+      presentationClass: "lifecycle" as const,
+      lifecycleGroupKey: groupKey,
+      relationships: index === 1 ? [
+        { type: "derived_from" as const, eventId: "event-900" },
+        { type: "recovers" as const, eventId: "event-901" }
+      ] : []
+    }));
+    const onSelect = vi.fn();
+    const onExpandGroup = vi.fn();
+    const onRelationshipJump = vi.fn();
+    render(
+      <Trajectory
+        events={fixture}
+        selectedEventId="group-terminal"
+        expandedGroupKeys={new Set()}
+        onSelect={onSelect}
+        onExpandGroup={onExpandGroup}
+        onEscapeDeepEvidence={vi.fn()}
+        onRelationshipJump={onRelationshipJump}
+      />
+    );
+    const row = screen.getByRole("option");
+    expect(within(row).queryByRole("button")).toBeNull();
+    expect(row).toHaveAccessibleName(/Use Left and Right Arrow to choose a row action/);
+    expect(row).toHaveAccessibleName(/Jump to derived from event event-900/);
+    expect(row).toHaveAccessibleName(/Jump to recovers event event-901/);
+    row.focus();
+
+    await userEvent.keyboard("{Enter}");
+    expect(onSelect).toHaveBeenLastCalledWith("group-terminal");
+    await userEvent.keyboard("{ArrowRight}{Enter}");
+    expect(onSelect).toHaveBeenLastCalledWith("group-start");
+    await userEvent.keyboard("{ArrowRight}{Enter}");
+    expect(onExpandGroup).toHaveBeenCalledOnce();
+    await userEvent.keyboard("{ArrowRight}{Enter}");
+    expect(onRelationshipJump).toHaveBeenCalledWith("event-900");
+    await userEvent.keyboard("{ArrowRight}{Enter}");
+    expect(onRelationshipJump).toHaveBeenCalledWith("event-901");
+    expect(document.querySelectorAll('[role="option"][tabindex="0"]')).toHaveLength(1);
+  });
+
+  it("labels a same-group relationship as a row action without drawing a zero-length line", () => {
+    const groupKey = `grp_${"c".repeat(64)}`;
+    const fixture = events(2).map((item, index) => ({
+      ...item,
+      eventId: index === 0 ? "same-start" : "same-terminal",
+      kind: index === 0 ? "turn.started" : "turn.completed",
+      status: { state: "known" as const, value: index === 0 ? "in_progress" as const : "completed" as const },
+      presentationClass: "lifecycle" as const,
+      lifecycleGroupKey: groupKey,
+      relationships: index === 0 ? [{ type: "correlates_with" as const, eventId: "same-terminal" }] : []
+    }));
+    const { container } = render(
+      <Trajectory
+        events={fixture}
+        selectedEventId="same-start"
+        expandedGroupKeys={new Set()}
+        onSelect={vi.fn()}
+        onExpandGroup={vi.fn()}
+        onEscapeDeepEvidence={vi.fn()}
+        onRelationshipJump={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole("option")).toHaveAccessibleName(/Jump to correlates with event same-terminal/);
+    expect(container.querySelectorAll('[data-row-action="relationship"]')).toHaveLength(1);
+    expect(container.querySelector("[data-relationship-connector]")).toBeNull();
   });
 
   it("moves the sole roving tab stop to virtual End and Home destinations before focusing them", async () => {
@@ -188,28 +271,67 @@ describe("virtualized execution trajectory", () => {
     expect(screen.getAllByRole("option").filter((row) => row.tabIndex === 0)).toHaveLength(1);
   });
 
-  it("keeps relationship controls out of the tab order while retaining their row label", () => {
+  it("moves the roving entry to the visible window after outside focus and manual scroll", async () => {
+    render(
+      <>
+        <button type="button">Before trajectory</button>
+        <Trajectory
+          events={events(1_000)}
+          selectedEventId="event-1"
+          expandedGroupKeys={new Set()}
+          onSelect={vi.fn()}
+          onEscapeDeepEvidence={vi.fn()}
+          onRelationshipJump={vi.fn()}
+        />
+      </>
+    );
+    screen.getByRole("button", { name: "Before trajectory" }).focus();
+    const viewport = screen.getByRole("listbox");
+    Object.defineProperty(viewport, "scrollTop", { configurable: true, value: 144 * 40, writable: true });
+    fireEvent.scroll(viewport);
+
+    await waitFor(() => expect(screen.getAllByRole("option").some((row) =>
+      Number(row.dataset.index) >= 40
+    )).toBe(true));
+    const tabStops = screen.getAllByRole("option").filter((row) => row.tabIndex === 0);
+    expect(tabStops).toHaveLength(1);
+    expect(Number(tabStops[0]!.dataset.index)).toBeGreaterThanOrEqual(40);
+
+    await userEvent.tab();
+    expect(document.activeElement).toBe(tabStops[0]);
+    await userEvent.keyboard("{Home}");
+    await waitFor(() => expect(document.activeElement).toHaveAttribute("data-event-id", "event-1"));
+    expect(document.activeElement).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("keeps relationship actions in the row composite and its accessible label", async () => {
     const fixture = events(1_000);
     fixture[0] = {
       ...fixture[0]!,
       relationships: [{ type: "correlates_with", eventId: "event-900" }]
     };
-    render(
+    const onRelationshipJump = vi.fn();
+    const { container } = render(
       <Trajectory
         events={fixture}
         selectedEventId="event-1"
         expandedGroupKeys={new Set()}
         onSelect={vi.fn()}
         onEscapeDeepEvidence={vi.fn()}
-        onRelationshipJump={vi.fn()}
+        onRelationshipJump={onRelationshipJump}
       />
     );
 
     const selected = screen.getByRole("option", { selected: true });
-    const jump = within(selected).getByRole("button", { name: /Jump to correlates with event event-900/ });
-    expect(jump).toHaveAttribute("tabindex", "-1");
-    expect(selected).toHaveAccessibleName(/Related: correlates with event event-900/);
+    expect(within(selected).queryByRole("button")).toBeNull();
+    expect(container.querySelector('[data-row-action="relationship"]')).toHaveTextContent(
+      "Jump to correlates with event event-900"
+    );
+    expect(selected).toHaveAccessibleName(/Jump to correlates with event event-900/);
     expect(document.querySelectorAll('[role="option"][tabindex="0"]')).toHaveLength(1);
+    selected.focus();
+    await userEvent.keyboard("{ArrowRight}{Enter}");
+    expect(onRelationshipJump).toHaveBeenCalledWith("event-900");
   });
 
   it("resets expanded lifecycle instances when the run identity changes", async () => {
@@ -233,7 +355,9 @@ describe("virtualized execution trajectory", () => {
         onSelect={vi.fn()}
       />
     );
-    await userEvent.click(screen.getByRole("button", { name: "Expand lifecycle events" }));
+    const groupedRow = screen.getByRole("option");
+    groupedRow.focus();
+    await userEvent.keyboard("{ArrowRight}{ArrowRight}{Enter}");
     expect(screen.getAllByRole("option")).toHaveLength(2);
 
     view.rerender(

@@ -49,7 +49,7 @@ export function RelationshipOverlay(props: Readonly<{
       const sourceRect = source.getBoundingClientRect();
       const next = visible.flatMap((relationship): readonly Connector[] => {
         const target = props.rowElements.get(relationship.eventId);
-        if (target === undefined) return [];
+        if (target === undefined || target === source) return [];
         const targetRect = target.getBoundingClientRect();
         const sourceVisible = sourceRect.bottom > viewportRect.top && sourceRect.top < viewportRect.bottom;
         const targetVisible = targetRect.bottom > viewportRect.top && targetRect.top < viewportRect.bottom;
@@ -67,8 +67,12 @@ export function RelationshipOverlay(props: Readonly<{
     };
     measure();
     viewport.addEventListener("scroll", measure, { passive: true });
+    window.addEventListener("resize", measure);
     if (typeof ResizeObserver === "undefined") {
-      return () => viewport.removeEventListener("scroll", measure);
+      return () => {
+        viewport.removeEventListener("scroll", measure);
+        window.removeEventListener("resize", measure);
+      };
     }
     const observer = new ResizeObserver(measure);
     observer.observe(viewport);
@@ -80,6 +84,7 @@ export function RelationshipOverlay(props: Readonly<{
     }
     return () => {
       viewport.removeEventListener("scroll", measure);
+      window.removeEventListener("resize", measure);
       observer.disconnect();
     };
   }, [props.layoutKey, props.rowElements, props.selected, props.stageRef, props.viewportRef, visible]);

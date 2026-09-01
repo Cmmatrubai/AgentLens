@@ -7,20 +7,27 @@ function eventKey(event: TrajectoryEventV1): string {
 }
 
 function isGroupCandidate(event: TrajectoryEventV1): boolean {
-  return event.presentationClass === "lifecycle" &&
-    event.kind !== "recorder.recovery" &&
-    event.lifecycleGroupKey !== null;
+  return event.kind !== "recorder.recovery" &&
+    event.lifecycleGroupKey !== null &&
+    lifecyclePhase(event) !== null;
 }
 
 function lifecyclePhase(event: TrajectoryEventV1): Readonly<{
-  domain: "thread" | "turn";
+  domain: "thread" | "turn" | "command" | "tool";
   phase: "started" | "completed" | "failed" | "declined" | "interrupted";
 }> | null {
   const match = /^(thread|turn)\.(started|completed|failed|declined|interrupted)$/.exec(event.kind);
-  if (match === null) return null;
+  if (match !== null && event.presentationClass === "lifecycle") {
+    return {
+      domain: match[1] as "thread" | "turn",
+      phase: match[2] as "started" | "completed" | "failed" | "declined" | "interrupted"
+    };
+  }
+  if (event.presentationClass !== "command" && event.presentationClass !== "tool") return null;
+  if (event.status.state !== "known" || event.status.value === "unknown") return null;
   return {
-    domain: match[1] as "thread" | "turn",
-    phase: match[2] as "started" | "completed" | "failed" | "declined" | "interrupted"
+    domain: event.presentationClass,
+    phase: event.status.value === "in_progress" ? "started" : event.status.value
   };
 }
 
@@ -63,7 +70,10 @@ export function projectTrajectory(input: Readonly<{
     const current = input.events[index]!;
     const candidateKey = current.lifecycleGroupKey;
     let candidateEnd = index;
-    if (isGroupCandidate(current) && candidateKey !== null) {
+    const previous = input.events[index - 1];
+    const beginsCandidateSegment = previous === undefined || !isGroupCandidate(previous) ||
+      previous.lifecycleGroupKey !== candidateKey;
+    if (isGroupCandidate(current) && candidateKey !== null && beginsCandidateSegment) {
       while (candidateEnd + 1 < input.events.length) {
         const candidate = input.events[candidateEnd + 1]!;
         if (!isGroupCandidate(candidate) || candidate.lifecycleGroupKey !== candidateKey) break;

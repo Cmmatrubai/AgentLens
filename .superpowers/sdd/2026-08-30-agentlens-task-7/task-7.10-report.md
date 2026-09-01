@@ -1,9 +1,10 @@
 # Task 7.10 implementation report
 
-> Review-fix update (2026-08-31): the original implementation evidence below is
-> retained as history. The final sections record the focused fix round after review
-> rejected `69ccffa4ca95c85e974bdc4c20d5ef2018e0a68a`; those later results and
-> residuals supersede the original completion/browser claims.
+> Review-fix updates (2026-08-31): the original implementation evidence below is
+> retained as history. The final sections record the focused fix rounds after review
+> rejected `69ccffa4ca95c85e974bdc4c20d5ef2018e0a68a` and then
+> `7efa195a2d88ddbf66d07794164e6b8b2627dade`; the latest results and residuals
+> supersede the earlier completion/browser claims.
 
 ## Result
 
@@ -284,3 +285,133 @@ Automated DOM coverage does verify bounded 10/50/250/1,000 rows, virtual End/Hom
 one row tab stop, non-tab nested controls, dedupe, row-center geometry, off-screen
 jumps, deep-link cardinality, group reset, and stale promises. No other known Task
 7.10 code residual remains after the focused, adjacent, type, build, and full suite.
+
+## Review-fix round 2 after `7efa195`
+
+The four confirmed Important findings were reproduced and fixed within Task 7.10:
+
+- the closed browser projector now compacts exact contiguous command/tool
+  start-terminal pairs, validates domain and phase, and treats each maximal repeated
+  segment as non-groupable rather than reconsidering a trailing pair;
+- each committed cursor page records its requested direction and opaque cursor, so a
+  terminal empty response clears only that exact current outer boundary;
+- the virtualizer pins a distant row only during an explicit keyboard focus transfer;
+  after outside focus plus manual scrolling, the sole roving entry moves to a truly
+  visible row while Home/End/Arrow remount behavior remains intact;
+- each row is a documented single-tab-stop keyboard composite. Left/Right chooses
+  primary/immutable-event/expand/relationship actions and Enter/Space invokes the
+  current action. Exact relationships remain independently labeled even when their
+  events share a collapsed row, same-element SVG lines are suppressed, and geometry
+  also remeasures through a bounded window-resize fallback.
+
+No DTO expansion was needed: grouping uses the existing closed presentation-class and
+status enums plus the opaque lifecycle key. The existing API projection/privacy tests
+remain green and continue to prove that raw item/tool/source identifiers do not cross
+the HTTP projection boundary.
+
+### Round-2 RED evidence
+
+```text
+pnpm vitest --run apps/web/test/projectTrajectory.test.ts \
+  -t "item start|mismatched command"
+Tests       2 failed, 1 passed
+Failure     command and tool start-terminal pairs each remained two rows
+
+pnpm vitest --run apps/web/test/mergePages.test.ts \
+  -t "empty cursor response|repeated or nonmatching"
+Tests       2 failed
+Failure     terminal empty cursor responses left the consumed outer cursor available
+
+pnpm vitest --run apps/web/test/trajectory.test.tsx \
+  -t "outside focus and manual scroll"
+Tests       1 failed
+Failure     the only tabIndex=0 row remained event-1 after scrolling to row 41
+
+pnpm vitest --run apps/web/test/trajectory.test.tsx \
+  -t "selected visible connectors|grouped-event, expansion|same-group relationship"
+Tests       3 failed
+Failures    resize retained y2=230; nested buttons remained; same-row relationship
+            had neither a labeled action nor a suppressed zero-length connector
+```
+
+An explicit repeated-command regression added during diff review found one further
+edge in the same first root cause before completion:
+
+```text
+pnpm vitest --run apps/web/test/projectTrajectory.test.ts \
+  apps/web/test/trajectoryPages.test.tsx
+Test Files  1 failed, 1 passed
+Tests       1 failed, 17 passed
+Failure     after rejecting start/start/terminal, the projector reconsidered the
+            second start plus terminal as a fresh compact pair
+```
+
+The maximal-segment guard fixed that edge; the same command then passed `18/18`.
+
+### Round-2 focused GREEN and fresh verification
+
+```text
+pnpm vitest --run apps/web/test/projectTrajectory.test.ts \
+  apps/web/test/mergePages.test.ts apps/web/test/trajectoryPages.test.tsx \
+  apps/web/test/trajectory.test.tsx apps/web/test/runList.test.tsx \
+  apps/web/test/runHeader.test.tsx packages/application/test/apiProjection.test.ts
+Test Files  7 passed (7)
+Tests       84 passed (84)
+
+Adjacent Tasks 7.6-7.9 matrix
+Test Files  13 passed (13)
+Tests       459 passed (459)
+
+pnpm typecheck
+$ tsc -b --pretty false
+exit 0
+
+pnpm build
+129 modules transformed
+bootstrap CSS 17.66 kB (gzip 4.13 kB)
+bootstrap JS 343.04 kB (gzip 101.68 kB)
+exit 0
+
+pnpm test
+Test Files  61 passed (61)
+Tests       1247 passed (1247)
+exit 0
+```
+
+Fresh `git diff --check` passed. Scope/privacy/static scans found no active polling,
+browser storage, cookie/bearer/token handling, content/native/evidence/artifact fetch,
+absolute user path, source map, prototype reference, favicon change, or Task 7.11-7.14
+file in the round-2 diff. The untracked `.scratch-e2e-ONFuP0/` directory remains
+untouched and excluded from staging.
+
+### Round-2 browser limitation and residual
+
+The required in-app browser binding was queried after the production build and
+returned `Module not found: agent/browser`. No standalone or prohibited substitute
+was used. Fresh 1440/1100 browser checks for 10/250/1,000 events therefore remain a
+release residual, specifically the real command-pair presentation, manual-scroll Tab
+re-entry, delayed Home/End/Arrow transfer, accessibility snapshot/action keys,
+ordinary and same-row relationship presentation, resize geometry, overflow, console,
+network, local-resource, and token checks.
+
+Automated coverage verifies all corresponding structural behavior, including exact
+command/tool pairing, repeated/mismatched/separated protection, hook-level empty-cursor
+consumption, 1,000-row manual scroll re-entry, single-tab-stop keyboard access to both
+immutable grouped events and every relationship action, same-row labels without a
+connector, connector resize geometry, dedupe, DTO privacy, and the complete prior
+Task 7.10 review-fix matrix. No other known Task 7.10 residual remains.
+
+### Round-2 changed files
+
+- `apps/web/src/trajectory/projectTrajectory.ts` and
+  `apps/web/test/projectTrajectory.test.ts`: closed command/tool compatibility and
+  maximal repeated-segment validation.
+- `apps/web/src/trajectory/useTrajectoryPages.ts`,
+  `apps/web/test/mergePages.test.ts`, and `apps/web/test/trajectoryPages.test.tsx`:
+  request-aligned cursor lineage and pure/hook boundary-consumption coverage.
+- `apps/web/src/trajectory/Trajectory.tsx`, `TrajectoryRow.tsx`,
+  `RelationshipOverlay.tsx`, `apps/web/src/styles/trajectory.css`, and
+  `apps/web/test/trajectory.test.tsx`: visible roving entry, composite row actions,
+  same-row relationship semantics, resize fallback, and focused virtual interaction
+  coverage.
+- this report.
