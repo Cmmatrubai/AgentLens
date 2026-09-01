@@ -236,6 +236,22 @@ const commandContentV1Schema = z.object({
   kind: z.literal("command"), command: boundedText, exitCode: z.number().int().nullable()
 }).strict();
 const commandOutputContentV1Schema = z.object({ kind: z.literal("command_output"), output: boundedText }).strict();
+const commandEvidenceFieldV1Schema = z.discriminatedUnion("state", [
+  z.object({
+    state: z.literal("available"),
+    text: boundedText,
+    truncated: z.boolean()
+  }).strict(),
+  z.object({
+    state: z.literal("unavailable"),
+    reason: z.enum(["capture_policy", "not_captured", "artifact_omitted"])
+  }).strict()
+]);
+const commandEvidenceContentV1Schema = z.object({
+  kind: z.literal("command_evidence"),
+  command: commandEvidenceFieldV1Schema,
+  output: commandEvidenceFieldV1Schema
+}).strict();
 const fileChangeContentV1Schema = z.object({
   kind: z.literal("file_change"),
   changes: z.array(z.object({
@@ -284,6 +300,7 @@ export const normalizedContentV1Schema = z.discriminatedUnion("kind", [
   reasoningContentV1Schema,
   commandContentV1Schema,
   commandOutputContentV1Schema,
+  commandEvidenceContentV1Schema,
   fileChangeContentV1Schema,
   toolContentV1Schema,
   planContentV1Schema,

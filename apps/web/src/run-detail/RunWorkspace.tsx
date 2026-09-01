@@ -2,6 +2,10 @@ import type { RunDetailV1, TrajectoryEventV1 } from "@agentlens/api-contract";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { GitEvidenceSummary } from "../evidence/GitEvidenceSummary.js";
+import {
+  initialGitDiffViewState,
+  type GitDiffViewState
+} from "../evidence/GitDiffViewer.js";
 import { Trajectory } from "../trajectory/Trajectory.js";
 import { DeepEvidencePanel } from "./DeepEvidencePanel.js";
 import {
@@ -43,7 +47,12 @@ export function RunWorkspace(props: Readonly<{
   onSelect: (eventId: string) => void;
 }>) {
   const [expandedGroupKeys, setExpandedGroupKeys] = useState<ReadonlySet<string>>(new Set());
-  const [deepEvidenceOpen, setDeepEvidenceOpen] = useState(false);
+  const [deepEvidence, setDeepEvidence] = useState<{
+    identity: string;
+    open: boolean;
+    autoFocus: boolean;
+    viewState: GitDiffViewState;
+  }>({ identity: "", open: false, autoFocus: false, viewState: initialGitDiffViewState });
   const [inspectorSession, setInspectorSession] = useState<EventInspectorSession>(initialEventInspectorSession);
   const focusRestoreRef = useRef<Readonly<{
     id: string;
@@ -61,7 +70,6 @@ export function RunWorkspace(props: Readonly<{
     };
   });
   useEffect(() => setExpandedGroupKeys(new Set()), [props.runId]);
-  useEffect(() => setDeepEvidenceOpen(false), [props.runId, props.selectedEventId]);
   useEffect(() => setInspectorSession(initialEventInspectorSession), [props.runId, props.selectedEventId]);
   useLayoutEffect(() => {
     const restore = focusRestoreRef.current;
@@ -73,6 +81,30 @@ export function RunWorkspace(props: Readonly<{
     focusRestoreRef.current = null;
   }, [narrow]);
   const selected = props.events.find(({ eventId }) => eventId === props.selectedEventId) ?? null;
+  const selectionIdentity = `${props.runId}:${props.selectedEventId ?? ""}`;
+  const currentDeepEvidence = deepEvidence.identity === selectionIdentity
+    ? deepEvidence
+    : { identity: selectionIdentity, open: false, autoFocus: false, viewState: initialGitDiffViewState };
+  const deepEvidenceOpen = currentDeepEvidence.open;
+  const setDeepEvidenceOpen = (open: boolean): void => {
+    setDeepEvidence({
+      ...currentDeepEvidence,
+      identity: selectionIdentity,
+      open,
+      autoFocus: open
+    });
+  };
+  const deepPanel = (
+    <DeepEvidencePanel
+      runId={props.runId}
+      open={deepEvidenceOpen}
+      onClose={() => setDeepEvidenceOpen(false)}
+      viewState={currentDeepEvidence.viewState}
+      onViewStateChange={(viewState) => setDeepEvidence({ ...currentDeepEvidence, viewState })}
+      autoFocus={currentDeepEvidence.autoFocus}
+      onAutoFocusComplete={() => setDeepEvidence({ ...currentDeepEvidence, autoFocus: false })}
+    />
+  );
   const inspector = selected === null || props.run === undefined ? null : (
     <>
       <EventInspector
@@ -97,7 +129,7 @@ export function RunWorkspace(props: Readonly<{
       onClick={(event) => event.stopPropagation()}
     >
       {inspector}
-      <DeepEvidencePanel runId={props.runId} open={deepEvidenceOpen} onClose={() => setDeepEvidenceOpen(false)} />
+      {deepPanel}
     </section>
   ) : null;
   return (
@@ -127,7 +159,7 @@ export function RunWorkspace(props: Readonly<{
         {inspector}
       </aside>}
       {!narrow && props.run !== undefined && (
-        <DeepEvidencePanel runId={props.runId} open={deepEvidenceOpen} onClose={() => setDeepEvidenceOpen(false)} />
+        <>{deepPanel}</>
       )}
     </div>
   );

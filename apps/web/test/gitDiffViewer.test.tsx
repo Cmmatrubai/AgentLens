@@ -89,7 +89,35 @@ describe("structured Final Git evidence diff", () => {
     await userEvent.click(screen.getByRole("button", { name: "Expand diff for large.txt" }));
     expect(container.querySelectorAll("[data-diff-line]").length).toBeLessThanOrEqual(400);
     expect(screen.getByText("Evidence truncated at the response bound")).toBeVisible();
-    expect(screen.getByRole("button", { name: "Show next 400 diff lines" })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Show next 400 diff lines" }));
+    expect(screen.getByText(/00400 x+/)).toBeVisible();
+    expect(screen.queryByText(/00000 x+/)).not.toBeInTheDocument();
+    expect(container.querySelectorAll("[data-diff-line]").length).toBeLessThanOrEqual(400);
+  });
+
+  it("globally bounds files, hunks, and lines for a near-limit multi-file diff", async () => {
+    const files = Array.from({ length: 20_000 }, (_, fileIndex) => ({
+      oldPath: `src/${fileIndex}.ts`,
+      newPath: `src/${fileIndex}.ts`,
+      headers: [`diff --git a/src/${fileIndex}.ts b/src/${fileIndex}.ts`],
+      metadata: [],
+      hunks: Array.from({ length: 8 }, (_, hunkIndex) => ({
+        header: `@@ -${hunkIndex + 1},1 +${hunkIndex + 1},1 @@`,
+        oldStart: hunkIndex + 1,
+        oldCount: 1,
+        newStart: hunkIndex + 1,
+        newCount: 1,
+        lines: [{ type: "add" as const, oldLineNumber: null, newLineNumber: hunkIndex + 1, text: "bounded" }]
+      }))
+    }));
+    const { container } = render(<GitDiffViewer evidence={{ state: "available", value: diff({ preamble: [], files }) }} />);
+    expect(screen.getAllByRole("group").length).toBeLessThanOrEqual(50);
+    const toggles = screen.getAllByRole("button", { name: /^Expand diff for/ }).slice(0, 20);
+    for (const toggle of toggles) await userEvent.click(toggle);
+    expect(container.querySelectorAll(".git-diff__hunk").length).toBeLessThanOrEqual(100);
+    expect(container.querySelectorAll("[data-diff-line]").length).toBeLessThanOrEqual(400);
+    expect(container.querySelectorAll("*").length).toBeLessThan(2_000);
+    expect(screen.getByRole("button", { name: "Next diff files" })).toBeVisible();
   });
 
   it("distinguishes empty, malformed, corrupt, unreadable, and unavailable diff states", () => {

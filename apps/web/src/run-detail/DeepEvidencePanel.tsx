@@ -2,7 +2,11 @@ import { useEffect, useRef } from "react";
 
 import { AgentLensClientError } from "../api/client.js";
 import { useGitDiffQuery } from "../api/evidenceQueries.js";
-import { GitDiffViewer, type GitDiffEvidence } from "../evidence/GitDiffViewer.js";
+import {
+  GitDiffViewer,
+  type GitDiffEvidence,
+  type GitDiffViewState
+} from "../evidence/GitDiffViewer.js";
 
 function diffEvidence(error: unknown): GitDiffEvidence {
   if (error instanceof AgentLensClientError) {
@@ -16,12 +20,18 @@ export function DeepEvidencePanel(props: Readonly<{
   runId: string;
   open: boolean;
   onClose: () => void;
+  viewState?: GitDiffViewState;
+  onViewStateChange?: (state: GitDiffViewState) => void;
+  autoFocus?: boolean;
+  onAutoFocusComplete?: () => void;
 }>) {
   const heading = useRef<HTMLHeadingElement>(null);
   const diff = useGitDiffQuery(props.runId, props.open);
   useEffect(() => {
-    if (props.open) heading.current?.focus();
-  }, [props.open]);
+    if (!props.open || props.autoFocus !== true) return;
+    heading.current?.focus();
+    props.onAutoFocusComplete?.();
+  }, [props.open, props.autoFocus]);
   if (!props.open) return null;
   return (
     <section
@@ -41,8 +51,16 @@ export function DeepEvidencePanel(props: Readonly<{
         <button type="button" onClick={props.onClose}>Close deep evidence</button>
       </header>
       {diff.isPending && <p role="status">Loading structured tracked final diff…</p>}
-      {diff.isError && <GitDiffViewer evidence={diffEvidence(diff.error)} />}
-      {diff.data !== undefined && <GitDiffViewer evidence={{ state: "available", value: diff.data }} />}
+      {diff.isError && <GitDiffViewer
+        evidence={diffEvidence(diff.error)}
+        {...(props.viewState === undefined ? {} : { viewState: props.viewState })}
+        {...(props.onViewStateChange === undefined ? {} : { onViewStateChange: props.onViewStateChange })}
+      />}
+      {diff.data !== undefined && <GitDiffViewer
+        evidence={{ state: "available", value: diff.data }}
+        {...(props.viewState === undefined ? {} : { viewState: props.viewState })}
+        {...(props.onViewStateChange === undefined ? {} : { onViewStateChange: props.onViewStateChange })}
+      />}
     </section>
   );
 }

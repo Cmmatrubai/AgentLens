@@ -44,7 +44,8 @@ export function useGitDiffQuery(runId: string, enabled: boolean) {
   return useQuery({
     queryKey: queryKeys.gitDiff(runId),
     queryFn: ({ signal }) => client.getGitDiff(runId, signal),
-    enabled
+    enabled,
+    staleTime: Number.POSITIVE_INFINITY
   });
 }
 

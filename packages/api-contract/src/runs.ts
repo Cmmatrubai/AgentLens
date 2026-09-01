@@ -179,8 +179,28 @@ export const eventAnchorV1Schema = z.object({
   sequence: nonnegativeInteger
 }).strict();
 
+const gitBranchV1Schema = z.discriminatedUnion("state", [
+  z.object({ state: z.literal("attached"), value: z.string().min(1).max(256) }).strict(),
+  z.object({ state: z.literal("detached") }).strict()
+]);
+
+export const runGitStateV1Schema = z.discriminatedUnion("state", [
+  z.object({
+    state: z.literal("available"),
+    initialHead: z.string().min(1).max(128),
+    finalHead: z.string().min(1).max(128),
+    initialBranch: gitBranchV1Schema,
+    finalBranch: gitBranchV1Schema
+  }).strict(),
+  z.object({
+    state: z.literal("unavailable"),
+    reason: z.enum(["not_yet_available", "not_captured"])
+  }).strict()
+]);
+
 export const runDetailV1Schema = z.object({
   ...runFields,
+  gitState: runGitStateV1Schema,
   eventCount: nonnegativeInteger,
   anchors: z.object({
     firstFailure: eventAnchorV1Schema.nullable(),
@@ -202,4 +222,5 @@ export type FinalGitEvidenceV1 = z.infer<typeof finalGitEvidenceV1Schema>;
 export type RunListItemV1 = z.infer<typeof runListItemV1Schema>;
 export type RunPageV1 = z.infer<typeof runPageV1Schema>;
 export type EventAnchorV1 = z.infer<typeof eventAnchorV1Schema>;
+export type RunGitStateV1 = z.infer<typeof runGitStateV1Schema>;
 export type RunDetailV1 = z.infer<typeof runDetailV1Schema>;

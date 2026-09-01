@@ -25,15 +25,21 @@ export function GitEvidenceSummary(props: Readonly<{
   run?: RunDetailV1;
   onOpenDiff: () => void;
 }>) {
-  const [initialRequested, setInitialRequested] = useState(false);
-  const [finalRequested, setFinalRequested] = useState(false);
-  const [untrackedRequested, setUntrackedRequested] = useState(false);
-  const [checkRequested, setCheckRequested] = useState(false);
-  const initial = useGitStatusQuery(props.runId, "initial", initialRequested);
-  const final = useGitStatusQuery(props.runId, "final", finalRequested);
-  const untracked = useGitUntrackedQuery(props.runId, untrackedRequested);
-  const diffCheck = useGitDiffCheckQuery(props.runId, checkRequested);
+  const [requests, setRequests] = useState({
+    runId: "", initial: false, final: false, untracked: false, check: false
+  });
+  const current = requests.runId === props.runId
+    ? requests
+    : { runId: props.runId, initial: false, final: false, untracked: false, check: false };
+  const request = (key: "initial" | "final" | "untracked" | "check"): void => {
+    setRequests({ ...current, runId: props.runId, [key]: true });
+  };
+  const initial = useGitStatusQuery(props.runId, "initial", current.initial);
+  const final = useGitStatusQuery(props.runId, "final", current.final);
+  const untracked = useGitUntrackedQuery(props.runId, current.untracked);
+  const diffCheck = useGitDiffCheckQuery(props.runId, current.check);
   const git = props.run?.finalGitEvidence;
+  const state = props.run?.gitState;
   const tracked = props.run?.summary.trackedFinalDiff;
   const untrackedCount = props.run?.summary.untrackedFiles;
 
@@ -42,21 +48,22 @@ export function GitEvidenceSummary(props: Readonly<{
       <h3 id="final-git-evidence-title">Final Git evidence</h3>
       <p>Final-state Git evidence does not establish authorship.</p>
       <dl className="evidence-facts">
-        <div><dt>Initial HEAD</dt><dd>Unavailable in the bounded run-detail DTO</dd></div>
-        <div><dt>Final HEAD</dt><dd>Unavailable in the bounded run-detail DTO</dd></div>
-        <div><dt>Initial branch</dt><dd>Unavailable in the bounded run-detail DTO</dd></div>
-        <div><dt>Final branch</dt><dd>Unavailable in the bounded run-detail DTO</dd></div>
+        <div><dt>Initial HEAD</dt><dd>{state?.state === "available" ? state.initialHead : "Unavailable"}</dd></div>
+        <div><dt>Final HEAD</dt><dd>{state?.state === "available" ? state.finalHead : "Unavailable"}</dd></div>
+        <div><dt>Initial branch</dt><dd>{state?.state === "available" ? (state.initialBranch.state === "attached" ? state.initialBranch.value : "Detached HEAD") : "Unavailable"}</dd></div>
+        <div><dt>Final branch</dt><dd>{state?.state === "available" ? (state.finalBranch.state === "attached" ? state.finalBranch.value : "Detached HEAD") : "Unavailable"}</dd></div>
         <div><dt>HEAD change warning</dt><dd>{git?.state === "available" ? (git.headChanged ? "Changed" : "No change recorded") : "Unavailable"}</dd></div>
         <div><dt>Branch change warning</dt><dd>{git?.state === "available" ? (git.branchChanged ? "Changed" : "No change recorded") : "Unavailable"}</dd></div>
         <div><dt>Tracked final diff</dt><dd>{tracked?.state === "available" ? (tracked.value === "artifact" ? "Available" : "Absent") : tracked?.reason ?? "Unavailable"}</dd></div>
         <div><dt>Untracked-file metadata</dt><dd>{untrackedCount?.state === "available" ? `${untrackedCount.value} validated entries` : untrackedCount?.reason ?? "Unavailable"}</dd></div>
       </dl>
       {git?.state === "unavailable" && <AvailabilityNotice state={git.reason} />}
+      {state?.state === "unavailable" && <AvailabilityNotice state={state.reason} />}
       <div className="git-evidence-summary__actions">
-        <button type="button" onClick={() => setInitialRequested(true)}>Load initial Git status</button>
-        <button type="button" onClick={() => setFinalRequested(true)}>Load final Git status</button>
-        <button type="button" onClick={() => setUntrackedRequested(true)}>Load untracked-file metadata</button>
-        <button type="button" onClick={() => setCheckRequested(true)}>Load git diff --check</button>
+        <button type="button" onClick={() => request("initial")}>Load initial Git status</button>
+        <button type="button" onClick={() => request("final")}>Load final Git status</button>
+        <button type="button" onClick={() => request("untracked")}>Load untracked-file metadata</button>
+        <button type="button" onClick={() => request("check")}>Load git diff --check</button>
         <button type="button" onClick={props.onOpenDiff}>Open tracked final diff</button>
       </div>
       {initial.isFetching && <p role="status">Loading initial Git status…</p>}

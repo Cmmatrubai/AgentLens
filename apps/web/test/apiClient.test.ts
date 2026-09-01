@@ -92,7 +92,15 @@ describe("AgentLens authenticated API client", () => {
     const signal = new AbortController().signal;
     const requested: string[] = [];
     const responses: unknown[] = [
-      { schemaVersion: 1, eventId: "event/id %", content: { kind: "command_output", output: "redacted" } },
+      {
+        schemaVersion: 1,
+        eventId: "event/id %",
+        content: {
+          kind: "command_evidence",
+          command: { state: "available", text: "pnpm test", truncated: false },
+          output: { state: "available", text: "redacted", truncated: false }
+        }
+      },
       { schemaVersion: 1, eventId: "event/id %", content: { format: "text", text: "redacted native", truncated: false } },
       { schemaVersion: 1, eventId: "event/id %", content: "redacted note" },
       { schemaVersion: 1, kind: "status", entries: [] },

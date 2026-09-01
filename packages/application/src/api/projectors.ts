@@ -340,6 +340,34 @@ export function projectCommandOutputContentV1(
   return commandOutputCandidate(event);
 }
 
+export function projectCommandEvidenceContentV1(
+  event: TraceEventV1,
+  capturePolicy: CapturePolicy
+): NormalizedContentV1 | null {
+  if (presentationClassForEvent(event.kind) !== "command") return null;
+  if (capturePolicy !== "standard") {
+    return {
+      kind: "command_evidence",
+      command: { state: "unavailable", reason: "capture_policy" },
+      output: { state: "unavailable", reason: "capture_policy" }
+    };
+  }
+  const payload = payloadRecord(event);
+  const commandEvidence = parseCommandEvidence(event, capturePolicy);
+  const command = commandEvidence?.state === "available"
+    ? { state: "available" as const, text: commandEvidence.redactedCommand, truncated: false }
+    : { state: "unavailable" as const, reason: "not_captured" as const };
+  const output = payload !== null && typeof payload.aggregatedOutput === "string"
+    ? {
+        state: "available" as const,
+        text: payload.aggregatedOutput,
+        truncated: payload.truncated === true
+      }
+    : { state: "unavailable" as const, reason: "not_captured" as const };
+  const parsed = normalizedContentV1Schema.safeParse({ kind: "command_evidence", command, output });
+  return parsed.success ? parsed.data : null;
+}
+
 function commandOutputAvailability(event: TraceEventV1, capturePolicy: CapturePolicy) {
   if (capturePolicy !== "standard") {
     return { state: "unavailable", reason: "capture_policy" } as const;

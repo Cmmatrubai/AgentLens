@@ -104,6 +104,16 @@ async function createDataRoot(active = false, runId = "run-http") {
   });
   repository.appendEvent(trace(runId, "event-http-0", 0));
   repository.appendEvent(trace(runId, "event-http-1", 1));
+  if (!active) repository.saveGitEvidence(runId, {
+    initialHead: "a".repeat(40), finalHead: "b".repeat(40),
+    initialBranch: "main", finalBranch: null,
+    initialStatus: { state: "omitted", reason: "metadata-only" },
+    finalStatus: { state: "omitted", reason: "metadata-only" },
+    trackedFinalDiff: { state: "absent" },
+    diffCheck: { state: "omitted", reason: "metadata-only" },
+    diffCheckPassed: true, untrackedMetadata: { state: "absent" },
+    headChanged: true, branchChanged: true, capturedAt: 200
+  });
   if (active) {
     databases.push(database);
     await Promise.all([
@@ -251,6 +261,12 @@ describe("authenticated read API", () => {
     expect(runDetailV1Schema.parse(await body(runResponse))).toMatchObject({
       runId: "run-http",
       eventCount: 2,
+      gitState: {
+        state: "available",
+        initialHead: "a".repeat(40), finalHead: "b".repeat(40),
+        initialBranch: { state: "attached", value: "main" },
+        finalBranch: { state: "detached" }
+      },
       anchors: { firstFailure: { eventId: "event-http-0", sequence: 0 } }
     });
 

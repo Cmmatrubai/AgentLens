@@ -13,6 +13,7 @@ import type { AgentLensApiClient } from "../src/api/client.js";
 import { ApiClientProvider } from "../src/api/queries.js";
 import { AvailabilityNotice } from "../src/evidence/AvailabilityNotice.js";
 import { CommandEvidence } from "../src/evidence/CommandEvidence.js";
+import { GitEvidenceSummary } from "../src/evidence/GitEvidenceSummary.js";
 import { EventInspector } from "../src/run-detail/EventInspector.js";
 import { RunWorkspace } from "../src/run-detail/RunWorkspace.js";
 
@@ -85,7 +86,11 @@ function client(overrides: Partial<AgentLensApiClient> = {}): AgentLensApiClient
     getEventContent: vi.fn(async () => ({
       schemaVersion: 1,
       eventId: "event-command",
-      content: { kind: "command_output", output: "redacted output\nsecond line" }
+      content: {
+        kind: "command_evidence",
+        command: { state: "available", text: "pnpm test", truncated: false },
+        output: { state: "available", text: "redacted output\nsecond line", truncated: false }
+      }
     } satisfies NormalizedContentResponseV1)),
     getEventNative: vi.fn(async () => ({
       schemaVersion: 1,
@@ -133,9 +138,8 @@ describe("bounded event inspector", () => {
     expect(api.getGitDiffCheck).not.toHaveBeenCalled();
     expect(api.getGitUntracked).not.toHaveBeenCalled();
 
-    await userEvent.click(screen.getByRole("button", { name: "Load command output" }));
-    await waitFor(() => expect(document.querySelector(".evidence-text__content"))
-      .toHaveTextContent("redacted output second line"));
+    await userEvent.click(screen.getByRole("button", { name: "Load command evidence" }));
+    await waitFor(() => expect(screen.getByText(/redacted output\s+second line/)).toBeVisible());
     expect(api.getEventContent).toHaveBeenCalledWith(
       "run-inspector",
       "event-command",
@@ -224,7 +228,11 @@ describe("bounded event inspector", () => {
         content={{
           schemaVersion: 1,
           eventId: "event-command",
-          content: { kind: "command_output", output: "redacted output" }
+          content: {
+            kind: "command_evidence",
+            command: { state: "available", text: "pnpm test", truncated: false },
+            output: { state: "available", text: "redacted output", truncated: true }
+          }
         }}
         requestState="loaded"
         onRequestContent={vi.fn()}
@@ -232,9 +240,44 @@ describe("bounded event inspector", () => {
     );
     expect(screen.getByText("Failed")).toBeVisible();
     expect(screen.getByText("2")).toBeVisible();
+    expect(screen.getByText("pnpm test")).toBeVisible();
     const output = screen.getByText("redacted output");
     expect(output).toHaveClass("evidence-text__content");
     expect(output.closest("[data-terminal-emulator]")).toBeNull();
+    expect(screen.getByText("Evidence truncated at the response bound")).toBeVisible();
+  });
+
+  it("renders retained command-only evidence and maps unreadable failures without blanket corruption", () => {
+    const { rerender } = render(
+      <CommandEvidence
+        detail={commandDetail({ output: { state: "unavailable", reason: "not_captured" } }) as Extract<EventDetailV1, { presentationClass: "command" }>}
+        content={{
+          schemaVersion: 1,
+          eventId: "event-command",
+          content: {
+            kind: "command_evidence",
+            command: { state: "available", text: "pnpm test", truncated: false },
+            output: { state: "unavailable", reason: "not_captured" }
+          }
+        }}
+        requestState="loaded"
+        onRequestContent={vi.fn()}
+      />
+    );
+    expect(screen.getByText("pnpm test")).toBeVisible();
+    expect(screen.getByText("Not captured")).toBeVisible();
+
+    rerender(
+      <CommandEvidence
+        detail={commandDetail() as Extract<EventDetailV1, { presentationClass: "command" }>}
+        content={null}
+        requestState="error"
+        requestError="artifact_unreadable"
+        onRequestContent={vi.fn()}
+      />
+    );
+    expect(screen.getByText("Artifact unreadable")).toBeVisible();
+    expect(screen.queryByText("Evidence corrupt or binding-invalid")).not.toBeInTheDocument();
   });
 
   it("places the narrow inspector inside the selected virtual row", async () => {
@@ -325,5 +368,200 @@ describe("bounded event inspector", () => {
 
     await screen.findByTestId("inline-event-inspector");
     expect(screen.getByRole("tab", { name: "Relationships" })).toHaveFocus();
+  });
+
+  it("never carries explicit event evidence actions across a rapid identity switch", async () => {
+    const pending = new Promise<NormalizedContentResponseV1>(() => undefined);
+    const api = client({ getEventContent: vi.fn(() => pending) });
+    const { rerender } = render(
+      <Providers client={api}>
+        <EventInspector event={event({ eventId: "event-1" })} runId="run-1" onRelationshipJump={vi.fn()} />
+      </Providers>
+    );
+    await screen.findByText("Command lifecycle");
+    await userEvent.click(screen.getByRole("button", { name: "Load command evidence" }));
+    expect(api.getEventContent).toHaveBeenCalledWith("run-1", "event-1", expect.any(AbortSignal));
+
+    rerender(
+      <Providers client={api}>
+        <EventInspector event={event({ eventId: "event-2", runId: "run-2" })} runId="run-2" onRelationshipJump={vi.fn()} />
+      </Providers>
+    );
+    rerender(
+      <Providers client={api}>
+        <EventInspector event={event({ eventId: "event-3", runId: "run-3" })} runId="run-3" onRelationshipJump={vi.fn()} />
+      </Providers>
+    );
+    await screen.findByRole("button", { name: "Load command evidence" });
+    expect(api.getEventContent).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not carry provider or assessment-note requests to a new event identity", async () => {
+    const assessment = event({
+      eventId: "note-a",
+      runId: "run-a",
+      presentationClass: "assessment",
+      kind: "assessment.created",
+      nativePayload: { state: "available", storage: "inline" }
+    });
+    const detail = {
+      ...commandDetail(),
+      eventId: "note-a",
+      runId: "run-a",
+      kind: "assessment.created",
+      presentationClass: "assessment",
+      revision: "note-a",
+      verdict: "partial",
+      taskCompleted: "uncertain",
+      note: { state: "available" },
+      content: { state: "available" }
+    } as EventDetailV1;
+    const api = client({
+      getEvent: vi.fn(async () => detail),
+      getAssessmentNote: vi.fn(async (_runId, eventId) => ({ schemaVersion: 1, eventId, content: "redacted note" }))
+    });
+    const { rerender } = render(
+      <Providers client={api}>
+        <EventInspector event={assessment} runId="run-a" onRelationshipJump={vi.fn()} />
+      </Providers>
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Load assessment note" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Redacted provider payload" }));
+
+    rerender(
+      <Providers client={api}>
+        <EventInspector
+          event={{ ...assessment, eventId: "note-b", runId: "run-b" }}
+          runId="run-b"
+          onRelationshipJump={vi.fn()}
+        />
+      </Providers>
+    );
+    await screen.findByRole("button", { name: "Load assessment note" });
+    expect(api.getAssessmentNote).toHaveBeenCalledTimes(1);
+    expect(api.getEventNative).toHaveBeenCalledTimes(1);
+  });
+
+  it("never carries any explicit Final Git evidence action to a new run", async () => {
+    const api = client({
+      getGitStatus: vi.fn(async (_runId, phase) => ({ schemaVersion: 1, kind: "status", phase, entries: [] })),
+      getGitUntracked: vi.fn(async () => ({ schemaVersion: 1, kind: "untracked", entries: [] })),
+      getGitDiffCheck: vi.fn(async () => ({ schemaVersion: 1, kind: "diff_check", passed: true, output: "" })),
+      getGitDiff: vi.fn(async () => ({ schemaVersion: 1, kind: "diff", files: [], preamble: [], truncated: false, malformed: false }))
+    });
+    const workspace = (runId: string) => (
+      <Providers client={api}>
+        <RunWorkspace
+          runId={runId}
+          run={{
+            gitState: { state: "unavailable", reason: "not_captured" },
+            finalGitEvidence: { state: "unavailable", reason: "not_captured" },
+            summary: {
+              trackedFinalDiff: { state: "unavailable", reason: "not_captured", origin: null, supportingEventIds: [], supportingArtifactIds: [] },
+              untrackedFiles: { state: "unavailable", reason: "not_captured", origin: null, supportingEventIds: [], supportingArtifactIds: [] }
+            }
+          } as never}
+          events={[event({ runId })]}
+          selectedEventId="event-command"
+          selectionState="idle"
+          onSelect={vi.fn()}
+        />
+      </Providers>
+    );
+    const { rerender } = render(workspace("run-a"));
+    for (const name of [
+      "Load initial Git status", "Load final Git status", "Load untracked-file metadata",
+      "Load git diff --check", "Open tracked final diff"
+    ]) await userEvent.click(await screen.findByRole("button", { name }));
+    await waitFor(() => expect(api.getGitDiff).toHaveBeenCalledTimes(1));
+
+    rerender(workspace("run-b"));
+    await screen.findByRole("button", { name: "Open tracked final diff" });
+    expect(api.getGitStatus).toHaveBeenCalledTimes(2);
+    expect(api.getGitUntracked).toHaveBeenCalledTimes(1);
+    expect(api.getGitDiffCheck).toHaveBeenCalledTimes(1);
+    expect(api.getGitDiff).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders actual bounded Git refs, detached branches, and change warnings", () => {
+    render(
+      <Providers client={client()}>
+        <GitEvidenceSummary
+          runId="run-git"
+          run={{
+            gitState: {
+              state: "available",
+              initialHead: "a".repeat(40), finalHead: "b".repeat(40),
+              initialBranch: { state: "attached", value: "main" },
+              finalBranch: { state: "detached" }
+            },
+            finalGitEvidence: { state: "available", headChanged: true, branchChanged: true },
+            summary: {
+              trackedFinalDiff: { state: "available", value: "artifact" },
+              untrackedFiles: { state: "available", value: 3 }
+            }
+          } as never}
+          onOpenDiff={vi.fn()}
+        />
+      </Providers>
+    );
+    expect(screen.getByText("a".repeat(40))).toBeVisible();
+    expect(screen.getByText("b".repeat(40))).toBeVisible();
+    expect(screen.getByText("main")).toBeVisible();
+    expect(screen.getByText("Detached HEAD")).toBeVisible();
+    expect(screen.getAllByText("Changed")).toHaveLength(2);
+  });
+
+  it("preserves expanded diff state, focus, and one request across the 800px placement boundary", async () => {
+    let narrow = false;
+    let onChange: (() => void) | undefined;
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      get matches() { return narrow; },
+      media: "(max-width: 800px)", onchange: null,
+      addEventListener: vi.fn((_type: string, listener: () => void) => { onChange = listener; }),
+      removeEventListener: vi.fn(), addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn()
+    })));
+    const api = client({
+      getGitDiff: vi.fn(async () => ({
+        schemaVersion: 1, kind: "diff", preamble: [], truncated: false, malformed: false,
+        files: [{
+          oldPath: "src/a.ts", newPath: "src/a.ts", headers: [], metadata: [],
+          hunks: [{
+            header: "@@ -1 +1 @@", oldStart: 1, oldCount: 1, newStart: 1, newCount: 1,
+            lines: [{ type: "context", oldLineNumber: 1, newLineNumber: 1, text: "safe" }]
+          }]
+        }]
+      }))
+    });
+    render(
+      <Providers client={api}>
+        <RunWorkspace
+          runId="run-responsive"
+          run={{
+            gitState: { state: "unavailable", reason: "not_captured" },
+            finalGitEvidence: { state: "unavailable", reason: "not_captured" },
+            summary: {
+              trackedFinalDiff: { state: "available", value: "artifact" },
+              untrackedFiles: { state: "available", value: 0 }
+            }
+          } as never}
+          events={[event({ runId: "run-responsive" })]}
+          selectedEventId="event-command"
+          selectionState="idle"
+          onSelect={vi.fn()}
+        />
+      </Providers>
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Open tracked final diff" }));
+    const expand = await screen.findByRole("button", { name: "Expand diff for src/a.ts" });
+    await userEvent.click(expand);
+    const collapse = screen.getByRole("button", { name: "Collapse diff for src/a.ts" });
+    expect(collapse).toHaveFocus();
+
+    narrow = true;
+    act(() => onChange?.());
+    await screen.findByTestId("inline-event-inspector");
+    expect(screen.getByRole("button", { name: "Collapse diff for src/a.ts" })).toHaveFocus();
+    expect(api.getGitDiff).toHaveBeenCalledTimes(1);
   });
 });

@@ -7,7 +7,20 @@ export type GitDiffEvidence =
   | Readonly<{ state: "available"; value: GitDiffContentV1 }>
   | Readonly<{ state: "unavailable"; reason: AvailabilityState }>;
 
+export interface GitDiffViewState {
+  readonly expanded: readonly number[];
+  readonly visibleLines: Readonly<Record<number, number>>;
+  readonly filePage: number;
+}
+
+export const initialGitDiffViewState: GitDiffViewState = Object.freeze({
+  expanded: Object.freeze([]), visibleLines: Object.freeze({}), filePage: 0
+});
+
 const linePageSize = 400;
+const filePageSize = 50;
+const globalHunkBudget = 100;
+const globalStructureBudget = 200;
 
 function lineLabel(line: GitDiffContentV1["files"][number]["hunks"][number]["lines"][number]): string {
   switch (line.type) {
@@ -26,9 +39,20 @@ function prefix(type: GitDiffContentV1["files"][number]["hunks"][number]["lines"
   return " ";
 }
 
-export function GitDiffViewer(props: Readonly<{ evidence: GitDiffEvidence }>) {
-  const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
-  const [visibleLines, setVisibleLines] = useState<Readonly<Record<number, number>>>({});
+export function GitDiffViewer(props: Readonly<{
+  evidence: GitDiffEvidence;
+  viewState?: GitDiffViewState;
+  onViewStateChange?: (state: GitDiffViewState) => void;
+}>) {
+  const [internalViewState, setInternalViewState] = useState<GitDiffViewState>(initialGitDiffViewState);
+  const viewState = props.viewState ?? internalViewState;
+  const expanded = new Set(viewState.expanded);
+  const visibleLines = viewState.visibleLines;
+  const filePage = viewState.filePage;
+  const updateViewState = (next: GitDiffViewState): void => {
+    setInternalViewState(next);
+    props.onViewStateChange?.(next);
+  };
   if (props.evidence.state === "unavailable") {
     return <AvailabilityNotice state={props.evidence.reason} />;
   }
@@ -39,17 +63,52 @@ export function GitDiffViewer(props: Readonly<{ evidence: GitDiffEvidence }>) {
   if (value.files.length === 0 && value.preamble.length === 0) {
     return <p className="git-diff__empty">Tracked final diff is empty.</p>;
   }
+  const firstFile = filePage * filePageSize;
+  const visibleFiles = value.files.slice(firstFile, firstFile + filePageSize);
+  let remainingLines = linePageSize;
+  let remainingHunks = globalHunkBudget;
+  let remainingStructure = globalStructureBudget;
   return (
     <section className="git-diff" aria-label="Structured tracked final diff">
       {value.truncated && <AvailabilityNotice state="truncated" />}
       {value.preamble.length > 0 && (
         <TextPreamble lines={value.preamble} />
       )}
-      {value.files.map((file, fileIndex) => {
+      {visibleFiles.map((file, visibleIndex) => {
+        const fileIndex = firstFile + visibleIndex;
         const isExpanded = expanded.has(fileIndex);
         const totalLines = file.hunks.reduce((total, hunk) => total + hunk.lines.length, 0);
-        const limit = visibleLines[fileIndex] ?? linePageSize;
-        let consumed = 0;
+        const offset = visibleLines[fileIndex] ?? 0;
+        const headers = isExpanded ? file.headers.slice(0, remainingStructure) : [];
+        remainingStructure -= headers.length;
+        const metadata = isExpanded ? file.metadata.slice(0, remainingStructure) : [];
+        remainingStructure -= metadata.length;
+        let position = 0;
+        let renderedLineCount = 0;
+        const hunks: Array<{
+          hunk: (typeof file.hunks)[number];
+          hunkIndex: number;
+          lines: (typeof file.hunks)[number]["lines"];
+        }> = [];
+        if (isExpanded) {
+          for (const [hunkIndex, hunk] of file.hunks.entries()) {
+            const nextPosition = position + hunk.lines.length;
+            if (nextPosition <= offset) {
+              position = nextPosition;
+              continue;
+            }
+            if (remainingHunks <= 0 || remainingStructure <= 0 || remainingLines <= 0) break;
+            const start = Math.max(0, offset - position);
+            const lines = hunk.lines.slice(start, start + remainingLines);
+            if (hunk.lines.length > 0 && lines.length === 0) break;
+            hunks.push({ hunk, hunkIndex, lines });
+            remainingHunks -= 1;
+            remainingStructure -= 1;
+            remainingLines -= lines.length;
+            renderedLineCount += lines.length;
+            position = nextPosition;
+          }
+        }
         return (
           <section
             className="git-diff__file"
@@ -62,29 +121,25 @@ export function GitDiffViewer(props: Readonly<{ evidence: GitDiffEvidence }>) {
               className="git-diff__file-toggle"
               aria-expanded={isExpanded}
               aria-label={`${isExpanded ? "Collapse" : "Expand"} diff for ${file.newPath}`}
-              onClick={() => setExpanded((current) => {
-                const next = new Set(current);
+              onClick={() => {
+                const next = new Set(expanded);
                 next.has(fileIndex) ? next.delete(fileIndex) : next.add(fileIndex);
-                return next;
-              })}
+                updateViewState({ ...viewState, expanded: [...next] });
+              }}
             >
               <span>{file.oldPath === file.newPath ? file.newPath : `${file.oldPath} → ${file.newPath}`}</span>
               <span>{file.hunks.length} hunks · {totalLines} lines</span>
             </button>
             {isExpanded && (
               <div className="git-diff__file-body">
-                {file.headers.map((header, index) => <code key={`${header}:${index}`}>{header}</code>)}
-                {file.metadata.map((metadata, index) => (
-                  <p className={`git-diff__metadata git-diff__metadata--${metadata.type}`} key={`${metadata.type}:${index}`}>
-                    <span className="sr-only">{metadata.type.replaceAll("_", " ")} metadata: </span>{metadata.text}
+                {headers.map((header, index) => <code key={`${header}:${index}`}>{header}</code>)}
+                {metadata.map((item, index) => (
+                  <p className={`git-diff__metadata git-diff__metadata--${item.type}`} key={`${item.type}:${index}`}>
+                    <span className="sr-only">{item.type.replaceAll("_", " ")} metadata: </span>{item.text}
                   </p>
                 ))}
                 <div className="git-diff__code-scroll" tabIndex={0}>
-                  {file.hunks.map((hunk, hunkIndex) => {
-                    const remaining = Math.max(0, limit - consumed);
-                    const lines = hunk.lines.slice(0, remaining);
-                    consumed += hunk.lines.length;
-                    return (
+                  {hunks.map(({ hunk, hunkIndex, lines }) => (
                       <section className="git-diff__hunk" key={`${hunk.header}:${hunkIndex}`}>
                         <h5>{hunk.header}</h5>
                         <ol>
@@ -102,23 +157,47 @@ export function GitDiffViewer(props: Readonly<{ evidence: GitDiffEvidence }>) {
                           ))}
                         </ol>
                       </section>
-                    );
-                  })}
+                  ))}
                 </div>
-                {totalLines > limit && (
+                {offset > 0 && (
                   <button
                     type="button"
-                    onClick={() => setVisibleLines((current) => ({
-                      ...current,
-                      [fileIndex]: Math.min(totalLines, limit + linePageSize)
-                    }))}
-                  >Show next {Math.min(linePageSize, totalLines - limit)} diff lines</button>
+                    onClick={() => updateViewState({
+                      ...viewState,
+                      visibleLines: { ...visibleLines, [fileIndex]: Math.max(0, offset - linePageSize) }
+                    })}
+                  >Show previous diff lines</button>
+                )}
+                {renderedLineCount > 0 && offset + renderedLineCount < totalLines && (
+                  <button
+                    type="button"
+                    onClick={() => updateViewState({
+                      ...viewState,
+                      visibleLines: {
+                        ...visibleLines,
+                        [fileIndex]: offset + renderedLineCount
+                      }
+                    })}
+                  >Show next {Math.min(linePageSize, totalLines - offset - renderedLineCount)} diff lines</button>
                 )}
               </div>
             )}
           </section>
         );
       })}
+      {value.files.length > filePageSize && (
+        <nav aria-label="Diff file pages">
+          <button type="button" disabled={filePage === 0} onClick={() => updateViewState({ ...viewState, filePage: Math.max(0, filePage - 1) })}>
+            Previous diff files
+          </button>
+          <span>Files {firstFile + 1}–{Math.min(value.files.length, firstFile + filePageSize)} of {value.files.length}</span>
+          <button
+            type="button"
+            disabled={firstFile + filePageSize >= value.files.length}
+            onClick={() => updateViewState({ ...viewState, filePage: filePage + 1 })}
+          >Next diff files</button>
+        </nav>
+      )}
     </section>
   );
 }

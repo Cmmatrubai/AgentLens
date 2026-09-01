@@ -421,7 +421,7 @@ afterEach(async () => {
 });
 
 describe("Task 7.7 evidence projection", () => {
-  it("prefers bounded terminal command output while retaining command fallback", async () => {
+  it("returns independently available bounded command and output evidence", async () => {
     const setup = await fixture();
     setup.createRun("command-content", "standard");
     setup.repository.appendEvent(trace("command-content", "command-terminal", 0, {
@@ -448,12 +448,20 @@ describe("Task 7.7 evidence projection", () => {
     await expect(service.eventContent("command-content", "command-terminal")).resolves.toEqual({
       schemaVersion: 1,
       eventId: "command-terminal",
-      content: { kind: "command_output", output: "15 tests passed" }
+      content: {
+        kind: "command_evidence",
+        command: { state: "available", text: "pnpm test", truncated: false },
+        output: { state: "available", text: "15 tests passed", truncated: false }
+      }
     });
     await expect(service.eventContent("command-content", "command-started")).resolves.toEqual({
       schemaVersion: 1,
       eventId: "command-started",
-      content: { kind: "command", command: "pnpm test", exitCode: null }
+      content: {
+        kind: "command_evidence",
+        command: { state: "available", text: "pnpm test", truncated: false },
+        output: { state: "unavailable", reason: "not_captured" }
+      }
     });
   });
 

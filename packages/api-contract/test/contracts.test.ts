@@ -20,6 +20,7 @@ import {
   maximumEcmaScriptTimestamp,
   presentationClassV1Schema,
   providerFieldV1Schema,
+  runGitStateV1Schema,
   runStatusFieldV1Schema,
   trajectoryEventV1Schema,
   trajectoryPageV1Schema,
@@ -340,6 +341,11 @@ describe("closed v1 browser schemas", () => {
       { kind: "reasoning", text: "redacted reasoning" },
       { kind: "command", command: "pnpm test", exitCode: 0 },
       { kind: "command_output", output: "all tests passed" },
+      {
+        kind: "command_evidence",
+        command: { state: "available", text: "pnpm test", truncated: false },
+        output: { state: "unavailable", reason: "not_captured" }
+      },
       { kind: "file_change", changes: [{ path: "src/example.ts", kind: "modify" }] },
       { kind: "tool", name: "search", input: "redacted", result: "redacted" },
       { kind: "plan", items: [{ text: "Implement contract", status: "completed" }] },
@@ -366,6 +372,21 @@ describe("closed v1 browser schemas", () => {
       schemaVersion: 1,
       eventId: "event-1",
       content: { format: "json", value: { arbitrary: true }, truncated: false }
+    })).toThrow();
+  });
+
+  it("keeps actual run-detail Git refs bounded with explicit detached and unavailable branches", () => {
+    expect(runGitStateV1Schema.parse({
+      state: "available",
+      initialHead: "a".repeat(40), finalHead: "b".repeat(40),
+      initialBranch: { state: "attached", value: "main" },
+      finalBranch: { state: "detached" }
+    })).toMatchObject({ finalBranch: { state: "detached" } });
+    expect(runGitStateV1Schema.parse({ state: "unavailable", reason: "not_captured" }))
+      .toEqual({ state: "unavailable", reason: "not_captured" });
+    expect(() => runGitStateV1Schema.parse({
+      state: "available", initialHead: "x".repeat(129), finalHead: "b",
+      initialBranch: { state: "attached", value: "main" }, finalBranch: { state: "detached" }
     })).toThrow();
   });
 

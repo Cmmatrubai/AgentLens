@@ -33,6 +33,7 @@ function contentText(response: NormalizedContentResponseV1): Readonly<{ title: s
     case "reasoning": return { title: "Redacted reasoning", text: content.text };
     case "command": return { title: "Redacted command", text: content.command };
     case "command_output": return { title: "Redacted command output", text: content.output };
+    case "command_evidence": return null;
     case "file_change": return {
       title: "Redacted file-change evidence",
       text: content.changes.map(({ kind, path }) => `${kind}\t${path}`).join("\n")
@@ -78,22 +79,17 @@ export function EventInspector(props: Readonly<{
   const eligibleNative = props.event.provenance === "observed" &&
     props.event.nativePayload.state === "available";
   const [internalSession, setInternalSession] = useState<EventInspectorSession>(initialEventInspectorSession);
-  const session = props.session ?? internalSession;
+  const identity = `${props.runId}:${props.event.eventId}`;
+  const suppliedSession = props.session ?? internalSession;
+  const session = suppliedSession.identity === identity ? suppliedSession : initialEventInspectorSession;
   const sessionRef = useRef(session);
   sessionRef.current = session;
-  const identity = `${props.runId}:${props.event.eventId}`;
-  const identityRef = useRef(identity);
   const updateSession = (patch: Partial<EventInspectorSession>): void => {
-    const next = { ...sessionRef.current, ...patch };
+    const next = { ...sessionRef.current, ...patch, identity };
     sessionRef.current = next;
     setInternalSession(next);
     props.onSessionChange?.(next);
   };
-  useEffect(() => {
-    if (identityRef.current === identity) return;
-    identityRef.current = identity;
-    updateSession(initialEventInspectorSession);
-  }, [identity]);
   useEffect(() => {
     if (!eligibleNative && session.selectedTab === "provider") updateSession({ selectedTab: "evidence" });
   }, [eligibleNative, session.selectedTab]);
@@ -141,6 +137,7 @@ export function EventInspector(props: Readonly<{
                   content={content.data ?? null}
                   requestState={content.isError ? "error" : content.isFetching ? "loading" :
                     content.data === undefined ? "idle" : "loaded"}
+                  requestError={content.isError ? requestFailure(content.error) : null}
                   onRequestContent={() => updateSession({ contentRequested: true })}
                 />
               ) : (
@@ -212,6 +209,7 @@ export function EventInspector(props: Readonly<{
 }
 
 export interface EventInspectorSession {
+  readonly identity: string | null;
   readonly selectedTab: InspectorTabId;
   readonly contentRequested: boolean;
   readonly nativeRequested: boolean;
@@ -219,6 +217,7 @@ export interface EventInspectorSession {
 }
 
 export const initialEventInspectorSession: EventInspectorSession = Object.freeze({
+  identity: null,
   selectedTab: "evidence",
   contentRequested: false,
   nativeRequested: false,

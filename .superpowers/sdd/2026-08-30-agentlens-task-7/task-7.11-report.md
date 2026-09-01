@@ -185,9 +185,142 @@ required to preserve accepted boundaries:
 - `apps/web/test-support/fixtureDataRoot.ts`: add only synthetic redacted Task 7.11
   evidence fixtures needed for the mandated production-browser matrix.
 
-The API-bound run detail still exposes only HEAD/branch change booleans, not initial
-and final HEAD/branch values. The UI therefore renders all four fields separately as
-`Unavailable in the bounded run-detail DTO` rather than fabricating values. Closing
-that wire-contract gap would require changing the already accepted API/application
-projection and was intentionally left as a disclosed residual rather than broadening
-Task 7.11.
+## Review-fix round 1
+
+Review base: `2bb80778302bab525f3373be725f6db8c192965d`.
+
+The four Important findings were confirmed and closed without Task 7.12+ work:
+
+- Event/content/native/note action state is synchronously keyed by exact run/event
+  identity. Final Git status/untracked/diff-check/diff state is synchronously keyed by
+  run or run/selection identity, so an effect cannot briefly enable a new identity.
+- The closed run-detail-only contract now carries bounded actual initial/final HEAD
+  plus attached/detached initial/final branch states. Run-list items remain unchanged.
+  Active/missing final evidence remains explicitly `not_yet_available` or
+  `not_captured`; the Final Git evidence UI renders the exact projected values and
+  separate HEAD/branch warnings.
+- Command `/content` now returns a closed `command_evidence` projection with
+  independently explicit command and output availability and truncation. The UI
+  renders both retained fields, lifecycle and exit availability. Binding mismatch is
+  corrupt, policy/content omission stays omitted/not captured, and other client/read
+  failures are unreadable rather than blanket corruption.
+- The diff viewer renders at most 50 file groups, 100 hunks, 200 structural entries,
+  and 400 lines at once. File pages and replacing line pages keep later evidence
+  reachable without cumulative DOM growth. The bound applies across every expanded
+  file, not per file. The controlled view state and one-shot focus request survive
+  the 799/800/801 placement remount without a second immutable diff request.
+
+### Retained review RED evidence
+
+```text
+pnpm vitest --run apps/web/test/eventInspector.test.tsx apps/web/test/gitDiffViewer.test.tsx
+Test Files  2 failed (2)
+Tests       3 failed, 20 passed
+Failures    rapid event switch requested content for the new identity;
+            note/native action state crossed identity;
+            20,000-file fixture mounted 20,000 groups
+exit        1
+
+pnpm vitest --run packages/application/test/runQueryService.test.ts \
+  -t "projects run anchors"
+Test Files  1 failed (1)
+Tests       1 failed, 11 skipped
+Failure     gitState missing from run-detail projection
+exit        1
+
+pnpm vitest --run packages/application/test/evidenceService.test.ts \
+  -t "independently available"
+Test Files  1 failed (1)
+Tests       1 failed, 146 skipped
+Failure     output-only command response omitted retained command
+exit        1
+
+pnpm vitest --run apps/web/test/eventInspector.test.tsx \
+  -t "Final Git evidence action"
+Test Files  1 failed (1)
+Tests       1 failed, 19 skipped
+Failure     run B diff requested before a run-B action
+exit        1
+
+pnpm vitest --run apps/web/test/eventInspector.test.tsx \
+  -t "preserves expanded diff"
+Test Files  1 failed (1)
+Tests       1 failed, 21 skipped
+Failure     responsive remount collapsed the expanded file; after lifting state,
+            the remount still duplicated the immutable diff request
+exit        1
+
+pnpm vitest --run apps/web/test/gitDiffViewer.test.tsx \
+  -t "keeps a large response"
+Test Files  1 failed (1)
+Tests       1 failed, 3 skipped
+Failure     cumulative per-file limit could not replace the first 400 mounted lines
+exit        1
+```
+
+An early two-pattern Vitest invocation failed at CLI parsing because `-t` accepts one
+value. It was immediately rerun as two focused commands; this was a command error,
+not product evidence. One note-identity RED initially used an undefined mock response;
+the mock was corrected to a valid closed note DTO while retaining the cross-identity
+request assertion.
+
+### Review-fix verification
+
+The final full repository suite is recorded below after the last pagination change.
+The focused final matrix covers contracts, run detail, authenticated server reads,
+client routes, event/Final Git identity switching, responsive state, command evidence,
+and bounded diff rendering. Typecheck, production build, diff validation, privacy and
+scope scans were rerun after the final source edit.
+
+Graph coverage was rechecked for all twelve changed production paths against
+generation `2026-09-01T03:18:12Z`. Every path reports `no_recorded_issue`; all report
+`metadata_changed`, so complete source and the full diff were read directly as the
+authoritative fallback.
+
+The required in-app browser skill was loaded and the exact in-app selector was tried.
+It returned `Browser is not available: iab`. No Playwright, standalone browser, Chrome,
+or Computer Use substitute was used. Therefore the 1440/1100/800/799/801 visual and
+live-network review remains an explicit browser residual for this review round; the
+responsive placement/focus/request behavior and large multi-file DOM bound are covered
+by production-component regressions.
+
+The review explicitly authorized the narrow API-contract/application/run-detail and
+server-test expansion needed for stored Git refs and independent command evidence.
+No generic evidence method, list-item expansion, storage shape change, raw fetch/token
+duplication, browser persistence, polling, mutation, or later-task behavior was added.
+
+Final fresh evidence after the last pagination edit:
+
+```text
+contract/run-detail/server/client/identity/diff matrix
+Test Files  6 passed (6)
+Tests       85 passed (85)
+
+command/service/server/inspector/diff matrix
+Test Files  4 passed (4)
+Tests       179 passed (179)
+
+pnpm test
+Test Files  63 passed (63)
+Tests       1288 passed (1288)
+exit        0
+
+pnpm typecheck
+$ tsc -b --pretty false
+exit 0
+
+pnpm build
+142 modules transformed
+bootstrap CSS 23.51 kB (gzip 5.15 kB)
+bootstrap JS  369.56 kB (gzip 108.20 kB)
+exit 0
+
+git diff --check
+exit 0
+```
+
+Focused production scans across the changed web/API/application surfaces returned no
+unsafe HTML, browser storage, polling timers, generic artifact URL, direct component
+fetch, duplicated bearer handling, `changes made by the agent`, `agent changes`, or
+`exact final diff` match. The ignored scratch directory remained the only untracked
+path and was never read, edited, staged, or committed.

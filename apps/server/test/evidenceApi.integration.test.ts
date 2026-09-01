@@ -263,7 +263,11 @@ describe("Task 7.7 evidence API", () => {
     expect(projectedCommandOutput).toEqual({
       schemaVersion: 1,
       eventId: "event-command-production",
-      content: { kind: "command_output", output: "15 tests passed" }
+      content: {
+        kind: "command_evidence",
+        command: { state: "available", text: "pnpm test", truncated: false },
+        output: { state: "available", text: "15 tests passed", truncated: false }
+      }
     });
     const serialized = JSON.stringify([await content.json(), await native.json(), projectedCommandOutput]);
     expect(serialized).toContain("redacted content");

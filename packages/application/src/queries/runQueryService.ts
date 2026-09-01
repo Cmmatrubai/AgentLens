@@ -273,6 +273,24 @@ export function createRunQueryService(input: CreateRunQueryServiceInput): RunQue
         const projected = projectRunListItemV1({ run: model.run, summary, ownership });
         return runDetailV1Schema.parse({
           ...projected,
+          gitState: model.summary.gitEvidence === null
+            ? {
+                state: "unavailable",
+                reason: model.run.status === "starting" || model.run.status === "running"
+                  ? "not_yet_available"
+                  : "not_captured"
+              }
+            : {
+                state: "available",
+                initialHead: model.summary.gitEvidence.initialHead,
+                finalHead: model.summary.gitEvidence.finalHead,
+                initialBranch: model.summary.gitEvidence.initialBranch === null
+                  ? { state: "detached" }
+                  : { state: "attached", value: model.summary.gitEvidence.initialBranch },
+                finalBranch: model.summary.gitEvidence.finalBranch === null
+                  ? { state: "detached" }
+                  : { state: "attached", value: model.summary.gitEvidence.finalBranch }
+              },
           eventCount: model.eventCount,
           anchors: model.anchors
         });

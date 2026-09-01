@@ -347,6 +347,17 @@ describe("RunQueryService", () => {
     setup.repository.appendEvent(event("run-detail", "future-kind", 5, {
       kind: "future.provider.event"
     }));
+    setup.repository.saveGitEvidence("run-detail", {
+      initialHead: "a".repeat(40), finalHead: "b".repeat(40),
+      initialBranch: "main", finalBranch: null,
+      initialStatus: { state: "omitted", reason: "metadata-only" },
+      finalStatus: { state: "omitted", reason: "metadata-only" },
+      trackedFinalDiff: { state: "absent" },
+      diffCheck: { state: "omitted", reason: "metadata-only" },
+      diffCheckPassed: true,
+      untrackedMetadata: { state: "absent" },
+      headChanged: true, branchChanged: true, capturedAt: 10
+    });
     setup.database.close();
 
     const query = service(setup.databasePath, setup.artifactRoot);
@@ -354,6 +365,12 @@ describe("RunQueryService", () => {
     expect(detail).toMatchObject({
       runId: "run-detail",
       eventCount: 6,
+      gitState: {
+        state: "available",
+        initialHead: "a".repeat(40), finalHead: "b".repeat(40),
+        initialBranch: { state: "attached", value: "main" },
+        finalBranch: { state: "detached" }
+      },
       anchors: {
         firstFailure: { eventId: "command-failed", sequence: 1 },
         recorderRecovery: { eventId: "recovery", sequence: 3 },
