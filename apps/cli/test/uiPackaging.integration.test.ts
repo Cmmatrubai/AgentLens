@@ -27,6 +27,23 @@ interface UiProcess {
   close(): Promise<ProcessExit>;
 }
 
+interface StartUiHooks {
+  readonly beforeListenerDiscovery?: (input: Readonly<{
+    origin: string;
+    processGroupId: number;
+  }>) => Promise<void> | void;
+  readonly onProcessGroup?: (processGroupId: number) => void;
+}
+
+interface ShutdownTarget {
+  readonly child: ChildProcess;
+  readonly knownPids: Set<number>;
+  readonly processGroupId: number;
+  origin?: string;
+}
+
+const gracefulShutdownTimeoutMs = 2_000;
+
 async function waitForCondition<T>(
   condition: () => T | false | Promise<T | false>,
   description: string,
@@ -124,10 +141,91 @@ function probeOrigin(origin: string): Promise<"listening" | "refused" | "unavail
   });
 }
 
+function processExit(child: ChildProcess): ProcessExit | false {
+  return child.exitCode !== null || child.signalCode !== null
+    ? { code: child.exitCode, signal: child.signalCode }
+    : false;
+}
+
+function signalProcessGroup(processGroupId: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-processGroupId, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+function safeLifecycleError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "Unknown lifecycle error.";
+  return message
+    .replace(/Bearer\s+[^\s]+/gi, "Bearer [redacted]")
+    .replace(/(https?:\/\/127\.0\.0\.1:\d+\/bootstrap\/)[^\s]+/g, "$1[consumed]");
+}
+
+async function cleanupEvidence(target: ShutdownTarget): Promise<string> {
+  let groupMembers = "inspection-error";
+  try {
+    const pids = await processGroupPids(target.processGroupId);
+    for (const pid of pids) target.knownPids.add(pid);
+    groupMembers = String(pids.length);
+  } catch { /* retain the closed inspection state */ }
+  const knownRemaining = [...target.knownPids].filter((pid) => !pidIsAbsent(pid)).length;
+  const originState = target.origin === undefined ? "not-known" : await probeOrigin(target.origin);
+  return [
+    `wrapper-exited=${processExit(target.child) !== false}`,
+    `group-members=${groupMembers}`,
+    `known-pids-remaining=${knownRemaining}`,
+    `origin=${originState}`
+  ].join(", ");
+}
+
+async function awaitShutdown(target: ShutdownTarget, timeoutMs: number): Promise<ProcessExit> {
+  return waitForCondition(async () => {
+    const groupPids = await processGroupPids(target.processGroupId);
+    for (const pid of groupPids) target.knownPids.add(pid);
+    const exit = processExit(target.child);
+    if (exit === false || groupPids.length !== 0 ||
+        ![...target.knownPids].every(pidIsAbsent)) return false;
+    if (target.origin !== undefined && await probeOrigin(target.origin) !== "refused") return false;
+    return exit;
+  }, "the packaged UI wrapper, process group, known PIDs, and origin to stop", timeoutMs);
+}
+
+async function shutdownProcessGroup(target: ShutdownTarget): Promise<ProcessExit> {
+  let gracefulFailure: unknown;
+  try {
+    for (const pid of await processGroupPids(target.processGroupId)) target.knownPids.add(pid);
+    signalProcessGroup(target.processGroupId, "SIGTERM");
+    return await awaitShutdown(target, gracefulShutdownTimeoutMs);
+  } catch (error) {
+    gracefulFailure = error;
+  }
+
+  try {
+    signalProcessGroup(target.processGroupId, "SIGKILL");
+    return await awaitShutdown(target, 10_000);
+  } catch (forcedFailure) {
+    try { signalProcessGroup(target.processGroupId, "SIGKILL"); } catch { /* evidence below reports the failure */ }
+    const evidence = await cleanupEvidence(target);
+    throw new Error(
+      `Packaged UI cleanup failed after SIGTERM (${safeLifecycleError(gracefulFailure)}) ` +
+      `and SIGKILL (${safeLifecycleError(forcedFailure)}): ${evidence}`
+    );
+  }
+}
+
+function startupAndCleanupFailure(original: unknown, cleanup: unknown): AggregateError {
+  return new AggregateError([
+    new Error(`Startup: ${safeLifecycleError(original)}`),
+    new Error(`Cleanup: ${safeLifecycleError(cleanup)}`)
+  ], "Packaged UI startup failed and cleanup verification also failed.");
+}
+
 async function startUi(
   executable: string,
   args: readonly string[],
-  cwd: string
+  cwd: string,
+  hooks: StartUiHooks = {}
 ): Promise<UiProcess> {
   const child = spawn(executable, [...args], {
     cwd,
@@ -138,74 +236,70 @@ async function startUi(
   });
   if (child.pid === undefined) throw new Error("Packaged UI did not expose a process identifier.");
   const processGroupId = child.pid;
-  const bootstrapUrl = await new Promise<string>((resolve, reject) => {
-    let stdout = "";
-    let stderr = "";
-    const timeout = setTimeout(() => reject(new Error("Timed out waiting for packaged UI startup.")), 20_000);
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stderr?.on("data", (chunk: string) => { stderr += chunk; });
-    child.stdout?.on("data", (chunk: string) => {
-      stdout += chunk;
-      const line = stdout.split(/\r?\n/, 1)[0];
-      if (line === undefined) return;
-      try {
-        const parsed = new URL(line);
-        if (parsed.hostname !== "127.0.0.1" || !parsed.pathname.startsWith("/bootstrap/")) return;
-        clearTimeout(timeout);
-        resolve(parsed.href);
-      } catch { /* wait for a complete first line */ }
-    });
-    child.once("error", (error) => { clearTimeout(timeout); reject(error); });
-    child.once("exit", (code) => {
-      clearTimeout(timeout);
-      reject(new Error(`Packaged UI exited before startup (${code}): ${stderr.slice(0, 160)}`));
-    });
-  });
-  const parsed = new URL(bootstrapUrl);
-  const origin = parsed.origin;
-  const serverPid = await waitForCondition(async () => {
-    const pids = await listeningPids(parsed.port);
-    return pids.length === 1 ? pids[0]! : false;
-  }, "one packaged UI listener PID");
-  const recordedPids = await waitForCondition(async () => {
-    const pids = await processGroupPids(processGroupId);
-    return pids.includes(serverPid) ? pids : false;
-  }, "the listening server to belong to the isolated process group");
-  let closing: Promise<ProcessExit> | undefined;
-  return {
-    bootstrapUrl,
+  const shutdownTarget: ShutdownTarget = {
     child,
-    origin,
-    processGroupId,
-    recordedPids,
-    serverPid,
-    close() {
-      closing ??= (async () => {
-        try {
-          process.kill(-processGroupId, "SIGTERM");
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-        }
-        const exit = await waitForCondition<ProcessExit>(() =>
-          child.exitCode !== null || child.signalCode !== null
-            ? { code: child.exitCode, signal: child.signalCode }
-            : false,
-        "the packaged UI wrapper to exit");
-        await waitForCondition(async () =>
-          (await processGroupPids(processGroupId)).length === 0 ? true : false,
-        "the packaged UI process group to disappear");
-        await waitForCondition(() =>
-          recordedPids.every(pidIsAbsent) ? true : false,
-        "every recorded packaged UI PID to disappear");
-        await waitForCondition(async () =>
-          await probeOrigin(origin) === "refused" ? true : false,
-        "the exact packaged UI origin to refuse connections");
-        return exit;
-      })();
-      return closing;
-    }
+    knownPids: new Set([processGroupId]),
+    processGroupId
   };
+  hooks.onProcessGroup?.(processGroupId);
+  try {
+    const bootstrapUrl = await new Promise<string>((resolve, reject) => {
+      let stdout = "";
+      const timeout = setTimeout(() => reject(new Error("Timed out waiting for packaged UI startup.")), 20_000);
+      child.stdout?.setEncoding("utf8");
+      child.stderr?.resume();
+      child.stdout?.on("data", (chunk: string) => {
+        stdout += chunk;
+        const line = stdout.split(/\r?\n/, 1)[0];
+        if (line === undefined) return;
+        try {
+          const parsed = new URL(line);
+          if (parsed.hostname !== "127.0.0.1" || !parsed.pathname.startsWith("/bootstrap/")) return;
+          clearTimeout(timeout);
+          resolve(parsed.href);
+        } catch { /* wait for a complete first line */ }
+      });
+      child.once("error", (error) => { clearTimeout(timeout); reject(error); });
+      child.once("exit", (code) => {
+        clearTimeout(timeout);
+        reject(new Error(`Packaged UI exited before startup (${code}).`));
+      });
+    });
+    const parsed = new URL(bootstrapUrl);
+    const origin = parsed.origin;
+    shutdownTarget.origin = origin;
+    await hooks.beforeListenerDiscovery?.({ origin, processGroupId });
+    const serverPid = await waitForCondition(async () => {
+      const pids = await listeningPids(parsed.port);
+      return pids.length === 1 ? pids[0]! : false;
+    }, "one packaged UI listener PID");
+    shutdownTarget.knownPids.add(serverPid);
+    const recordedPids = await waitForCondition(async () => {
+      const pids = await processGroupPids(processGroupId);
+      for (const pid of pids) shutdownTarget.knownPids.add(pid);
+      return pids.includes(serverPid) ? pids : false;
+    }, "the listening server to belong to the isolated process group");
+    let closing: Promise<ProcessExit> | undefined;
+    return {
+      bootstrapUrl,
+      child,
+      origin,
+      processGroupId,
+      recordedPids,
+      serverPid,
+      close() {
+        closing ??= shutdownProcessGroup(shutdownTarget);
+        return closing;
+      }
+    };
+  } catch (original) {
+    try {
+      await shutdownProcessGroup(shutdownTarget);
+    } catch (cleanup) {
+      throw startupAndCleanupFailure(original, cleanup);
+    }
+    throw original;
+  }
 }
 
 async function verifyUi(ui: UiProcess): Promise<void> {
@@ -254,7 +348,7 @@ async function verifyWithCleanup(
 }
 
 async function exerciseSuccessAndFailure(
-  start: () => Promise<UiProcess>,
+  start: (hooks?: StartUiHooks) => Promise<UiProcess>,
   expectedExit: ProcessExit,
   mode: "source" | "compiled"
 ): Promise<void> {
@@ -271,6 +365,43 @@ async function exerciseSuccessAndFailure(
     throw new Error("Synthetic post-start verification failure");
   });
   expect(failure).toMatchObject({ message: "Synthetic post-start verification failure" });
+
+  let processGroupId: number | undefined;
+  let origin: string | undefined;
+  let discoveryFailure: unknown;
+  try {
+    await start({
+      onProcessGroup: (observed) => { processGroupId = observed; },
+      beforeListenerDiscovery: (observed) => {
+        origin = observed.origin;
+        throw new Error("Synthetic pre-return listener discovery failure");
+      }
+    });
+  } catch (error) {
+    discoveryFailure = error;
+  }
+  if (processGroupId === undefined || origin === undefined) {
+    throw new Error("The pre-return cleanup probe did not observe the process group and origin.");
+  }
+  try {
+    expect(discoveryFailure).toMatchObject({ message: "Synthetic pre-return listener discovery failure" });
+    expect(await processGroupPids(processGroupId)).toEqual([]);
+    expect(pidIsAbsent(processGroupId)).toBe(true);
+    expect(await probeOrigin(origin)).toBe("refused");
+  } finally {
+    try {
+      process.kill(-processGroupId, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+    await waitForCondition(async () =>
+      (await processGroupPids(processGroupId)).length === 0 ? true : false,
+    "the RED-probe process group to disappear");
+    await waitForCondition(() => pidIsAbsent(processGroupId) ? true : false,
+      "the RED-probe wrapper PID to disappear");
+    await waitForCondition(async () => await probeOrigin(origin) === "refused" ? true : false,
+      "the RED-probe origin to refuse connections");
+  }
 }
 
 async function createEmptyDataRoot(dataRoot: string): Promise<void> {
@@ -283,6 +414,46 @@ afterAll(async () => {
 });
 
 describe("production UI packaging", () => {
+  it("escalates a resistant isolated process group and verifies disappearance", async () => {
+    const child = spawn(process.execPath, ["-e", [
+      "process.on('SIGTERM', () => {});",
+      "process.stdout.write('ready\\n');",
+      "setInterval(() => {}, 1000);"
+    ].join("")], {
+      detached: true,
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    if (child.pid === undefined) throw new Error("The resistant cleanup probe did not expose a PID.");
+    const processGroupId = child.pid;
+    let stdout = "";
+    let startupFailure: unknown;
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => { stdout += chunk; });
+    child.once("error", (error) => { startupFailure = error; });
+    child.once("exit", () => {
+      if (stdout !== "ready\n") startupFailure = new Error("The resistant cleanup probe exited before readiness.");
+    });
+    try {
+      await waitForCondition(() => {
+        if (startupFailure !== undefined) throw startupFailure;
+        return stdout === "ready\n" ? true : false;
+      }, "the resistant cleanup probe readiness", 2_000);
+      expect(await shutdownProcessGroup({
+        child,
+        knownPids: new Set([processGroupId]),
+        processGroupId
+      })).toEqual({ code: null, signal: "SIGKILL" });
+      expect(await processGroupPids(processGroupId)).toEqual([]);
+      expect(pidIsAbsent(processGroupId)).toBe(true);
+    } finally {
+      signalProcessGroup(processGroupId, "SIGKILL");
+      await waitForCondition(async () =>
+        (await processGroupPids(processGroupId)).length === 0 ? true : false,
+      "the resistant cleanup probe group to disappear");
+    }
+  }, 15_000);
+
   it.each([
     ["pnpm agentlens ui", "source", "pnpm", ["agentlens", "ui"], { code: 143, signal: null }],
     ["compiled node ui", "compiled", process.execPath, ["apps/cli/dist/main.js", "ui"], { code: 143, signal: null }]
@@ -294,7 +465,7 @@ describe("production UI packaging", () => {
     const dataRoot = join(root, "data");
     await createEmptyDataRoot(dataRoot);
     await exerciseSuccessAndFailure(
-      () => startUi(executable, [...prefix, "--data-root", dataRoot, "--no-open"], checkout),
+      (hooks) => startUi(executable, [...prefix, "--data-root", dataRoot, "--no-open"], checkout, hooks),
       expectedExit,
       mode
     );
@@ -321,7 +492,7 @@ describe("production UI packaging", () => {
     const dataRoot = join(root, "data");
     await createEmptyDataRoot(dataRoot);
     await exerciseSuccessAndFailure(
-      () => startUi(process.execPath, [freshMain, "ui", "--data-root", dataRoot, "--no-open"], checkout),
+      (hooks) => startUi(process.execPath, [freshMain, "ui", "--data-root", dataRoot, "--no-open"], checkout, hooks),
       { code: 143, signal: null },
       "compiled"
     );

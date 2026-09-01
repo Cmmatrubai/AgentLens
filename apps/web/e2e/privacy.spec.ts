@@ -26,7 +26,24 @@ interface CapturedResponse {
   readonly body: Buffer;
   readonly headers: Buffer;
   readonly pathname: string;
+  readonly status: number;
 }
+
+const deniedExplicitPaths = [
+  "/api/v1/runs/fixture-metadata-only/events/fixture-metadata-only-message/content",
+  "/api/v1/runs/fixture-metadata-only/events/fixture-metadata-only-message/native",
+  "/api/v1/runs/fixture-strict-omitted/events/fixture-strict-omitted-message/content",
+  "/api/v1/runs/fixture-strict-omitted/events/fixture-strict-omitted-message/native"
+] as const;
+
+const contentUnavailableEnvelope = {
+  schemaVersion: 1,
+  error: {
+    code: "content_unavailable",
+    message: "Requested content is unavailable.",
+    retryable: false
+  }
+} as const;
 
 async function readRootBytes(root: string): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -48,7 +65,8 @@ function captureResponse(response: Response): Promise<CapturedResponse> {
   ]).then(([body, headers]) => ({
     body,
     headers: Buffer.from(headers.map(({ name, value }) => `${name}: ${value}\r\n`).join(""), "latin1"),
-    pathname: new URL(response.url()).pathname
+    pathname: new URL(response.url()).pathname,
+    status: response.status()
   }));
 }
 
@@ -68,8 +86,30 @@ async function returnToLedger(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "Run ledger" })).toBeVisible();
 }
 
+test.use({
+  allowedSameOriginFailures: {
+    responses: deniedExplicitPaths.map((pathname) => ({
+      method: "GET",
+      pathname,
+      status: 404
+    }))
+  }
+});
+
 test("ordinary HTTP and durable bytes contain no release privacy sentinels or browser secrets", async ({ page, productionUi, releaseFixture }) => {
   const pendingCaptures: Promise<CapturedResponse>[] = [];
+  let authorizationHeader: Promise<string> | undefined;
+  page.on("request", (request) => {
+    const requested = new URL(request.url());
+    if (authorizationHeader !== undefined || requested.origin !== productionUi.origin ||
+        !requested.pathname.startsWith("/api/")) return;
+    authorizationHeader = request.headerValue("authorization").then((value) => {
+      if (value === null || !value.startsWith("Bearer ")) {
+        throw new Error("The browser did not attach its in-memory authorization to the API request.");
+      }
+      return value;
+    });
+  });
   page.on("response", (response) => {
     if (new URL(response.url()).origin !== productionUi.origin) return;
     pendingCaptures.push(captureResponse(response));
@@ -93,17 +133,41 @@ test("ordinary HTTP and durable bytes contain no release privacy sentinels or br
   await page.locator('[role="option"][data-event-id="fixture-strict-omitted-message"]').click();
   await expect(page.locator(".event-inspector").getByText("fixture-strict-omitted-message", { exact: true })).toBeVisible();
 
+  if (authorizationHeader === undefined) {
+    throw new Error("The privacy journey did not observe browser API authorization.");
+  }
+  const denied = await page.evaluate(async ({ authorization, paths }) => await Promise.all(paths.map(async (pathname) => {
+    const response = await fetch(pathname, { headers: { Authorization: authorization } });
+    return { pathname, status: response.status, body: await response.json() as unknown };
+  })), {
+    authorization: await authorizationHeader,
+    paths: [...deniedExplicitPaths]
+  });
+  expect(denied).toEqual(deniedExplicitPaths.map((pathname) => ({
+    pathname,
+    status: 404,
+    body: contentUnavailableEnvelope
+  })));
+
   const requiredPaths = [
     "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed",
     "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed/content",
     "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed/native",
     "/api/v1/runs/fixture-metadata-only/events/fixture-metadata-only-message",
-    "/api/v1/runs/fixture-strict-omitted/events/fixture-strict-omitted-message"
+    ...deniedExplicitPaths.slice(0, 2),
+    "/api/v1/runs/fixture-strict-omitted/events/fixture-strict-omitted-message",
+    ...deniedExplicitPaths.slice(2)
   ] as const;
   await expect.poll(async () => (await drainResponseCaptures(pendingCaptures))
     .filter(({ pathname }) => requiredPaths.includes(pathname as typeof requiredPaths[number]))
     .map(({ pathname }) => pathname)).toEqual(expect.arrayContaining([...requiredPaths]));
   const captured = await drainResponseCaptures(pendingCaptures);
+  for (const pathname of deniedExplicitPaths) {
+    const matches = captured.filter((response) => response.pathname === pathname);
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.status).toBe(404);
+    expect(JSON.parse(matches[0]!.body.toString("utf8"))).toEqual(contentUnavailableEnvelope);
+  }
   const durable = await readRootBytes(releaseFixture.dataRoot);
   const corpora = [
     durable,

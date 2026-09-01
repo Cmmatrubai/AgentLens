@@ -14,6 +14,11 @@ import {
 } from "../../../packages/storage/src/index.js";
 
 import { createFixtureDataRoot } from "../test-support/fixtureDataRoot.js";
+import {
+  classifyFailedRequests,
+  type FailedRequestObservation,
+  type SuccessfulRequestObservation
+} from "./browserGuard.js";
 
 const workspaceRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const baseTime = Date.UTC(2026, 7, 31, 17, 0, 0);
@@ -271,13 +276,17 @@ export interface AllowedSameOriginFailure {
   readonly status: number;
 }
 
+export interface AllowedSameOriginFailures {
+  readonly responses: readonly AllowedSameOriginFailure[];
+}
+
 export const test = base.extend<{
-  allowedSameOriginFailures: readonly AllowedSameOriginFailure[];
+  allowedSameOriginFailures: AllowedSameOriginFailures;
   browserGuard: void;
   releaseFixture: ReleaseFixture;
   productionUi: ProductionUi;
 }>({
-  allowedSameOriginFailures: [[], { option: true }],
+  allowedSameOriginFailures: [{ responses: [] }, { option: true }],
   releaseFixture: async ({}, use) => {
     const fixture = await createReleaseFixture();
     try { await use(fixture); } finally { await fixture.close(); }
@@ -289,15 +298,19 @@ export const test = base.extend<{
   browserGuard: [async ({ page, productionUi, allowedSameOriginFailures }, use) => {
     const failures: string[] = [];
     const consoleFailures: string[] = [];
-    const failedRequests: Array<Readonly<{
-      endpoint: string;
-      errorText: string;
-      resourceType: string;
-    }>> = [];
+    const failedRequests: FailedRequestObservation[] = [];
+    const successfulRequests: SuccessfulRequestObservation[] = [];
+    let requestLifecycleSequence = 0;
     const activeRequests = new Set<Request>();
-    const remainingAllowed = [...allowedSameOriginFailures];
+    const remainingAllowed = [...allowedSameOriginFailures.responses];
     const observedAllowedStatuses = new Map<number, number>();
-    const successfulEndpoints = new Set<string>();
+    const safeActiveIdentity = (request: Request): string => {
+      const requested = new URL(request.url());
+      const pathname = requested.pathname.startsWith("/bootstrap/")
+        ? "/bootstrap/[consumed]"
+        : requested.pathname;
+      return `${request.resourceType()} ${request.method()} ${requested.origin}${pathname}${requested.search}`;
+    };
     page.on("console", (message) => {
       if (message.type() === "warning" || message.type() === "error") {
         consoleFailures.push(`console ${message.type()}: ${message.text()}`);
@@ -313,20 +326,25 @@ export const test = base.extend<{
     });
     page.on("requestfinished", (request) => { activeRequests.delete(request); });
     page.on("requestfailed", (request) => {
-      const requested = new URL(request.url());
       activeRequests.delete(request);
       failedRequests.push({
-        endpoint: `${request.method()} ${requested.origin}${requested.pathname}`,
         errorText: request.failure()?.errorText ?? "unknown",
-        resourceType: request.resourceType()
+        method: request.method(),
+        resourceType: request.resourceType(),
+        sequence: requestLifecycleSequence++,
+        url: request.url()
       });
     });
     page.on("response", (response) => {
       const requested = new URL(response.url());
       if (requested.origin !== productionUi.origin) return;
-      const endpoint = `${response.request().method()} ${requested.origin}${requested.pathname}`;
       if (response.status() < 400) {
-        successfulEndpoints.add(endpoint);
+        successfulRequests.push({
+          method: response.request().method(),
+          resourceType: response.request().resourceType(),
+          sequence: requestLifecycleSequence++,
+          url: response.url()
+        });
         return;
       }
       const candidate = {
@@ -349,23 +367,32 @@ export const test = base.extend<{
     try {
       await use();
     } finally {
-      await expect.poll(() => activeRequests.size, "All same-origin requests must settle before browser teardown.").toBe(0);
-      for (const failure of failedRequests) {
-        const expectedCancellation = failure.resourceType === "fetch" &&
-          failure.errorText === "net::ERR_ABORTED" && successfulEndpoints.has(failure.endpoint);
-        if (!expectedCancellation) failures.push(`failed request: ${failure.endpoint} ${failure.errorText}`);
+      try {
+        await expect.poll(() => [...activeRequests].map(safeActiveIdentity).sort(),
+          "All same-origin requests must settle before browser teardown.").toEqual([]);
+      } catch {
+        failures.push(`unsettled same-origin requests: ${[...activeRequests].map(safeActiveIdentity).sort().join(", ")}`);
       }
+      failures.push(...classifyFailedRequests(successfulRequests, failedRequests));
+      let automatic404s = observedAllowedStatuses.get(404) ?? 0;
       let automatic503s = observedAllowedStatuses.get(503) ?? 0;
       for (const failure of consoleFailures) {
-        if (failure === "console error: Failed to load resource: the server responded with a status of 503 (Service Unavailable)" &&
+        if (failure === "console error: Failed to load resource: the server responded with a status of 404 (Not Found)" &&
+            automatic404s > 0) {
+          automatic404s -= 1;
+        } else if (failure === "console error: Failed to load resource: the server responded with a status of 503 (Service Unavailable)" &&
             automatic503s > 0) {
           automatic503s -= 1;
         } else {
           failures.push(failure);
         }
       }
+      if (automatic404s !== 0) failures.push("An allowed 404 did not emit the expected Chromium console diagnostic.");
       if (automatic503s !== 0) failures.push("The allowed 503 did not emit the expected Chromium console diagnostic.");
-      expect(remainingAllowed, "Every explicitly allowed HTTP failure must occur exactly once.").toEqual([]);
+      if (remainingAllowed.length > 0) {
+        failures.push(`missing allowed responses: ${remainingAllowed.map((allowed) =>
+          `${allowed.status} ${allowed.method} ${allowed.pathname}`).join(", ")}`);
+      }
       expect(failures, "Browser journeys must not emit warnings, external traffic, or failed requests.").toEqual([]);
     }
   }, { auto: true }]

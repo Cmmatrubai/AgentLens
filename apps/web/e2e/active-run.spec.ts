@@ -20,11 +20,13 @@ test("active zero-event tail polling appends without forcing history and stops a
 
 test.describe("retryable active snapshot failure", () => {
   test.use({
-    allowedSameOriginFailures: [{
-      method: "GET",
-      pathname: "/api/v1/runs/fixture-running/events",
-      status: 503
-    }]
+    allowedSameOriginFailures: {
+      responses: [{
+        method: "GET",
+        pathname: "/api/v1/runs/fixture-running/events",
+        status: 503
+      }]
+    }
   });
 
   test("retains the existing trajectory", async ({ page, productionUi, releaseFixture }) => {

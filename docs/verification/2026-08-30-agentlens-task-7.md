@@ -20,7 +20,7 @@ Fresh commands after the last source edit:
 
 | Command | Exit | Result |
 | --- | ---: | --- |
-| `pnpm test` | 0 | 68 test files passed; 1,349 tests passed. |
+| `pnpm test` | 0 | 69 test files passed; 1,353 tests passed. |
 | `pnpm typecheck` | 0 | `tsc -b --pretty false` passed. |
 | `pnpm build` | 0 | TypeScript and Vite production build passed; 551 modules transformed. |
 | `pnpm test:e2e` | 0 | Chromium project `chromium-production`: 10/10 journeys passed, one worker, zero retries. |
@@ -44,9 +44,11 @@ above 400, and failed requests even when the test body fails. The active-snapsho
 alone permits one exact `GET /api/v1/runs/fixture-running/events` 503. Chromium's exact
 automatic console diagnostic for that consumed 503 is paired with it; other console
 output still fails. Canceled duplicate same-origin fetches are accepted only when the
-same method/origin/path already completed successfully; failed assets and other failed
-requests remain failures. The intentional token-free reload waits for the successful
-authentication-expired shell to finish loading.
+same exact method/origin/path/search already completed successfully, and only one such
+duplicate abort is accepted. A different query and a second duplicate abort remain
+failures. The intentional token-free reload waits for the exact completed-filter API
+request's `requestfinished` event before loading the successful authentication-expired
+shell.
 
 The active fixture asserted owner-only physical modes for the database, WAL, and SHM
 as `[0600, 0600, 0600]` before active reads. The production server read the committed
@@ -69,8 +71,11 @@ risk; they are not a general proof that arbitrary future secrets can never escap
 
 The privacy journey synchronously registers every same-origin response header/body
 promise, exercises the standard event detail, normalized content, and eligible native
-payload plus metadata-only and strict event-detail omission surfaces, and drains the
-whole registry after the final request settles. Durable-root bytes, raw response header
+payload plus metadata-only and strict event-detail, `/content`, and `/native` surfaces,
+and drains the whole registry after the final request settles. All four denied explicit
+surfaces return exact 404 `content_unavailable` envelopes. The existing browser bearer
+is captured and reused only in lexical memory; it is never printed, persisted, placed in
+the DOM, or added to a URL. Durable-root bytes, raw response header
 bytes, raw response bodies, and raw stderr bytes contain none of the named fixture
 sentinels. Their complete redaction-marker set is exactly
 `[[REDACTED:auth-bearer:hmac-sha256:c40257ce4c2ffc291e2b3506f3852709]]`;
@@ -86,10 +91,13 @@ checkouts, avoiding shared build-output races with parallel tests:
   server/web assets after every application/package `src` directory was removed.
 
 All three served a hashed JavaScript asset, no-store bootstrap/API responses, and an
-authenticated empty run list. Each was exercised once successfully and once with a
-deliberate post-start verification failure. Every lifecycle ran in its own detached
-process group, captured the actual listening server PID plus group members without
-logging authorization, received group SIGTERM, and exited with 143. Before temporary
+authenticated empty run list. Each was exercised successfully, with a deliberate
+post-start verification failure, and with a deliberate pre-return listener-discovery
+failure: nine product server lifecycles total. Every lifecycle ran in its own detached
+process group and recorded wrapper/listener/group PIDs without logging authorization.
+Central cleanup sends SIGTERM, awaits the wrapper/group/PIDs/port as one bounded state,
+and sends SIGKILL if graceful or cleanup verification fails. Product lifecycles exited
+with 143; a separate real SIGTERM-resistant helper exited by SIGKILL. Before temporary
 root removal, every recorded PID was absent, the group was empty, and the exact origin
 port refused a connection. The tracked-file copy uses `git ls-files`, so it does not
 traverse unrelated untracked workspace directories.
@@ -124,6 +132,12 @@ the repository.
   browser failure collection, packaging process-tree cleanup, and exact trajectory
   identity/anchor assertions. Fix round 1 addresses all four; acceptance remains pending
   a fresh independent review.
+- The fix-round-1 rereview at `6cb07b2` rejected the gate with 0 Critical and 3
+  Important findings: missing omitted-policy explicit HTTP routes, path-only/unbounded
+  abort correlation, and absent pre-return cleanup/escalation. Its first exact browser
+  matrix also failed 9/10 because one request remained active. Fix round 2 addresses all
+  three findings and the browser race; acceptance remains pending another independent
+  review.
 - Automated axe found no critical or serious violation in the ledger/detail journey
   after the focused contrast correction. Automated axe does not replace the visual and
   keyboard observations above.
@@ -137,6 +151,16 @@ the repository.
   compiled packaging server exited 1 while another test temporarily rebuilt that
   directory. Packaging now builds and runs inside per-case temporary checkouts; the
   focused corrected suite passed 3/3 before the final matrix.
+- The rereview's first exact browser matrix passed 9/10; later reruns did not erase the
+  failure. Round 2 reproduced it in a focused 4/5 run and identified the unsettled request
+  as `GET /api/v1/runs?limit=50&status=completed`. The UI rendered the filtered response
+  before Playwright emitted `requestfinished`; immediate reload could strand that tracked
+  lifecycle. The normal journey now awaits that exact public network event before reload.
+- Round 2's pre-return RED found one live group member after the synthetic listener-
+  discovery rejection. Its resistant mutation also timed out when SIGKILL was removed.
+  A later intermediate packaging run failed 1/4 because mutation restoration swapped the
+  graceful and forced signals; inspection showed SIGKILL was sent first. Restoring the
+  exact SIGTERM/SIGKILL order made focused packaging pass 4/4.
 - A temporary Final Git screenshot caught the bounded diff panel while its structured
   content was loading; the repeatable evidence journey separately waited for and
   asserted the loaded Final Git surface.
@@ -144,5 +168,8 @@ the repository.
   one-use bootstrap path in runner output. It was not committed or retained as an
   artifact; subsequent diagnostics filter to API paths. This is an implementation
   process deviation, not product evidence.
+- During fix round 2, a codebase graph index-status response enumerated excluded path
+  names beneath the protected scratch root. No scratch content was opened, changed,
+  removed, staged, or used. This is retained as a separate process deviation.
 - No hosted, export, comparison, Claude, AGY, Insights, LLM, grading, WebSocket, or SSE
   scope was added.

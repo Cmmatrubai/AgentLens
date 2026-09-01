@@ -3,9 +3,17 @@ import { expect, expectNoHorizontalOverflow, openBootstrapped, test } from "./fi
 test("one-use bootstrap opens the evidence ledger, filters it, and expires on reload", async ({ page, productionUi }) => {
   await openBootstrapped(page, productionUi);
   await page.getByLabel("Run status").selectOption("completed");
+  const filteredRequestFinished = page.waitForEvent("requestfinished", (request) => {
+    const requested = new URL(request.url());
+    return request.method() === "GET" &&
+      requested.origin === productionUi.origin &&
+      requested.pathname === "/api/v1/runs" &&
+      requested.search === "?limit=50&status=completed";
+  });
   await page.getByRole("button", { name: "Apply filters" }).click();
   await expect(page).toHaveURL(/status=completed/);
   await expect(page.getByText("Latest likely test: passed · 1 previous failure")).toBeVisible();
+  await filteredRequestFinished;
   await expectNoHorizontalOverflow(page);
   await page.reload({ waitUntil: "load" });
   await expect(page.getByRole("heading", { name: "Authentication expired" })).toBeVisible();
