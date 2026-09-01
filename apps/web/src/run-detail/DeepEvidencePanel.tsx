@@ -52,7 +52,7 @@ export function DeepEvidencePanel(props: Readonly<{
         </div>
         <button type="button" onClick={props.onClose}>Close deep evidence</button>
       </header>
-      {diff.isPending && <p role="status">Loading structured tracked final diff…</p>}
+      {diff.isPending && <p>Loading structured tracked final diff…</p>}
       {diff.isError && <GitDiffViewer
         evidence={diffEvidence(diff.error)}
         {...(props.viewState === undefined ? {} : { viewState: props.viewState })}

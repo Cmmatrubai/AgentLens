@@ -9,6 +9,7 @@ import {
   type GitDiffViewState
 } from "../evidence/GitDiffViewer.js";
 import { Trajectory } from "../trajectory/Trajectory.js";
+import type { LiveTrajectoryAppend } from "../trajectory/useTrajectoryPages.js";
 import { DeepEvidencePanel } from "./DeepEvidencePanel.js";
 import {
   EventInspector,
@@ -44,6 +45,7 @@ export function RunWorkspace(props: Readonly<{
   runId: string;
   run?: RunDetailV1;
   events: readonly TrajectoryEventV1[];
+  liveAppend: LiveTrajectoryAppend;
   selectedEventId: string | null;
   selectionState: "idle" | "resolving" | "unavailable";
   onSelect: (eventId: string) => void;
@@ -148,7 +150,9 @@ export function RunWorkspace(props: Readonly<{
   return (
     <div className="run-workspace">
       <Trajectory
+        runId={props.runId}
         events={props.events}
+        liveAppend={props.liveAppend}
         selectedEventId={props.selectedEventId}
         expandedGroupKeys={expandedGroupKeys}
         onSelect={props.onSelect}
@@ -170,7 +174,7 @@ export function RunWorkspace(props: Readonly<{
         transition={motionPolicy.inspector}
         data-motion={motionPolicy.reduced ? "reduced" : "standard"}
       >
-        {props.selectionState === "resolving" && <p role="status">Resolving selected event…</p>}
+        {props.selectionState === "resolving" && <p>Resolving selected event…</p>}
         {props.selectionState === "unavailable" && (
           <p role="alert">The selected event is unavailable in this run.</p>
         )}

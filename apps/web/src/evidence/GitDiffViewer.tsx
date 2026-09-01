@@ -128,7 +128,7 @@ export function GitDiffViewer(props: Readonly<{
   if (props.evidence.state === "unavailable") return <AvailabilityNotice state={props.evidence.reason} />;
   const value = props.evidence.value;
   if (value.malformed) {
-    return <p className="availability-notice availability-notice--corrupt" role="status">Structured diff is malformed or corrupt.</p>;
+    return <p className="availability-notice availability-notice--corrupt">Structured diff is malformed or corrupt.</p>;
   }
   if (value.files.length === 0 && value.preamble.length === 0) {
     return <p className="git-diff__empty">Tracked final diff is empty.</p>;

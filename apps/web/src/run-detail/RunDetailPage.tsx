@@ -36,7 +36,7 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
   });
   const select = (eventId: string): void => setSearchParams({ event: eventId });
 
-  if (run.isPending) return <div className="loading-state" role="status">Loading run evidence…</div>;
+  if (run.isPending) return <div className="loading-state">Loading run evidence…</div>;
   if (run.isError) return <ErrorState title="Run evidence unavailable" message="AgentLens could not load this run." />;
   return (
     <section className="run-detail-page">
@@ -46,7 +46,7 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
         <section className="trajectory-selection-error" role="alert">The selected event link is invalid.</section>
       )}
       {polling.degraded && (
-        <p className="live-evidence-state live-evidence-state--degraded" role="status" aria-label="Live evidence status">
+        <p className="live-evidence-state live-evidence-state--degraded" aria-label="Live evidence status">
           Live evidence temporarily unavailable · retrying automatically.
         </p>
       )}
@@ -65,14 +65,14 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
         onJump={select}
       />
       {trajectory.pagingState === "loading" && (
-        <div className="loading-state" role="status">Loading trajectory page…</div>
+        <div className="loading-state">Loading trajectory page…</div>
       )}
       {trajectory.pagingState === "error" && (
         <section className="trajectory-selection-error" role="alert">
           The next trajectory page could not be loaded.
         </section>
       )}
-      {trajectory.state === "loading" && <div className="loading-state" role="status">Loading trajectory events…</div>}
+      {trajectory.state === "loading" && <div className="loading-state">Loading trajectory events…</div>}
       {trajectory.state === "error" && (
         <ErrorState title="Trajectory unavailable" message="AgentLens could not load trajectory events." />
       )}
@@ -81,6 +81,7 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
           runId={runId}
           run={run.data}
           events={trajectory.events}
+          liveAppend={trajectory.liveAppend}
           selectedEventId={selectedEventId}
           selectionState={trajectory.selectionState}
           onSelect={select}

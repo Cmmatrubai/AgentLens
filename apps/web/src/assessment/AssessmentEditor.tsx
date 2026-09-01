@@ -191,7 +191,7 @@ export function AssessmentEditor(props: Readonly<{
             </section>
           )}
           {failureText(mutation.error) !== null && <p className="assessment-editor__error" role="alert">{failureText(mutation.error)}</p>}
-          {mutation.isSuccess && <p role="status">Assessment saved as one human evidence event.</p>}
+          {mutation.isSuccess && <p>Assessment saved as one human evidence event.</p>}
           <div className="assessment-editor__actions">
             <button type="submit" disabled={mutation.isPending || mutation.conflict !== null}>
               {mutation.isPending ? "Saving assessment…" : "Save assessment"}

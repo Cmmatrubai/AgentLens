@@ -27,7 +27,7 @@ const labels: Readonly<Record<AvailabilityState, string>> = Object.freeze({
 
 export function AvailabilityNotice(props: Readonly<{ state: AvailabilityState }>) {
   return (
-    <p className={`availability-notice availability-notice--${props.state}`} role="status">
+    <p className={`availability-notice availability-notice--${props.state}`}>
       {labels[props.state]}
     </p>
   );

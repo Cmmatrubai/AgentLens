@@ -141,7 +141,7 @@ export function EventInspector(props: Readonly<{
           id={`${idPrefix}-panel-evidence`}
         >
           {props.event.detail.state === "unavailable" && <AvailabilityNotice state="unsupported_kind" />}
-          {detail.isPending && props.event.detail.state === "available" && <p role="status">Loading bounded event detail…</p>}
+          {detail.isPending && props.event.detail.state === "available" && <p>Loading bounded event detail…</p>}
           {detail.isError && <AvailabilityNotice state={requestFailure(detail.error)} />}
           {detail.data !== undefined && (
             <>
@@ -215,7 +215,7 @@ export function EventInspector(props: Readonly<{
           aria-labelledby={`${idPrefix}-tab-provider`}
           id={`${idPrefix}-panel-provider`}
         >
-          {native.isPending && <p role="status">Loading redacted provider payload…</p>}
+          {native.isPending && <p>Loading redacted provider payload…</p>}
           {native.isError && <AvailabilityNotice state={requestFailure(native.error)} />}
           {native.data !== undefined && <NativeEvidence response={native.data} />}
         </div>

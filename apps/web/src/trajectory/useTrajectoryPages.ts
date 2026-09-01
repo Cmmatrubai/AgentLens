@@ -37,6 +37,16 @@ export type TrajectoryCursorRequest = Readonly<{
   cursor: string;
 }>;
 
+export type LiveTrajectoryAppend = Readonly<{
+  runId: string;
+  revision: number;
+  identities: readonly string[];
+}>;
+
+function eventIdentity(event: TrajectoryEventV1): string {
+  return `${event.eventId}:${event.sequence}`;
+}
+
 export function trajectoryPageCursors(
   pages: readonly TrajectoryPageV1[],
   requests: readonly (TrajectoryCursorRequest | null)[] = []
@@ -89,6 +99,12 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
   const [error, setError] = useState<unknown>(null);
   const [selectionState, setSelectionState] = useState<"idle" | "resolving" | "unavailable">("idle");
   const [pagingState, setPagingState] = useState<"idle" | "loading" | "error">("idle");
+  const [liveAppend, setLiveAppend] = useState<LiveTrajectoryAppend>({
+    runId,
+    revision: 0,
+    identities: []
+  });
+  const liveAppendRef = useRef<LiveTrajectoryAppend>(liveAppend);
   const initialRequestRef = useRef<object | null>(null);
   const selectionRequestRef = useRef<object | null>(null);
   const cursorRequestRef = useRef<Readonly<{ identity: object; controller: AbortController }> | null>(null);
@@ -99,9 +115,9 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
   const pages = useMemo(() => entries.map(({ page }) => page), [entries]);
   const events = useMemo(() => mergeTrajectoryPages(pages), [pages]);
 
-  const commitPage = useCallback((page: TrajectoryPageV1, request: TrajectoryCursorRequest | null = null): number => {
+  const commitPage = useCallback((page: TrajectoryPageV1, request: TrajectoryCursorRequest | null = null): readonly string[] => {
     const before = mergeTrajectoryPages(entriesRef.current.map((entry) => entry.page));
-    if (page.mode === "after" && page.items.length === 0) return 0;
+    if (page.mode === "after" && page.items.length === 0) return [];
     const base = page.mode === "tail" && before.length === 0
       ? entriesRef.current.filter((entry) => entry.page.mode !== "tail")
       : entriesRef.current;
@@ -109,16 +125,24 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     const after = mergeTrajectoryPages(candidate.map((entry) => entry.page));
     entriesRef.current = candidate;
     setEntries(candidate);
-    const previous = new Set(before.map(({ eventId, sequence }) => `${eventId}:${sequence}`));
-    return after.filter(({ eventId, sequence }) => !previous.has(`${eventId}:${sequence}`)).length;
+    const previous = new Set(before.map(eventIdentity));
+    return after.map(eventIdentity).filter((identity) => !previous.has(identity));
   }, []);
 
   const appendPage = useCallback((page: TrajectoryPageV1): number => {
     if (page.mode !== "tail" && page.mode !== "after") {
       throw new Error("Active trajectory polling returned an incompatible page mode.");
     }
-    return commitPage(page);
-  }, [commitPage]);
+    const appended = commitPage(page);
+    const current = liveAppendRef.current.runId === runId
+      ? liveAppendRef.current
+      : { runId, revision: 0, identities: [] };
+    const identities = [...new Set([...current.identities, ...appended])];
+    const next = { runId, revision: current.revision + 1, identities };
+    liveAppendRef.current = next;
+    setLiveAppend(next);
+    return appended.length;
+  }, [commitPage, runId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -128,6 +152,9 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     cursorRequestRef.current = null;
     selectionRequestRef.current = null;
     entriesRef.current = [];
+    const resetLiveAppend = { runId, revision: 0, identities: [] };
+    liveAppendRef.current = resetLiveAppend;
+    setLiveAppend(resetLiveAppend);
     setEntries([]);
     setState("loading");
     setError(null);
@@ -221,6 +248,9 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     error,
     selectionState,
     pagingState,
+    liveAppend: liveAppend.runId === runId
+      ? liveAppend
+      : { runId, revision: 0, identities: [] },
     appendPage,
     hasEarlier: cursors.earlier !== null && pagingState !== "loading",
     hasLater: cursors.later !== null && pagingState !== "loading",

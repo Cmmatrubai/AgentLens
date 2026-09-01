@@ -6,11 +6,14 @@ import { findTrajectoryRowIndex, projectTrajectory } from "./projectTrajectory.j
 import { RelationshipOverlay } from "./RelationshipOverlay.js";
 import { TrajectoryRow } from "./TrajectoryRow.js";
 import { useFollowTail } from "./useFollowTail.js";
+import type { LiveTrajectoryAppend } from "./useTrajectoryPages.js";
 
 import type { TrajectoryEventV1 } from "@agentlens/api-contract";
 
 export function Trajectory(props: Readonly<{
   events: readonly TrajectoryEventV1[];
+  runId?: string;
+  liveAppend?: LiveTrajectoryAppend;
   selectedEventId: string | null;
   expandedGroupKeys: ReadonlySet<string>;
   onSelect: (eventId: string) => void;
@@ -86,7 +89,12 @@ export function Trajectory(props: Readonly<{
     if (rows.length === 0) return;
     virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
   }, [rows.length, virtualizer]);
-  const followTail = useFollowTail({ events: props.events, onFollowTail: scrollToLatest });
+  const runId = props.runId ?? props.events[0]?.runId ?? "";
+  const followTail = useFollowTail({
+    runId,
+    liveAppend: props.liveAppend ?? { runId, revision: 0, identities: [] },
+    onFollowTail: scrollToLatest
+  });
 
   useLayoutEffect(() => {
     const anchor = anchorRef.current;
@@ -142,16 +150,20 @@ export function Trajectory(props: Readonly<{
   };
 
   if (rows.length === 0) {
-    return <section className="trajectory-empty" role="status">No trajectory events are available for this run.</section>;
+    return <section className="trajectory-empty">No trajectory events are available for this run.</section>;
   }
   return (
     <section className="trajectory-shell" aria-label="Live execution trajectory">
       {followTail.newEventCount > 0 && (
         <div className="trajectory-new-events">
           <button type="button" onClick={() => {
-            followTail.jumpToLatest();
             const latest = props.events.at(-1);
-            if (latest !== undefined) props.onSelect(latest.eventId);
+            if (latest !== undefined) {
+              const latestIndex = findTrajectoryRowIndex(rows, latest.eventId);
+              if (latestIndex !== -1) focus(latestIndex);
+              props.onSelect(latest.eventId);
+            }
+            followTail.jumpToLatest();
           }}>
             {followTail.newEventCount} new {followTail.newEventCount === 1 ? "event" : "events"}
           </button>

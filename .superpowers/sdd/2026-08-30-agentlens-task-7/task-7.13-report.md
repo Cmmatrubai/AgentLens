@@ -291,3 +291,163 @@ as proof of completeness.
 Exact-browser interaction evidence is incomplete because the default production route
 could not render an accessible run and Task 7.14 fixtures were explicitly out of scope.
 All automated, type, build, diff, dependency, privacy, and scope gates are green.
+
+## Fix round 1 — live append provenance, jump focus, and sole live region
+
+The adversarial Task 7.13 review identified three Important findings. This focused
+round fixes all three without changing API, server, application, storage, assessment
+mutation, evidence chronology, or Task 7.14 fixture/harness behavior.
+
+### Fix RED evidence
+
+Before production edits, the following command exercised the new real-component
+regressions:
+
+```text
+pnpm vitest --run apps/web/test/activePolling.test.tsx
+```
+
+Result: 6 of 12 tests failed for the intended production breaks and 6 passed.
+
+- Earlier and later cursor merges incorrectly produced `1 new event`.
+- A deferred around-selection backfill incorrectly produced `1 new event`.
+- A same-component run change retained an incorrect pending count (`2 new events`).
+- Enter and Space activation selected the latest item but left focus on `BODY`.
+- A history-mode active page with a pending append, paging, and retryable 503 exposed
+  three polite status/live regions instead of one.
+- The exact duplicate active append regression already passed, proving the merged
+  event collection deduplicated evidence but did not yet establish the required
+  append-source boundary.
+
+After the production change, the same file reported 8 passing and 4 failing tests.
+Those four were older direct `Trajectory` setups that still relied on the rejected
+implicit collection-difference behavior. Updating those fixtures to provide the same
+explicit live-append source used by `RunDetailPage` made the complete focused file
+green.
+
+### Fix implementation
+
+- `useTrajectoryPages` now publishes a run-scoped, revisioned live-append ledger only
+  from its validated polling `appendPage` commit. Exact `eventId:sequence` identities
+  are deduplicated. Initial tail loads, earlier/later cursor pages, and around-selection
+  pages still merge immutably but never enter this live source. The ledger resets when
+  `runId` changes.
+- `useFollowTail` consumes only that explicit source. It no longer infers appends from
+  identities newly appearing anywhere in the merged trajectory collection.
+- `Trajectory` focuses the latest canonical virtual row, selects its event, and then
+  clears/follows the tail when the new-event button is activated. Enter and Space both
+  retain focus on the latest selected row after the button unmounts.
+- The pending new-event count is the sole polite live region in the rendered detail
+  page. Degradation, initial/paging/selection loading, empty trajectory, availability,
+  Git loading/corruption, inspector loading, deep-evidence loading, and assessment
+  success remain visible text but no longer have `role=status` or `aria-live` semantics.
+
+### Fix GREEN evidence
+
+Focused command:
+
+```text
+pnpm vitest --run apps/web/test/activePolling.test.tsx
+```
+
+Result: 1 file passed, 12 tests passed.
+
+Focused plus adjacent web regressions:
+
+```text
+pnpm vitest --run apps/web/test/activePolling.test.tsx apps/web/test/accessibility.test.tsx apps/web/test/trajectoryPages.test.tsx apps/web/test/trajectory.test.tsx apps/web/test/eventInspector.test.tsx apps/web/test/assessment.test.tsx apps/web/test/apiClient.test.ts apps/web/test/gitDiffViewer.test.tsx apps/web/test/evidenceCollections.test.tsx
+```
+
+Result: 9 files passed, 113 tests passed. An intermediate run caught that
+`aria-live="off"` still violated the existing standalone accessibility assertion;
+systematic source review led to removing live/status semantics entirely from non-count
+facts. The repeated command then passed all 113 tests.
+
+Fresh full verification after the last production edit:
+
+```text
+pnpm test
+pnpm typecheck
+pnpm build
+git diff --check
+```
+
+Results:
+
+- Full suite: 67 files passed, 1,339 tests passed.
+- Typecheck: passed.
+- Production build: passed; Vite transformed 551 modules, emitted JS 514.89 kB
+  (154.69 kB gzip), CSS 28.92 kB (5.98 kB gzip), and manifest 5.46 kB. The existing
+  greater-than-500-kB advisory remains non-fatal.
+- Diff whitespace check: passed with no output.
+
+### Exact Browser residual
+
+At the required meaningful post-build milestone I invoked the exact in-app Browser.
+The host returned `Browser is not available: iab`. Per the binding constraint I did
+not substitute Chrome, standalone Playwright, or another backend. Therefore there is
+no new exact-browser interaction evidence in this fix round. The active append,
+historical paging/backfill, duplicate, run-change, retryable-503/live-region, and
+Enter/Space focus behaviors are instead covered by the real production-component
+integration tests above. The earlier Task 7.13 responsive production-browser evidence
+and its fixture-limited residual remain unchanged.
+
+### Fix scope, privacy, dependency, and graph review
+
+- The changed-source diff contains no browser storage, authorization/Bearer handling,
+  WebSocket, EventSource, external request/asset, Playwright, prototype, interval, or
+  animation-frame addition.
+- Production output contains the same local Vite JS/CSS/font asset set and no source
+  maps. Minified React contains its upstream diagnostic documentation URL strings;
+  no app-authored external asset or request was added.
+- `apps/web/package.json` and `pnpm-lock.yaml` are unchanged in this fix round, so the
+  accepted Motion/axe dependency rationale and lockfile remain unchanged.
+- Changed-file review contains no server, storage, application, API-contract,
+  fixture/harness, release, or Task 7.14 path.
+- The pre-existing untracked `.scratch-e2e-ONFuP0/` remained unstaged and was not read,
+  edited, or used. The main-repository `design-prototypes/` directory was not read or
+  touched.
+- Graph project `AgentLens-task7` remains the moderate generation recorded at
+  `2026-09-01T06:28:00Z` with no recorded parse/skipped issues. Final coverage reports
+  `no_recorded_issue` but `metadata_changed` for every relied-on production file;
+  both edited web tests are deliberately excluded by the graph's fast pattern. All
+  current changed production and test sources were therefore reviewed directly.
+  Coverage remains best-effort rather than proof of completeness.
+
+### Fix changed files and deviations
+
+Modified:
+
+- `apps/web/src/trajectory/useTrajectoryPages.ts`
+- `apps/web/src/trajectory/useFollowTail.ts`
+- `apps/web/src/trajectory/Trajectory.tsx`
+- `apps/web/src/run-detail/RunWorkspace.tsx`
+- `apps/web/src/run-detail/RunDetailPage.tsx`
+- `apps/web/src/run-detail/DeepEvidencePanel.tsx`
+- `apps/web/src/run-detail/EventInspector.tsx`
+- `apps/web/src/evidence/AvailabilityNotice.tsx`
+- `apps/web/src/evidence/GitEvidenceSummary.tsx`
+- `apps/web/src/evidence/GitDiffViewer.tsx`
+- `apps/web/src/assessment/AssessmentEditor.tsx`
+- `apps/web/test/activePolling.test.tsx`
+
+The loading/availability/assessment files are the smallest integration deviation from
+the review's named core files: each can coexist within `RunDetailPage` while a pending
+new-event count is present, so their implicit polite `role=status` semantics had to be
+removed to satisfy the frozen sole-live-region contract. Their visible facts and all
+mutation/evidence behavior are unchanged.
+
+### Fix self-review
+
+- Live counts now have an auditable producer boundary at the accepted polling append
+  commit; collection merge topology cannot increment them.
+- Exact event identity dedupe prevents duplicate polling pages from incrementing the
+  count, while merge validation continues to contain contradictions before mutation.
+- Run identity is present in both producer and consumer state, preventing cross-run
+  carryover.
+- The jump action uses the existing bounded virtual focus mechanism and does not force
+  scrolling while merely receiving new events in history mode.
+- Exactly one `role=status`/`aria-live=polite` remains under the detail trajectory
+  surfaces, and it exists only while announcing the pending new-event count.
+- No evidence was rewritten/reordered; no assessment was retried/resubmitted; and no
+  Task 7.14 work was introduced.

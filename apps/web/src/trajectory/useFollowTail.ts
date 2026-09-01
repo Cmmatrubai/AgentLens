@@ -1,36 +1,55 @@
-import type { TrajectoryEventV1 } from "@agentlens/api-contract";
 import { useLayoutEffect, useRef, useState } from "react";
+
+import type { LiveTrajectoryAppend } from "./useTrajectoryPages.js";
 
 const tailThresholdPx = 32;
 
-function identity(event: TrajectoryEventV1): string {
-  return `${event.eventId}:${event.sequence}`;
-}
-
 export function useFollowTail(input: Readonly<{
-  events: readonly TrajectoryEventV1[];
+  runId: string;
+  liveAppend: LiveTrajectoryAppend;
   onFollowTail: () => void;
 }>) {
-  const previousRef = useRef(input.events.map(identity));
   const followingRef = useRef(true);
   const onFollowTailRef = useRef(input.onFollowTail);
   onFollowTailRef.current = input.onFollowTail;
-  const [newEventCount, setNewEventCount] = useState(0);
-  const signature = input.events.map(identity).join("|");
+  const processedRef = useRef<Readonly<{
+    runId: string;
+    revision: number;
+    identities: Set<string>;
+  }>>({ runId: input.runId, revision: 0, identities: new Set() });
+  const [countState, setCountState] = useState({ runId: input.runId, count: 0 });
+  const newEventCount = countState.runId === input.runId ? countState.count : 0;
 
   useLayoutEffect(() => {
-    const previous = new Set(previousRef.current);
-    const next = input.events.map(identity);
-    const appended = next.filter((eventIdentity) => !previous.has(eventIdentity)).length;
-    previousRef.current = next;
+    if (processedRef.current.runId !== input.runId) {
+      processedRef.current = { runId: input.runId, revision: 0, identities: new Set() };
+      followingRef.current = true;
+      setCountState({ runId: input.runId, count: 0 });
+    }
+    if (input.liveAppend.runId !== input.runId ||
+        input.liveAppend.revision <= processedRef.current.revision) return;
+    const identities = new Set(processedRef.current.identities);
+    const appended = input.liveAppend.identities.filter((identity) => {
+      if (identities.has(identity)) return false;
+      identities.add(identity);
+      return true;
+    }).length;
+    processedRef.current = {
+      runId: input.runId,
+      revision: input.liveAppend.revision,
+      identities
+    };
     if (appended === 0) return;
     if (followingRef.current) {
-      setNewEventCount(0);
+      setCountState({ runId: input.runId, count: 0 });
       onFollowTailRef.current();
     } else {
-      setNewEventCount((current) => current + appended);
+      setCountState((current) => ({
+        runId: input.runId,
+        count: current.runId === input.runId ? current.count + appended : appended
+      }));
     }
-  }, [signature]);
+  }, [input.liveAppend, input.runId]);
 
   return {
     newEventCount,
@@ -40,7 +59,7 @@ export function useFollowTail(input: Readonly<{
     },
     jumpToLatest(): void {
       followingRef.current = true;
-      setNewEventCount(0);
+      setCountState({ runId: input.runId, count: 0 });
       onFollowTailRef.current();
     }
   } as const;

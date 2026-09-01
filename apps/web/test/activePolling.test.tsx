@@ -2,6 +2,7 @@ import type { RunDetailV1, TrajectoryEventV1, TrajectoryPageV1 } from "@agentlen
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -148,14 +149,14 @@ function api(input: Readonly<{
   };
 }
 
-function renderDetail(client: AgentLensApiClient) {
+function renderDetail(client: AgentLensApiClient, path = "/runs/run-active") {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } }
   });
   return render(
     <QueryClientProvider client={queryClient}>
       <ApiClientProvider client={client}>
-        <MemoryRouter initialEntries={["/runs/run-active"]} future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+        <MemoryRouter initialEntries={[path]} future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
           <Routes><Route path="/runs/:runId" element={<RunDetailPage />} /></Routes>
         </MemoryRouter>
       </ApiClientProvider>
@@ -168,6 +169,20 @@ async function flushQueries(): Promise<void> {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((accept) => { resolve = accept; });
+  return { promise, resolve };
+}
+
+function politeLiveRegions(root: ParentNode): Element[] {
+  return [...new Set([
+    ...[...root.querySelectorAll('[role="status"]')]
+      .filter((element) => element.getAttribute("aria-live") !== "off"),
+    ...root.querySelectorAll('[aria-live="polite"]')
+  ])];
 }
 
 afterEach(() => {
@@ -258,7 +273,7 @@ describe("active run polling", () => {
     expect(screen.getByText("Committed event 4")).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
     expect(screen.getByText("Committed event 4")).toBeVisible();
-    expect(screen.getByRole("status", { name: "Live evidence status" })).toHaveTextContent(
+    expect(screen.getByLabelText("Live evidence status")).toHaveTextContent(
       "Live evidence temporarily unavailable"
     );
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
@@ -295,7 +310,9 @@ describe("follow tail", () => {
     const onSelect = vi.fn();
     const view = render(
       <Trajectory
+        runId="run-active"
         events={[event(1), event(2)]}
+        liveAppend={{ runId: "run-active", revision: 0, identities: [] }}
         selectedEventId="event-1"
         expandedGroupKeys={new Set()}
         onSelect={onSelect}
@@ -312,7 +329,9 @@ describe("follow tail", () => {
     fireEvent.scroll(viewport);
     view.rerender(
       <Trajectory
+        runId="run-active"
         events={[event(1), event(2), event(3)]}
+        liveAppend={{ runId: "run-active", revision: 1, identities: ["event-3:3"] }}
         selectedEventId="event-1"
         expandedGroupKeys={new Set()}
         onSelect={onSelect}
@@ -328,5 +347,314 @@ describe("follow tail", () => {
     await userEvent.click(jump);
     expect(onSelect).toHaveBeenCalledWith("event-3");
     expect(screen.queryByRole("button", { name: /new event/ })).not.toBeInTheDocument();
+  });
+
+  it("catches historical earlier and later cursor pages being counted as live appends", async () => {
+    const initial = {
+      ...page("tail", [event(50)], 100),
+      window: {
+        state: "nonempty" as const,
+        minSequence: 50,
+        maxSequence: 50,
+        latestCommittedSequence: 100,
+        hasEarlier: true,
+        hasLater: true,
+        earlierCursor: "earlier-active",
+        laterCursor: "later-active"
+      }
+    };
+    const earlier = {
+      ...page("tail", [event(1)], 100),
+      mode: "cursor" as const,
+      window: {
+        state: "nonempty" as const,
+        minSequence: 1,
+        maxSequence: 1,
+        latestCommittedSequence: 100,
+        hasEarlier: false,
+        hasLater: true,
+        earlierCursor: null,
+        laterCursor: "later-active"
+      }
+    };
+    const later = {
+      ...page("tail", [event(100)], 100),
+      mode: "cursor" as const,
+      window: {
+        state: "nonempty" as const,
+        minSequence: 100,
+        maxSequence: 100,
+        latestCommittedSequence: 100,
+        hasEarlier: true,
+        hasLater: false,
+        earlierCursor: "earlier-active",
+        laterCursor: null
+      }
+    };
+    const getEvents = vi.fn(async (_runId: string, query: EventPageQueryV1) => {
+      if (query.cursor === "earlier-active") return earlier;
+      if (query.cursor === "later-active") return later;
+      return initial;
+    });
+    renderDetail(api({ getRun: vi.fn(async () => run("completed", 100)), getEvents }));
+    const viewport = await screen.findByRole("listbox", { name: "Execution trajectory" });
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 100 }
+    });
+    fireEvent.scroll(viewport);
+
+    await userEvent.click(screen.getByRole("button", { name: "Load earlier" }));
+    expect(await screen.findByText("Committed event 1")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /new events?/ })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Load later" }));
+    expect(await screen.findByText("Committed event 100")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /new events?/ })).not.toBeInTheDocument();
+  });
+
+  it("catches an around-selection backfill being counted as a live append", async () => {
+    const selected = event(75);
+    const around = deferred<TrajectoryPageV1>();
+    const aroundPage = {
+          ...page("tail", [selected], 100),
+          mode: "around" as const,
+          window: {
+            state: "nonempty" as const,
+            minSequence: 75,
+            maxSequence: 75,
+            latestCommittedSequence: 100,
+            hasEarlier: true,
+            hasLater: true,
+            earlierCursor: "around-earlier",
+            laterCursor: "around-later"
+          }
+        };
+    const getEvents = vi.fn((_runId: string, query: EventPageQueryV1) => query.aroundSequence === 75
+      ? around.promise
+      : Promise.resolve({
+          ...page("tail", [event(50)], 100),
+          window: {
+            state: "nonempty" as const,
+            minSequence: 50,
+            maxSequence: 50,
+            latestCommittedSequence: 100,
+            hasEarlier: true,
+            hasLater: true,
+            earlierCursor: "head-earlier",
+            laterCursor: "head-later"
+          }
+        }));
+    const getEvent = vi.fn(async () => ({
+      schemaVersion: 1 as const,
+      eventId: selected.eventId,
+      runId: selected.runId,
+      sequence: selected.sequence,
+      kind: selected.kind,
+      status: selected.status,
+      provenance: selected.provenance,
+      relationships: [],
+      presentationClass: selected.presentationClass,
+      role: "agent" as const,
+      content: { state: "unavailable" as const, reason: "not_captured" as const }
+    }));
+    const client = api({ getRun: vi.fn(async () => run("completed", 100)), getEvents });
+    client.getEvent = getEvent;
+    renderDetail(client, "/runs/run-active?event=event-75");
+    const viewport = await screen.findByRole("listbox", { name: "Execution trajectory" });
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 100 }
+    });
+    fireEvent.scroll(viewport);
+    await act(async () => around.resolve(aroundPage));
+
+    expect(await screen.findByRole("option", { name: /Committed event 75/ })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /new events?/ })).not.toBeInTheDocument();
+  });
+
+  it("catches a duplicate live page increasing the genuine active-append count", async () => {
+    vi.useFakeTimers();
+    const getRun = vi.fn(async () => run("running", 3));
+    const getEvents = vi.fn()
+      .mockResolvedValueOnce(page("tail", [event(1), event(2)], 2))
+      .mockResolvedValueOnce(page("after", [event(3)], 3))
+      .mockResolvedValueOnce(page("after", [event(3)], 3));
+    renderDetail(api({ getRun, getEvents }));
+    await flushQueries();
+    const viewport = screen.getByRole("listbox", { name: "Execution trajectory" });
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 100 }
+    });
+    fireEvent.scroll(viewport);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(screen.getByRole("button", { name: "1 new event" })).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(screen.getByRole("button", { name: "1 new event" })).toBeVisible();
+  });
+
+  it("catches degraded and paging facts creating extra polite regions beside a pending new-event count", async () => {
+    vi.useFakeTimers();
+    const degraded = new AgentLensClientError({
+      code: "active_snapshot_unavailable",
+      status: 503,
+      retryable: true,
+      message: "Active run evidence is temporarily unavailable."
+    });
+    const earlier = deferred<TrajectoryPageV1>();
+    let liveRead = 0;
+    const getRun = vi.fn()
+      .mockResolvedValueOnce(run("running", 3))
+      .mockResolvedValueOnce(run("running", 4))
+      .mockRejectedValueOnce(degraded);
+    const getEvents = vi.fn((_runId: string, query: EventPageQueryV1) => {
+      if (query.cursor !== undefined) return earlier.promise;
+      liveRead += 1;
+      if (liveRead === 1) return Promise.resolve(page("tail", [event(2), event(3)], 3));
+      if (liveRead === 2) return Promise.resolve(page("after", [event(4)], 4));
+      return Promise.reject(degraded);
+    });
+    const client = api({ getRun, getEvents });
+    client.getEvent = vi.fn(async () => ({
+      schemaVersion: 1,
+      eventId: "event-3",
+      runId: "run-active",
+      sequence: 3,
+      kind: "message",
+      status: { state: "known", value: "completed" },
+      provenance: "observed",
+      relationships: [],
+      presentationClass: "message",
+      role: "agent",
+      content: { state: "unavailable", reason: "not_captured" }
+    }));
+    const view = renderDetail(client, "/runs/run-active?event=event-3");
+    await flushQueries();
+    const viewport = screen.getByRole("listbox", { name: "Execution trajectory" });
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 100 }
+    });
+    fireEvent.scroll(viewport);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(screen.getByRole("button", { name: "1 new event" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Load earlier" }));
+    expect(screen.getByText("Loading trajectory page…")).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+
+    expect(screen.getByText("Committed event 4")).toBeVisible();
+    expect(screen.getByText(/Live evidence temporarily unavailable/)).toBeVisible();
+    const liveRegions = politeLiveRegions(view.container);
+    expect(liveRegions).toHaveLength(1);
+    expect(liveRegions[0]).toHaveTextContent("1 new event available");
+
+    await act(async () => earlier.resolve({
+      ...page("tail", [event(1)], 4),
+      mode: "cursor"
+    }));
+  });
+
+  it("catches a pending live count carrying across a same-component run identity change", async () => {
+    const view = render(
+      <Trajectory
+        runId="run-active"
+        events={[event(1), event(2)]}
+        liveAppend={{ runId: "run-active", revision: 0, identities: [] }}
+        selectedEventId="event-1"
+        expandedGroupKeys={new Set()}
+        onSelect={vi.fn()}
+        onEscapeDeepEvidence={vi.fn()}
+        onRelationshipJump={vi.fn()}
+      />
+    );
+    const viewport = screen.getByRole("listbox", { name: "Execution trajectory" });
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 100 }
+    });
+    fireEvent.scroll(viewport);
+    view.rerender(
+      <Trajectory
+        runId="run-active"
+        events={[event(1), event(2), event(3)]}
+        liveAppend={{ runId: "run-active", revision: 1, identities: ["event-3:3"] }}
+        selectedEventId="event-1"
+        expandedGroupKeys={new Set()}
+        onSelect={vi.fn()}
+        onEscapeDeepEvidence={vi.fn()}
+        onRelationshipJump={vi.fn()}
+      />
+    );
+    expect(await screen.findByRole("button", { name: "1 new event" })).toBeVisible();
+
+    const runBEvent = { ...event(1), runId: "run-b", eventId: "run-b-event-1" };
+    view.rerender(
+      <Trajectory
+        runId="run-b"
+        events={[runBEvent]}
+        liveAppend={{ runId: "run-b", revision: 0, identities: [] }}
+        selectedEventId={runBEvent.eventId}
+        expandedGroupKeys={new Set()}
+        onSelect={vi.fn()}
+        onEscapeDeepEvidence={vi.fn()}
+        onRelationshipJump={vi.fn()}
+      />
+    );
+    expect(screen.queryByRole("button", { name: /new events?/ })).not.toBeInTheDocument();
+  });
+
+  it.each(["{Enter}", " "])("catches %s jump activation dropping focus after the button unmounts", async (key) => {
+    function ControlledTrajectory({ items, liveAppend }: Readonly<{
+      items: readonly TrajectoryEventV1[];
+      liveAppend: Readonly<{ runId: string; revision: number; identities: readonly string[] }>;
+    }>) {
+      const [selectedEventId, setSelectedEventId] = useState("event-1");
+      return (
+        <Trajectory
+          runId="run-active"
+          events={items}
+          liveAppend={liveAppend}
+          selectedEventId={selectedEventId}
+          expandedGroupKeys={new Set()}
+          onSelect={setSelectedEventId}
+          onEscapeDeepEvidence={vi.fn()}
+          onRelationshipJump={vi.fn()}
+        />
+      );
+    }
+    const view = render(
+      <ControlledTrajectory
+        items={[event(1), event(2)]}
+        liveAppend={{ runId: "run-active", revision: 0, identities: [] }}
+      />
+    );
+    const viewport = screen.getByRole("listbox", { name: "Execution trajectory" });
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 1_000 },
+      scrollTop: { configurable: true, writable: true, value: 100 }
+    });
+    fireEvent.scroll(viewport);
+    view.rerender(
+      <ControlledTrajectory
+        items={[event(1), event(2), event(3)]}
+        liveAppend={{ runId: "run-active", revision: 1, identities: ["event-3:3"] }}
+      />
+    );
+
+    const jump = await screen.findByRole("button", { name: "1 new event" });
+    jump.focus();
+    await userEvent.keyboard(key);
+    const latest = screen.getByRole("option", { selected: true });
+    await waitFor(() => expect(latest).toHaveFocus());
+    expect(latest).toHaveAttribute("data-event-id", "event-3");
+    expect(document.activeElement).not.toBe(document.body);
   });
 });

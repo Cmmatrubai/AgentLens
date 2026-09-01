@@ -66,16 +66,16 @@ export function GitEvidenceSummary(props: Readonly<{
         <button type="button" onClick={() => request("check")}>Load git diff --check</button>
         <button type="button" onClick={props.onOpenDiff}>Open tracked final diff</button>
       </div>
-      {initial.isFetching && <p role="status">Loading initial Git status…</p>}
+      {initial.isFetching && <p>Loading initial Git status…</p>}
       {initial.isError && <AvailabilityNotice state={failureState(initial.error)} />}
       {initial.data !== undefined && <GitStatusView title="Initial Git status" value={initial.data} />}
-      {final.isFetching && <p role="status">Loading final Git status…</p>}
+      {final.isFetching && <p>Loading final Git status…</p>}
       {final.isError && <AvailabilityNotice state={failureState(final.error)} />}
       {final.data !== undefined && <GitStatusView title="Final Git status" value={final.data} />}
-      {untracked.isFetching && <p role="status">Loading untracked-file metadata…</p>}
+      {untracked.isFetching && <p>Loading untracked-file metadata…</p>}
       {untracked.isError && <AvailabilityNotice state={failureState(untracked.error)} />}
       {untracked.data !== undefined && <UntrackedMetadataView value={untracked.data} />}
-      {diffCheck.isFetching && <p role="status">Loading git diff --check…</p>}
+      {diffCheck.isFetching && <p>Loading git diff --check…</p>}
       {diffCheck.isError && <AvailabilityNotice state={failureState(diffCheck.error)} />}
       {diffCheck.data !== undefined && (
         <section className="git-diff-check">
