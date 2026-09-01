@@ -18,7 +18,16 @@ test("active zero-event tail polling appends without forcing history and stops a
   await expect(page.getByText("completed", { exact: true }).first()).toBeVisible({ timeout: 7_500 });
 });
 
-test("retryable active snapshot failure retains the existing trajectory", async ({ page, productionUi, releaseFixture }) => {
+test.describe("retryable active snapshot failure", () => {
+  test.use({
+    allowedSameOriginFailures: [{
+      method: "GET",
+      pathname: "/api/v1/runs/fixture-running/events",
+      status: 503
+    }]
+  });
+
+  test("retains the existing trajectory", async ({ page, productionUi, releaseFixture }) => {
   await openBootstrapped(page, productionUi);
   releaseFixture.appendActive();
   expect(releaseFixture.activeWalModes()).toEqual([0o600, 0o600, 0o600]);
@@ -40,4 +49,5 @@ test("retryable active snapshot failure retains the existing trajectory", async 
   releaseFixture.appendActive();
   await expect(page.getByText(/Live evidence temporarily unavailable/)).toBeVisible({ timeout: 7_500 });
   await expect(page.getByText("Committed active event 1")).toBeVisible();
+  });
 });

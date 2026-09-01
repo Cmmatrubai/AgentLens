@@ -38,6 +38,16 @@ token-free reload expiry, exact 1,000-event pagination and virtualization, keybo
 selection, reduced motion, 800-pixel inline evidence, active zero/tail/history/append/
 terminal behavior, and a retryable 503 that retains valid evidence.
 
+Every journey installs an auto-used collector before navigation. Teardown rejects
+warning/error console output, external HTTP(S), unexpected same-origin responses at or
+above 400, and failed requests even when the test body fails. The active-snapshot test
+alone permits one exact `GET /api/v1/runs/fixture-running/events` 503. Chromium's exact
+automatic console diagnostic for that consumed 503 is paired with it; other console
+output still fails. Canceled duplicate same-origin fetches are accepted only when the
+same method/origin/path already completed successfully; failed assets and other failed
+requests remain failures. The intentional token-free reload waits for the successful
+authentication-expired shell to finish loading.
+
 The active fixture asserted owner-only physical modes for the database, WAL, and SHM
 as `[0600, 0600, 0600]` before active reads. The production server read the committed
 WAL snapshot; terminal reconciliation remained separate evidence. Existing storage,
@@ -57,6 +67,16 @@ found no cookies, local/session storage, IndexedDB databases, surviving bootstra
 script, or bootstrap material in the post-bootstrap URL. These checks reduce privacy
 risk; they are not a general proof that arbitrary future secrets can never escape.
 
+The privacy journey synchronously registers every same-origin response header/body
+promise, exercises the standard event detail, normalized content, and eligible native
+payload plus metadata-only and strict event-detail omission surfaces, and drains the
+whole registry after the final request settles. Durable-root bytes, raw response header
+bytes, raw response bodies, and raw stderr bytes contain none of the named fixture
+sentinels. Their complete redaction-marker set is exactly
+`[[REDACTED:auth-bearer:hmac-sha256:c40257ce4c2ffc291e2b3506f3852709]]`;
+no other redaction marker is accepted. This is controlled fixed-key fixture evidence,
+not general secret-detection proof.
+
 The packaging suite passed three production UI cases from independent fresh temporary
 checkouts, avoiding shared build-output races with parallel tests:
 
@@ -66,9 +86,22 @@ checkouts, avoiding shared build-output races with parallel tests:
   server/web assets after every application/package `src` directory was removed.
 
 All three served a hashed JavaScript asset, no-store bootstrap/API responses, and an
-authenticated empty run list. Each received SIGTERM, exited with 143, and left no live
-PID. Temporary roots were removed. The tracked-file copy uses `git ls-files`, so it does
-not traverse unrelated untracked workspace directories.
+authenticated empty run list. Each was exercised once successfully and once with a
+deliberate post-start verification failure. Every lifecycle ran in its own detached
+process group, captured the actual listening server PID plus group members without
+logging authorization, received group SIGTERM, and exited with 143. Before temporary
+root removal, every recorded PID was absent, the group was empty, and the exact origin
+port refused a connection. The tracked-file copy uses `git ls-files`, so it does not
+traverse unrelated untracked workspace directories.
+
+The 1,000-event Chromium journey captured all ten production API pages synchronously at
+the response boundary. It asserted exact sequence windows `0–99` through `900–999`, the
+literal ordered fixture IDs, no sequence/ID gaps or duplicates, nine unique later
+cursors, and exact request-to-previous-page cursor chaining. Before every append it
+scrolled within the loaded tail, recorded the visible roving event and pixel offset, and
+required both to remain stable afterward. Mounted rows remained below 30. Home,
+ArrowDown, Enter, and End proved exact focused and selected rows, URL event values, and
+event-inspector identities for the second and final events.
 
 ## Observed visual evidence
 
@@ -86,8 +119,11 @@ the repository.
 
 ## Reviewer state, limitations, and residuals
 
-- Independent adversarial Task 7.14 review is not performed by this implementation
-  task; the controller must obtain and record it before acceptance.
+- The first independent adversarial review at `4c5d145` rejected the gate with 0
+  Critical and 4 Important findings covering privacy response capture/surfaces, shared
+  browser failure collection, packaging process-tree cleanup, and exact trajectory
+  identity/anchor assertions. Fix round 1 addresses all four; acceptance remains pending
+  a fresh independent review.
 - Automated axe found no critical or serious violation in the ledger/detail journey
   after the focused contrast correction. Automated axe does not replace the visual and
   keyboard observations above.
@@ -104,5 +140,9 @@ the repository.
 - A temporary Final Git screenshot caught the bounded diff panel while its structured
   content was loading; the repeatable evidence journey separately waited for and
   asserted the loaded Final Git surface.
+- During the first privacy RED, an unfiltered failed assertion rendered a consumed
+  one-use bootstrap path in runner output. It was not committed or retained as an
+  artifact; subsequent diagnostics filter to API paths. This is an implementation
+  process deviation, not product evidence.
 - No hosted, export, comparison, Claude, AGY, Insights, LLM, grading, WebSocket, or SSE
   scope was added.

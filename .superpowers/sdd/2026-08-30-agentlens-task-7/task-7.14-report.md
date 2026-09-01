@@ -27,6 +27,13 @@ remaining changes are fixture, Playwright, packaging-test, and evidence-record p
    output: 67 files and 1,348 tests passed, while that test exited 1 with
    `AgentLens web assets are unavailable`. The packaging cases now build and run in
    independent tracked-file temporary checkouts; the focused suite passed 3/3.
+6. Fix round 1 retained four review-driven REDs. The privacy journey observed none of
+   the five required standard/omitted-policy endpoints; the shared browser guard first
+   let an injected Final Git warning false-green 1/1, then failed teardown on that exact
+   warning after installation; the packaging test had no recorded server/group PID;
+   and the trajectory journey captured 0/10 response pages. The corrected focused
+   privacy and trajectory journeys passed 1/1, the guard-focused set passed after its
+   mutation was removed, and packaging passed 3/3 across six server lifecycles.
 
 ## Implementation scope
 
@@ -41,9 +48,25 @@ remaining changes are fixture, Playwright, packaging-test, and evidence-record p
   written to storage.
 - Production Playwright launches the built compiled CLI/server/web path, uses Chromium,
   one worker, zero retries, OS-temp output, and no retained screenshots/traces/videos.
+- An auto-used pre-navigation guard applies to every Playwright journey. It fails
+  teardown for browser warning/error output, external HTTP(S), unexpected same-origin
+  HTTP failures, and failed requests. Only the intentional active-snapshot 503 is
+  matched once by exact method/path/status; a duplicate same-origin fetch cancellation
+  is accepted only after that same endpoint completed successfully.
+- The privacy journey starts and retains every same-origin response-body/header promise,
+  exercises standard normalized/native plus metadata-only/strict detail surfaces, drains
+  the full promise registry, scans raw bytes, and requires the single exact permitted
+  standard bearer-HMAC marker with no other redaction marker.
+- The 1,000-event journey validates all ten response pages, literal event identities and
+  sequences, cursor chaining and window boundaries, per-append visible anchor offsets,
+  bounded mounted rows, and exact focus/selection/query/inspector identities.
 - Packaging checks build independent fresh temporary checkouts and cover source
   invocation, compiled Node invocation, offline execution without source directories,
-  hashed assets, authenticated run list, SIGTERM 143, and dead-process cleanup.
+  hashed assets, authenticated run list, SIGTERM 143, and dead-process cleanup. Each
+  invocation is launched in a detached process group twice: once for success and once
+  for a deliberate post-start verification failure. Both paths assert every recorded
+  wrapper/server PID is absent, the group is empty, and the exact port refuses a new
+  connection before temporary-root removal.
 
 ## Fresh verification
 
@@ -68,12 +91,18 @@ empty, active, and inline states. All captures and disposable data roots were re
   was opened, read for content, changed, removed, or staged, and no later command
   traversed it. This violates the stricter instruction not to read/touch that directory
   and is disclosed for the controller's acceptance decision.
+- The first I-1 RED used an unfiltered response-path diagnostic, so its assertion output
+  rendered one consumed one-use bootstrap path. It was not written to repository files
+  or retained as an artifact, and later response-path assertions include API paths only.
+  This is disclosed because the task explicitly prohibited printing bootstrap secrets.
 - The main-repository `design-prototypes/` directory was not read or touched.
-- No independent review was performed here. The controller must request the mandated
-  adversarial review and resolve Critical/Important findings before accepting Task 7.14.
+- The independent review at `4c5d145` rejected Task 7.14 with 0 Critical and 4 Important
+  findings. This fix round addresses those findings but does not declare acceptance; the
+  controller must obtain a fresh adversarial review.
 
 ## Commits
 
 - Product fixes: `4c2340c`, `6e45506`, `70f4a28`.
 - Verification harness: this commit, with message
   `test: validate AgentLens Task 7 end to end`.
+- Review fix round: this focused commit, based on `4c5d145`.
