@@ -2,6 +2,7 @@ import type { CurrentAssessmentV1 } from "@agentlens/api-contract";
 import { useId, useRef, useState, type FormEvent } from "react";
 
 import {
+  AgentLensAssessmentConflictError,
   AgentLensClientError,
   type AssessmentDraft
 } from "../api/client.js";
@@ -46,7 +47,8 @@ function failureText(error: unknown): string | null {
   if (error instanceof AgentLensClientError && error.code === "network_error") {
     return "Save status unknown. Review the latest assessment before trying again.";
   }
-  if (error instanceof AgentLensClientError && error.code !== "assessment_conflict") {
+  if (error instanceof AgentLensAssessmentConflictError) return null;
+  if (error instanceof AgentLensClientError) {
     return "Assessment could not be saved. Your draft is unchanged.";
   }
   return null;

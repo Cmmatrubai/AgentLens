@@ -3,21 +3,25 @@ import type {
   CurrentAssessmentV1,
   EventDetailV1,
   RunDetailV1,
-  TrajectoryEventV1
+  TrajectoryEventV1,
+  TrajectoryPageV1
 } from "@agentlens/api-contract";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  AgentLensAssessmentConflictError,
   AgentLensClientError,
   createAgentLensApiClient,
   type AgentLensApiClient
 } from "../src/api/client.js";
 import { ApiClientProvider } from "../src/api/queries.js";
 import { EventInspector } from "../src/run-detail/EventInspector.js";
+import { RunDetailPage } from "../src/run-detail/RunDetailPage.js";
 import { RunHeader } from "../src/run-detail/RunHeader.js";
 
 type AssessmentMutation = Readonly<{
@@ -125,6 +129,16 @@ function json(value: unknown, init: ResponseInit = {}): Response {
   });
 }
 
+function assessmentJson(value: unknown, etag: string | null, status = 200): Response {
+  return json(value, {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      ...(etag === null ? {} : { ETag: etag })
+    }
+  });
+}
+
 function client(updateAssessment: AssessmentClient["updateAssessment"]): AssessmentClient {
   return {
     listRuns: vi.fn(),
@@ -176,6 +190,11 @@ function renderWorkflow(input: Readonly<{
     </Providers>
   );
   return { api, currentRun, onAssessmentSaved, queryClient };
+}
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location">{location.pathname}{location.search}</output>;
 }
 
 describe("human assessment provenance and form", () => {
@@ -267,7 +286,7 @@ describe("conditional assessment transport and mutation ownership", () => {
       assessment: explicit("partial", "uncertain", "assessment-new"),
       etag: '"assessment:YXNzZXNzbWVudC1uZXc"'
     } satisfies AssessmentResponseV1;
-    const fetchImpl = vi.fn(async () => json(response));
+    const fetchImpl = vi.fn(async () => assessmentJson(response, response.etag));
     const api = createAgentLensApiClient({
       origin: "http://127.0.0.1:43123",
       bearerToken: "fixture-bearer",
@@ -300,6 +319,93 @@ describe("conditional assessment transport and mutation ownership", () => {
       })
     }));
     expect(JSON.stringify(api)).toBe("{}");
+  });
+
+  it.each([
+    [
+      "projected state",
+      { schemaVersion: 1, assessment: projected, etag: '"assessment:projected"' },
+      '"assessment:projected"'
+    ],
+    [
+      "non-strong body ETag",
+      {
+        schemaVersion: 1,
+        assessment: explicit("success", "yes", "assessment-response"),
+        etag: "not-a-strong-etag"
+      },
+      "not-a-strong-etag"
+    ],
+    [
+      "ETag for another event",
+      {
+        schemaVersion: 1,
+        assessment: explicit("success", "yes", "assessment-response"),
+        etag: '"assessment:b3RoZXItZXZlbnQ"'
+      },
+      '"assessment:b3RoZXItZXZlbnQ"'
+    ],
+    [
+      "missing response ETag",
+      {
+        schemaVersion: 1,
+        assessment: explicit("success", "yes", "assessment-response"),
+        etag: '"assessment:YXNzZXNzbWVudC1yZXNwb25zZQ"'
+      },
+      null
+    ]
+  ] as const)("rejects a malformed 200 assessment success with %s", async (_label, responseBody, responseEtag) => {
+    const fetchImpl = vi.fn(async () => assessmentJson(responseBody, responseEtag));
+    const api = createAgentLensApiClient({
+      origin: "http://127.0.0.1:43123",
+      bearerToken: "fixture-bearer",
+      fetchImpl
+    });
+
+    await expect(api.updateAssessment({
+      runId: "run-assessment",
+      etag: '"assessment:projected"',
+      draft: { verdict: "success", taskCompleted: "yes", note: "Keep this draft" }
+    })).rejects.toMatchObject({ code: "invalid_response", status: 200 });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the draft, caches, and event selection unchanged for a malformed 200 success", async () => {
+    const fetchImpl = vi.fn(async () => assessmentJson({
+      schemaVersion: 1,
+      assessment: projected,
+      etag: "not-a-strong-etag"
+    }, "not-a-strong-etag"));
+    const api = createAgentLensApiClient({
+      origin: "http://127.0.0.1:43123",
+      bearerToken: "fixture-bearer",
+      fetchImpl
+    });
+    const currentRun = run(projected);
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    queryClient.setQueryData(["run", currentRun.runId], currentRun);
+    const onAssessmentSaved = vi.fn();
+    render(
+      <Providers api={api} queryClient={queryClient}>
+        <RunHeader run={currentRun} onAssessmentSaved={onAssessmentSaved} />
+      </Providers>
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Add human assessment" }));
+    await userEvent.click(screen.getByRole("radio", { name: "Success" }));
+    await userEvent.click(screen.getByRole("radio", { name: "Yes" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Reviewer note (optional)" }), "Keep this draft");
+    await userEvent.click(screen.getByRole("button", { name: "Save assessment" }));
+
+    expect(await screen.findByText("Assessment could not be saved. Your draft is unchanged."))
+      .toHaveAttribute("role", "alert");
+    expect(screen.getByRole("form", { name: "Human assessment" })).toBeVisible();
+    expect(screen.getByRole("radio", { name: "Success" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Yes" })).toBeChecked();
+    expect(screen.getByRole("textbox", { name: "Reviewer note (optional)" })).toHaveValue("Keep this draft");
+    expect(queryClient.getQueryData(["run", currentRun.runId])).toEqual(currentRun);
+    expect(onAssessmentSaved).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -371,7 +477,8 @@ describe("conditional assessment transport and mutation ownership", () => {
 
   it("keeps a stale draft and cached evidence unchanged until Review latest assessment is chosen", async () => {
     const latest = explicit("success", "yes", "assessment-competing");
-    const fetchImpl = vi.fn(async () => json({
+    const conflictEtag = '"assessment:YXNzZXNzbWVudC1jb21wZXRpbmc"';
+    const fetchImpl = vi.fn(async () => assessmentJson({
       schemaVersion: 1,
       error: {
         code: "assessment_conflict",
@@ -379,8 +486,8 @@ describe("conditional assessment transport and mutation ownership", () => {
         retryable: false
       },
       assessment: latest,
-      etag: '"assessment:YXNzZXNzbWVudC1jb21wZXRpbmc"'
-    }, { status: 412 }));
+      etag: conflictEtag
+    }, conflictEtag, 412));
     const api = createAgentLensApiClient({
       origin: "http://127.0.0.1:43123",
       bearerToken: "fixture-bearer",
@@ -420,6 +527,148 @@ describe("conditional assessment transport and mutation ownership", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it("loads and selects the real current human event when Review latest assessment accepts a conflict", async () => {
+    const latest = explicit("success", "yes", "assessment-competing");
+    const initialRun: RunDetailV1 = {
+      ...run(projected),
+      eventCount: 1,
+      anchors: {
+        firstFailure: null,
+        recorderRecovery: null,
+        latestLikelyTest: null,
+        finalGitEvidence: null,
+        latestEvent: { eventId: "event-observed", sequence: 1 }
+      }
+    };
+    const latestRun: RunDetailV1 = {
+      ...initialRun,
+      eventCount: 2,
+      summary: { ...initialRun.summary, assessment: latest },
+      anchors: { ...initialRun.anchors, latestEvent: { eventId: latest.currentEventId, sequence: 2 } }
+    };
+    const observedEvent: TrajectoryEventV1 = {
+      ...assessmentEvent,
+      eventId: "event-observed",
+      sequence: 1,
+      kind: "message",
+      provenance: "observed",
+      presentationClass: "message",
+      safeSummary: "Observed start"
+    };
+    const currentHumanEvent: TrajectoryEventV1 = {
+      ...assessmentEvent,
+      eventId: latest.currentEventId,
+      sequence: 2,
+      safeSummary: "Human assessment updated"
+    };
+    const headPage: TrajectoryPageV1 = {
+      schemaVersion: 1,
+      runId: initialRun.runId,
+      mode: "head",
+      items: [observedEvent],
+      window: {
+        state: "nonempty",
+        minSequence: 1,
+        maxSequence: 1,
+        latestCommittedSequence: 1,
+        hasEarlier: false,
+        hasLater: false,
+        earlierCursor: null,
+        laterCursor: null
+      }
+    };
+    const aroundPage: TrajectoryPageV1 = {
+      schemaVersion: 1,
+      runId: initialRun.runId,
+      mode: "around",
+      items: [currentHumanEvent],
+      window: {
+        state: "nonempty",
+        minSequence: 2,
+        maxSequence: 2,
+        latestCommittedSequence: 2,
+        hasEarlier: true,
+        hasLater: false,
+        earlierCursor: "earlier-current-human",
+        laterCursor: null
+      }
+    };
+    const getRun = vi.fn()
+      .mockResolvedValueOnce(initialRun)
+      .mockResolvedValue(latestRun);
+    const getEvents = vi.fn((_runId: string, query: Readonly<{ aroundSequence?: number }>) =>
+      Promise.resolve(query.aroundSequence === 2 ? aroundPage : headPage));
+    const getEvent = vi.fn(async () => ({
+      ...assessmentDetail("absent"),
+      eventId: latest.currentEventId,
+      sequence: 2,
+      verdict: "success",
+      taskCompleted: "yes"
+    } satisfies EventDetailV1));
+    const updateAssessment = vi.fn(async () => {
+      throw new AgentLensAssessmentConflictError({
+        schemaVersion: 1,
+        error: {
+          code: "assessment_conflict",
+          message: "Assessment changed; review the current assessment before retrying.",
+          retryable: false
+        },
+        assessment: latest,
+        etag: '"assessment:YXNzZXNzbWVudC1jb21wZXRpbmc"'
+      });
+    });
+    const api = {
+      ...client(updateAssessment),
+      getRun,
+      getEvents,
+      getEvent
+    } as AgentLensApiClient;
+
+    render(
+      <Providers api={api}>
+        <MemoryRouter
+          initialEntries={[`/runs/${initialRun.runId}`]}
+          future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
+        >
+          <Routes>
+            <Route path="/runs/:runId" element={<><RunDetailPage /><LocationProbe /></>} />
+          </Routes>
+        </MemoryRouter>
+      </Providers>
+    );
+
+    expect(await screen.findByText("Observed start")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Add human assessment" }));
+    await userEvent.click(screen.getByRole("radio", { name: "Partial" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Reviewer note (optional)" }), "Keep this browser draft");
+    await userEvent.click(screen.getByRole("button", { name: "Save assessment" }));
+    await screen.findByRole("button", { name: "Review latest assessment" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Review latest assessment" }));
+
+    expect(await screen.findByTestId("location")).toHaveTextContent(
+      "/runs/run-assessment?event=assessment-competing"
+    );
+    expect(await screen.findByRole("option", {
+      name: /Human assessment updated\. Human evidence\. Completed\./
+    })).toHaveAttribute("data-event-id", latest.currentEventId);
+    expect(screen.getByRole("option", {
+      name: /Human assessment updated\. Human evidence\. Completed\./
+    })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("2 immutable events loaded")).toBeVisible();
+    expect(within(screen.getByText("Events").parentElement!).getByText("2")).toBeVisible();
+    expect(screen.getByText("Reviewer: success · human evidence")).toBeVisible();
+    expect(screen.getByRole("radio", { name: "Partial" })).toBeChecked();
+    expect(screen.getByRole("textbox", { name: "Reviewer note (optional)" }))
+      .toHaveValue("Keep this browser draft");
+    expect(getEvents).toHaveBeenCalledWith(
+      initialRun.runId,
+      { limit: 100, aroundSequence: 2 },
+      expect.any(AbortSignal)
+    );
+    expect(updateAssessment).toHaveBeenCalledOnce();
+  });
+
   it("reports ambiguous network failure without changing evidence or claiming a save", async () => {
     const fetchImpl = vi.fn(async () => { throw new TypeError("socket closed after request bytes"); });
     const api = createAgentLensApiClient({
@@ -447,6 +696,59 @@ describe("conditional assessment transport and mutation ownership", () => {
     expect((queryClient.getQueryData(["run", "run-assessment"]) as RunDetailV1).summary.assessment)
       .toEqual(projected);
     expect(screen.queryByText("Assessment saved as one human evidence event.")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["wrong-status", 409],
+    ["malformed-412", 412]
+  ] as const)("renders an explicit generic failure for a %s assessment conflict", async (label, status) => {
+    const latest = explicit("success", "yes", "assessment-competing");
+    const error = {
+      schemaVersion: 1,
+      error: {
+        code: "assessment_conflict" as const,
+        message: "Assessment changed; review the current assessment before retrying.",
+        retryable: false as const
+      }
+    };
+    const responseBody = label === "wrong-status" ? error : {
+      ...error,
+      assessment: latest,
+      etag: '"assessment:b3RoZXItZXZlbnQ"'
+    };
+    const fetchImpl = vi.fn(async () => assessmentJson(responseBody,
+      label === "wrong-status" ? null : '"assessment:b3RoZXItZXZlbnQ"', status));
+    const api = createAgentLensApiClient({
+      origin: "http://127.0.0.1:43123",
+      bearerToken: "fixture-bearer",
+      fetchImpl
+    });
+    const currentRun = run(projected);
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    queryClient.setQueryData(["run", currentRun.runId], currentRun);
+    const onAssessmentSaved = vi.fn();
+    render(
+      <Providers api={api} queryClient={queryClient}>
+        <RunHeader run={currentRun} onAssessmentSaved={onAssessmentSaved} />
+      </Providers>
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Add human assessment" }));
+    await userEvent.click(screen.getByRole("radio", { name: "Failure" }));
+    await userEvent.click(screen.getByRole("radio", { name: "No" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Reviewer note (optional)" }), "Preserve wrong-status draft");
+    await userEvent.click(screen.getByRole("button", { name: "Save assessment" }));
+
+    expect(await screen.findByText("Assessment could not be saved. Your draft is unchanged."))
+      .toHaveAttribute("role", "alert");
+    expect(screen.queryByRole("button", { name: "Review latest assessment" })).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Failure" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "No" })).toBeChecked();
+    expect(screen.getByRole("textbox", { name: "Reviewer note (optional)" }))
+      .toHaveValue("Preserve wrong-status draft");
+    expect(queryClient.getQueryData(["run", currentRun.runId])).toEqual(currentRun);
+    expect(onAssessmentSaved).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 });
 

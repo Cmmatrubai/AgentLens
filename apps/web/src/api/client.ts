@@ -21,6 +21,7 @@ import {
   type AssessmentConflictResponseV1,
   type AssessmentNoteContentV1,
   type AssessmentResponseV1,
+  type CurrentAssessmentV1,
   type EventDetailV1,
   type GitDiffCheckContentV1,
   type GitDiffContentV1,
@@ -391,6 +392,16 @@ export function assessmentEtagFor(currentEventId: string | null): string {
   return `"assessment:${encoded}"`;
 }
 
+function hasCanonicalExplicitAssessmentRevision(
+  assessment: CurrentAssessmentV1,
+  etag: string,
+  response: Response
+): boolean {
+  if (assessment.state !== "explicit") return false;
+  const expected = assessmentEtagFor(assessment.currentEventId);
+  return etag === expected && response.headers.get("etag") === expected;
+}
+
 export function createAgentLensApiClient(input: Readonly<{
   origin: string;
   bearerToken: string;
@@ -458,7 +469,11 @@ export function createAgentLensApiClient(input: Readonly<{
     const responseBody = await readBoundedJson(response);
     if (response.status === 412) {
       const conflict = assessmentConflictResponseV1Schema.safeParse(responseBody);
-      if (!conflict.success) {
+      if (!conflict.success || !hasCanonicalExplicitAssessmentRevision(
+        conflict.data.assessment,
+        conflict.data.etag,
+        response
+      )) {
         throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
       }
       throw new AgentLensAssessmentConflictError(conflict.data);
@@ -472,7 +487,11 @@ export function createAgentLensApiClient(input: Readonly<{
       throw clientFailure(code, safeApiMessage(code), response.status, retryable);
     }
     const parsed = assessmentResponseV1Schema.safeParse(responseBody);
-    if (!parsed.success) {
+    if (!parsed.success || !hasCanonicalExplicitAssessmentRevision(
+      parsed.data.assessment,
+      parsed.data.etag,
+      response
+    )) {
       throw clientFailure("invalid_response", "AgentLens returned an invalid response.", response.status);
     }
     return parsed.data;

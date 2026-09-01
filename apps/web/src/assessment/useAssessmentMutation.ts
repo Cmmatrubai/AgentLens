@@ -92,6 +92,9 @@ export function useAssessmentMutation(input: Readonly<{
     setEtag(conflict.etag);
     setConflict(null);
     mutation.reset();
+    if (conflict.assessment.state === "explicit") {
+      input.onConfirmed(conflict.assessment.currentEventId);
+    }
   };
 
   return {
