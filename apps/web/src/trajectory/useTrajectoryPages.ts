@@ -114,6 +114,8 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
   }>[]>([]);
   const pages = useMemo(() => entries.map(({ page }) => page), [entries]);
   const events = useMemo(() => mergeTrajectoryPages(pages), [pages]);
+  const eventsRef = useRef(events);
+  eventsRef.current = events;
 
   const commitPage = useCallback((page: TrajectoryPageV1, request: TrajectoryCursorRequest | null = null): readonly string[] => {
     const before = mergeTrajectoryPages(entriesRef.current.map((entry) => entry.page));
@@ -179,7 +181,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
 
   useEffect(() => {
     if (state !== "ready" || selectedEventId === null ||
-        events.some(({ eventId }) => eventId === selectedEventId)) {
+        eventsRef.current.some(({ eventId }) => eventId === selectedEventId)) {
       setSelectionState("idle");
       return;
     }
@@ -191,7 +193,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
       client,
       runId,
       eventId: selectedEventId,
-      loadedEvents: events,
+      loadedEvents: eventsRef.current,
       limit: pageLimit,
       signal: controller.signal
     }).then((resolution) => {
@@ -220,7 +222,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
         selectionRequestRef.current = null;
       }
     };
-  }, [client, commitPage, events, runId, selectedEventId, state]);
+  }, [client, commitPage, runId, selectedEventId, state]);
 
   const loadCursor = useCallback(async (direction: "earlier" | "later", cursor: string) => {
     cursorRequestRef.current?.controller.abort();

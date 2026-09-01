@@ -163,6 +163,37 @@ describe("trajectory request ownership", () => {
     expect(selectedYSignal?.aborted).toBe(false);
   });
 
+  it("does not abort selection resolution when the selected event arrives in a live append", async () => {
+    const selected = event("run-a", "event-selected", 2);
+    const selectedDetail = deferred<EventDetailV1>();
+    const client = {
+      listRuns: vi.fn(), getRun: vi.fn(),
+      getEvent: vi.fn(() => selectedDetail.promise),
+      getEvents: vi.fn((_runId: string, query: { aroundSequence?: number }) => Promise.resolve(
+        query.aroundSequence === selected.sequence
+          ? { ...page("run-a", [selected]), mode: "around" as const }
+          : page("run-a", [event("run-a", "event-head", 1)])
+      ))
+    } as AgentLensApiClient;
+    const view = renderHook(({ selectedEventId }) => useTrajectoryPages("run-a", selectedEventId), {
+      initialProps: { selectedEventId: null as string | null },
+      wrapper: wrapper(client)
+    });
+    await waitFor(() => expect(view.result.current.state).toBe("ready"));
+
+    view.rerender({ selectedEventId: selected.eventId });
+    await waitFor(() => expect(client.getEvent).toHaveBeenCalledOnce());
+    const selectionSignal = client.getEvent.mock.calls[0]?.[2];
+    await act(async () => {
+      view.result.current.appendPage({ ...page("run-a", [selected]), mode: "after" });
+    });
+
+    expect(selectionSignal?.aborted).toBe(false);
+    await act(async () => selectedDetail.resolve(detail(selected)));
+    await waitFor(() => expect(view.result.current.selectionState).toBe("idle"));
+    expect(selectionSignal?.aborted).toBe(false);
+  });
+
   it("aborts and ignores a cursor page after navigation resets every run-scoped state", async () => {
     const cursorA = deferred<TrajectoryPageV1>();
     const getEvents = vi.fn((runId: string, query: { cursor?: string }) => {
