@@ -254,6 +254,39 @@ describe("trajectory request ownership", () => {
       expect.any(AbortSignal)
     );
   });
+
+  it("does not abort a settled cursor response when the next page starts", async () => {
+    let cursorSequence = 1;
+    const getEvents = vi.fn((_runId: string, query: { cursor?: string }) => {
+      if (query.cursor === undefined) {
+        return Promise.resolve(page("run-a", [event("run-a", "event-0", 0)], {
+          hasLater: true,
+          latest: 2
+        }));
+      }
+      const sequence = cursorSequence++;
+      return Promise.resolve({
+        ...page("run-a", [event("run-a", `event-${sequence}`, sequence)], {
+          hasEarlier: true,
+          hasLater: sequence < 2,
+          latest: 2
+        }),
+        mode: "cursor" as const
+      });
+    });
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    await waitFor(() => expect(view.result.current.hasLater).toBe(true));
+
+    await act(async () => { await view.result.current.loadLater?.(); });
+    const firstCursorSignal = getEvents.mock.calls.at(-1)?.[2];
+    expect(firstCursorSignal?.aborted).toBe(false);
+    await act(async () => { await view.result.current.loadLater?.(); });
+
+    expect(firstCursorSignal?.aborted).toBe(false);
+    expect(view.result.current.events.map(({ sequence }) => sequence).sort((left, right) => left - right))
+      .toEqual([0, 1, 2]);
+  });
 });
 
 describe("trajectory merge containment", () => {

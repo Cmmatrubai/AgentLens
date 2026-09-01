@@ -228,9 +228,11 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
       const page = await client.getEvents(runId, { limit: pageLimit, cursor }, controller.signal);
       if (controller.signal.aborted || cursorRequestRef.current?.identity !== identity) return;
       commitPage(page, { direction, cursor });
+      cursorRequestRef.current = null;
       setPagingState("idle");
     } catch {
       if (!controller.signal.aborted && cursorRequestRef.current?.identity === identity) {
+        cursorRequestRef.current = null;
         setPagingState("error");
       }
     }
