@@ -236,6 +236,28 @@
   color: var(--text-dim);
 }
 
+.trajectory-row__members {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.trajectory-row__member {
+  padding: var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--shell);
+}
+
+.trajectory-row__member--selected { border-color: var(--cyan); }
+
+.trajectory-row__member-provenance {
+  display: block;
+  margin-bottom: var(--space-2);
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
 .trajectory-row__group,
 .trajectory-row__relationships {
   display: flex;

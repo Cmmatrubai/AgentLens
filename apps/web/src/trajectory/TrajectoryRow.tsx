@@ -39,6 +39,22 @@ function timeLabel(event: TrajectoryEventV1) {
   );
 }
 
+function EventPresentation(props: Readonly<{ event: TrajectoryEventV1 }>) {
+  const presentation = status(props.event);
+  return (
+    <>
+      <header>
+        <span className="trajectory-row__kind">{props.event.presentationClass === "recorder_recovery"
+          ? "Recorder recovery"
+          : props.event.kind}</span>
+        <span className="trajectory-row__status"><span aria-hidden="true">{presentation.glyph}</span> {presentation.label}</span>
+      </header>
+      <p>{props.event.safeSummary || "No safe summary available."}</p>
+      {timeLabel(props.event)}
+    </>
+  );
+}
+
 export function TrajectoryRow(props: Readonly<{
   row: TrajectoryLayoutRow;
   selectedEventId: string | null;
@@ -75,7 +91,7 @@ export function TrajectoryRow(props: Readonly<{
     }
     actions.push({
       kind: "expand",
-      label: "Expand lifecycle events",
+      label: props.row.expanded ? "Collapse lifecycle events" : "Expand lifecycle events",
       invoke: () => props.onExpandGroup(props.row.key)
     });
   }
@@ -100,6 +116,7 @@ export function TrajectoryRow(props: Readonly<{
       aria-keyshortcuts={actions.length > 1 ? "ArrowLeft ArrowRight Enter Space" : "Enter Space"}
       className={`trajectory-row trajectory-row--${primary.provenance}${selected ? " trajectory-row--selected" : ""}`}
       data-event-id={primary.eventId}
+      data-expanded={props.row.type === "lifecycle_group" ? props.row.expanded : undefined}
       data-sequence={primary.sequence}
       tabIndex={props.tabIndex}
       onClick={() => props.onSelect(primary.eventId)}
@@ -127,12 +144,24 @@ export function TrajectoryRow(props: Readonly<{
       </span>
       <span aria-hidden="true" className="trajectory-row__spine-node" />
       <article className="trajectory-row__card">
-        <header>
-          <span className="trajectory-row__kind">{primary.presentationClass === "recorder_recovery" ? "Recorder recovery" : primary.kind}</span>
-          <span className="trajectory-row__status"><span aria-hidden="true">{presentation.glyph}</span> {presentation.label}</span>
-        </header>
-        <p>{primary.safeSummary || "No safe summary available."}</p>
-        {timeLabel(primary)}
+        {props.row.type === "lifecycle_group" && props.row.expanded ? (
+          <div className="trajectory-row__members" aria-hidden="true">
+            {props.row.events.map((event) => (
+              <section
+                className={`trajectory-row__member${event.eventId === props.selectedEventId
+                  ? " trajectory-row__member--selected"
+                  : ""}`}
+                data-lifecycle-member={event.eventId}
+                data-sequence={event.sequence}
+                key={`${event.eventId}:${event.sequence}`}
+                onClick={(click) => { click.stopPropagation(); props.onSelect(event.eventId); }}
+              >
+                <span className="trajectory-row__member-provenance">{provenanceLabels[event.provenance]}</span>
+                <EventPresentation event={event} />
+              </section>
+            ))}
+          </div>
+        ) : <EventPresentation event={primary} />}
         {props.row.type === "lifecycle_group" && (
           <div className="trajectory-row__group">
             <span>{props.row.events.length} immutable lifecycle events</span>
@@ -150,7 +179,7 @@ export function TrajectoryRow(props: Readonly<{
               className="trajectory-row__action"
               data-row-action="expand"
               onClick={(click) => { click.stopPropagation(); props.onExpandGroup(props.row.key); }}
-            >Expand lifecycle events</span>
+            >{props.row.expanded ? "Collapse lifecycle events" : "Expand lifecycle events"}</span>
           </div>
         )}
         {primary.presentationClass === "unknown" && (

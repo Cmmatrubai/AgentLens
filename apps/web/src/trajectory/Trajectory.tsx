@@ -145,7 +145,7 @@ export function Trajectory(props: Readonly<{
           return (
             <div
               key={item.key}
-              ref={virtualizer.measureElement}
+              ref={(element) => virtualizer.measureElement(element)}
               className="trajectory-virtual-row"
               data-index={item.index}
               style={{ transform: `translateY(${item.start}px)` }}

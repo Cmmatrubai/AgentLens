@@ -222,7 +222,7 @@ describe("projectTrajectory", () => {
     expect(rows.map((row) => row.type)).toEqual(["event", "event", "event"]);
   });
 
-  it("keeps compacted source events immutable and restores each one in order when expanded", () => {
+  it("keeps one stable lifecycle instance through compact, expanded, collapsed, and expanded projections", () => {
     const start = event("start-a", 1, { lifecycleGroupKey: groupA });
     const terminal = event("terminal-a", 2, {
       kind: "turn.completed",
@@ -232,13 +232,22 @@ describe("projectTrajectory", () => {
     });
 
     const instanceKey = `lifecycle:${groupA}:start-a:1:terminal-a:2`;
-    expect(projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set() }))
-      .toEqual([{ type: "lifecycle_group", key: instanceKey, events: [start, terminal], expanded: false }]);
-    expect(projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set([instanceKey]) }))
-      .toEqual([
-        { type: "event", key: "start-a:1", event: start },
-        { type: "event", key: "terminal-a:2", event: terminal }
-      ]);
+    const compact = projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set() });
+    const expanded = projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set([instanceKey]) });
+    const collapsedAgain = projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set() });
+    const expandedAgain = projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set([instanceKey]) });
+
+    expect(compact).toEqual([
+      { type: "lifecycle_group", key: instanceKey, events: [start, terminal], expanded: false }
+    ]);
+    expect(expanded).toEqual([
+      { type: "lifecycle_group", key: instanceKey, events: [start, terminal], expanded: true }
+    ]);
+    expect(collapsedAgain).toEqual(compact);
+    expect(expandedAgain).toEqual(expanded);
+    expect(expanded[0]?.type).toBe("lifecycle_group");
+    if (expanded[0]?.type !== "lifecycle_group") throw new Error("Expected one expanded lifecycle group.");
+    expect(expanded[0].events.map(({ eventId }) => eventId)).toEqual(["start-a", "terminal-a"]);
   });
 
   it.each([
@@ -338,8 +347,7 @@ describe("projectTrajectory", () => {
       events: [firstStart, firstTerminal, separator, secondStart, secondTerminal],
       expandedGroupKeys: new Set([firstKey])
     })).toEqual([
-      { type: "event", key: "start-1:1", event: firstStart },
-      { type: "event", key: "terminal-1:2", event: firstTerminal },
+      { type: "lifecycle_group", key: firstKey, events: [firstStart, firstTerminal], expanded: true },
       { type: "event", key: "message:3", event: separator },
       { type: "lifecycle_group", key: secondKey, events: [secondStart, secondTerminal], expanded: false }
     ]);

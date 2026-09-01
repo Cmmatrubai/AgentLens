@@ -5,7 +5,8 @@
 > rejected `69ccffa4ca95c85e974bdc4c20d5ef2018e0a68a` and then
 > `7efa195a2d88ddbf66d07794164e6b8b2627dade` and
 > `cf2463191a351322d45766eee3bdb89c7ad58e4a`, followed by the focused
-> measurement fix after `d49bd5f9a7326a16f7486d35c94ef15003b455c2`; the latest results and
+> measurement fix after `d49bd5f9a7326a16f7486d35c94ef15003b455c2` and
+> collapsible-group fix after `29c5e053c01be6a183641165781a4bc165bd2fc2`; the latest results and
 > residuals supersede the earlier completion/browser claims.
 
 ## Result
@@ -638,4 +639,104 @@ contracts, but they are not claimed as visual browser evidence.
   non-reserved `data-sequence` metadata.
 - `apps/web/test/trajectory.test.tsx`: variable-height compact/around measurement,
   non-overlap, wrapper/inner metadata, focus, connector, and manual-scroll coverage.
+- this report.
+
+## Review-fix round 5 after `29c5e05`
+
+The final Important finding was reproduced before implementation. Expansion removed
+the stable `lifecycle_group` projection and replaced it with two independently keyed
+event rows. Only `lifecycle_group` rows expose the group toggle, so the expanded
+presentation had no way to collapse. The key replacement also unmounted the focused
+composite and discarded its current action state.
+
+The fix retains the exact lifecycle-instance row and key in both states. Its
+`expanded` flag now controls whether the measured wrapper shows the compact terminal
+presentation or both immutable source events as distinct, canonical-order member
+cards. The same one-tab-stop composite continues to select either event, announce and
+invoke Expand/Collapse, and expose relationship actions. An inline wrapper measurement
+callback remeasures the stable DOM node when its expanded content grows or shrinks.
+
+### Round-5 RED evidence
+
+```text
+pnpm exec vitest --run apps/web/test/projectTrajectory.test.ts \
+  apps/web/test/trajectory.test.tsx
+Test Files  2 failed (2)
+Tests       5 failed, 30 passed (35)
+Failures    expanded projection returned two event rows instead of one stable group;
+            separated expanded pair lost its instance row/key;
+            expanded UI had no immutable member cards or Collapse action;
+            same-group relationships became separate rows;
+            per-run reset test observed two expanded options
+```
+
+### Round-5 GREEN and fresh verification
+
+```text
+Direct projector/trajectory GREEN
+Test Files  2 passed (2)
+Tests       35 passed (35)
+
+Full Task 7.10 plus contract/projection matrix
+Test Files  8 passed (8)
+Tests       117 passed (117)
+
+Adjacent Tasks 7.6-7.9 matrix
+Test Files  13 passed (13)
+Tests       459 passed (459)
+
+pnpm typecheck
+$ tsc -b --pretty false
+exit 0
+
+pnpm build
+129 modules transformed
+bootstrap CSS 18.04 kB (gzip 4.18 kB)
+bootstrap JS 343.61 kB (gzip 101.74 kB)
+exit 0
+
+pnpm test
+Test Files  61 passed (61)
+Tests       1257 passed (1257)
+exit 0
+
+git diff --check
+exit 0
+```
+
+Coverage verifies compact -> expand -> collapse -> expand with the identical instance
+key; canonical immutable-member order; independent separated groups; run-navigation
+reset; keyboard and mouse toggles; event selection in both states; correct current-
+action announcements; one tab stop; stable focused row/wrapper identity; wrapper
+growth from 220 to 360 pixels and shrink back without overlap; ordinary connector
+geometry; and same-row relationship labeling without a zero-length connector. No
+entry animation or motion behavior was added.
+
+Fresh source-addition scans found no polling/timers, browser storage/cookies,
+bearer/bootstrap-token handling, unsafe HTML, content/native/artifact/evidence fetches,
+external URLs, absolute user paths, or animation/transition additions. The production
+build contains no source maps, absolute user paths, scratch/prototype references, or
+source-map trailers. The diff contains only Task 7.10 trajectory source, styles,
+tests, and this report; `.scratch-e2e-ONFuP0/` remains untouched and untracked.
+
+### Round-5 browser limitation and residual
+
+The in-app browser runtime was retried against the latest production build and again
+reported `No browser is available`. No standalone or prohibited substitute was used.
+The mandatory 1440x1000 and 1100x900 visual matrix therefore remains unverified:
+repeated real Expand/Collapse interaction, wrapped hit testing, focus/action keys,
+rectangle boundaries, connector presentation, 10/250/1,000 bounded DOM, nonzero
+around windows, overflow, console/network cleanliness, token absence, local assets,
+and reload are explicit release residuals. Automated DOM coverage is not claimed as
+visual browser evidence.
+
+### Round-5 changed files
+
+- `apps/web/src/trajectory/projectTrajectory.ts`: retain one stable expanded group.
+- `apps/web/src/trajectory/TrajectoryRow.tsx` and `apps/web/src/styles/trajectory.css`:
+  canonical member cards plus accessible repeated Expand/Collapse presentation.
+- `apps/web/src/trajectory/Trajectory.tsx`: remeasure the stable wrapper after toggles.
+- `apps/web/test/projectTrajectory.test.ts` and `apps/web/test/trajectory.test.tsx`:
+  pure identity, repeatable interaction, measurement, focus, selection, relationship,
+  separated-group, and run-reset regressions.
 - this report.

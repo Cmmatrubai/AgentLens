@@ -64,16 +64,14 @@ export function projectTrajectory(input: Readonly<{
     const terminal = candidateEnd === index + 1 ? input.events[index + 1] : undefined;
     if (terminal !== undefined && compatibleLifecyclePair(current, terminal)) {
       const groupKey = lifecycleInstanceKey(current, terminal);
-      if (!input.expandedGroupKeys.has(groupKey)) {
-        rows.push({
-          type: "lifecycle_group",
-          key: groupKey,
-          events: [current, terminal],
-          expanded: false
-        });
-        index += 2;
-        continue;
-      }
+      rows.push({
+        type: "lifecycle_group",
+        key: groupKey,
+        events: [current, terminal],
+        expanded: input.expandedGroupKeys.has(groupKey)
+      });
+      index += 2;
+      continue;
     }
     rows.push({ type: "event", key: eventKey(current), event: current });
     index += 1;
