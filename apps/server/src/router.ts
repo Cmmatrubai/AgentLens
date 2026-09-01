@@ -139,6 +139,12 @@ export function createAgentLensRouter(options: AgentLensRouterOptions) {
         return;
       }
 
+      if (request.method === "GET" && url.pathname === "/favicon.ico" && url.search === "") {
+        response.writeHead(204, noStoreSecurityHeaders(createResponseNonce()));
+        response.end();
+        return;
+      }
+
       if (request.method === "GET" && url.search === "") {
         const asset = await options.staticAssets.read(url.pathname);
         if (asset !== null) {

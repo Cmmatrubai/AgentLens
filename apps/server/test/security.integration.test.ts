@@ -15,10 +15,11 @@ import {
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  resolveDefaultWebRoot,
   startAgentLensServer,
   type AgentLensServerHandle
 } from "../src/startServer.js";
@@ -158,6 +159,16 @@ afterEach(async () => {
 });
 
 describe("AgentLens loopback security boundary", () => {
+  it("resolves the production web build from source and compiled server modules", () => {
+    const serverRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const expected = join(serverRoot, "dist", "web");
+
+    expect(resolveDefaultWebRoot(pathToFileURL(join(serverRoot, "src", "startServer.ts")).href))
+      .toBe(expected);
+    expect(resolveDefaultWebRoot(pathToFileURL(join(serverRoot, "dist", "startServer.js")).href))
+      .toBe(expected);
+  });
+
   it("does not expose a missing web-root path through startup errors", async () => {
     const missingRoot = join(fixtureWebRoot, "private-path-sentinel");
     let failure: unknown;
@@ -313,6 +324,15 @@ describe("AgentLens loopback security boundary", () => {
     expect(source).not.toContain(bearer);
     expect((await fetch(`${handle.origin}/assets/../.vite/manifest.json`)).status).toBe(404);
     expect((await fetch(`${handle.origin}/.vite/manifest.json`)).status).toBe(404);
+  });
+
+  it("answers the browser favicon request without a failed resource response", async () => {
+    const handle = await startFixtureServer();
+    const response = await fetch(`${handle.origin}/favicon.ico`);
+
+    expect(response.status).toBe(204);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect((await response.arrayBuffer()).byteLength).toBe(0);
   });
 
   it("serves locally bundled WOFF fallbacks with a strict font media type", async () => {

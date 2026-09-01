@@ -1,5 +1,5 @@
 import { createServer, type RequestListener } from "node:http";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createCursorCodec,
@@ -32,8 +32,15 @@ export interface AgentLensServerHandle {
   close(): Promise<void>;
 }
 
+export function resolveDefaultWebRoot(moduleUrl: string): string {
+  const moduleDirectory = dirname(fileURLToPath(moduleUrl));
+  return basename(moduleDirectory) === "src"
+    ? join(moduleDirectory, "..", "dist", "web")
+    : join(moduleDirectory, "web");
+}
+
 function defaultWebRoot(): string {
-  return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "web", "dist");
+  return resolveDefaultWebRoot(import.meta.url);
 }
 
 const unavailableProviderCapabilities: AdapterCapabilities = Object.freeze({
