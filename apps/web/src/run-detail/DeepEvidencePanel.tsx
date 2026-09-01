@@ -24,6 +24,7 @@ export function DeepEvidencePanel(props: Readonly<{
   onViewStateChange?: (state: GitDiffViewState) => void;
   autoFocus?: boolean;
   onAutoFocusComplete?: () => void;
+  onMount?: (element: HTMLElement | null) => void;
 }>) {
   const heading = useRef<HTMLHeadingElement>(null);
   const diff = useGitDiffQuery(props.runId, props.open);
@@ -35,6 +36,7 @@ export function DeepEvidencePanel(props: Readonly<{
   if (!props.open) return null;
   return (
     <section
+      ref={props.onMount}
       className="deep-evidence-panel"
       aria-labelledby="deep-evidence-title"
       onKeyDown={(event) => {

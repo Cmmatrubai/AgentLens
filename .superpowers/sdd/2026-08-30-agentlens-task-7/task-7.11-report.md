@@ -324,3 +324,103 @@ unsafe HTML, browser storage, polling timers, generic artifact URL, direct compo
 fetch, duplicated bearer handling, `changes made by the agent`, `agent changes`, or
 `exact final diff` match. The ignored scratch directory remained the only untracked
 path and was never read, edited, staged, or committed.
+
+## Review-fix round 2
+
+Review base: `ec95795f504f8fef215a567ef548f2cf326a2e04`.
+
+The four Important UI findings are closed within the Task 7.11 web surfaces:
+
+- The structured diff now permits exactly one expanded file at a time. A per-file
+  evidence cursor replaces bounded pages while independently enforcing 50 mounted
+  files, 100 hunk headers, 200 structural records, and 400 lines. Header-only,
+  metadata-only, and zero-line-hunk pages have forward/back controls, so later
+  evidence remains reachable after a 400-line file or a zero-line page.
+- Breakpoint focus restoration is retained until the matching semantic destination
+  mounts and accepts focus. A stable callback-ref/layout handoff covers the delayed
+  selected virtual row in both 799-to-801 and 801-to-800 directions while preserving
+  selection, expanded diff state, and the single immutable diff request.
+- `Redacted command` and `Redacted command output` are always separate accessible
+  slots. Before an explicit request each slot uses its own run-detail availability;
+  after load it uses its own `command_evidence` field. A request failure is a third,
+  separately labeled fact and does not erase either evidence slot.
+- Git status and untracked metadata independently replace 100-row pages with
+  previous/next controls and accessible exact ranges. Tests traverse a 10,000-entry
+  status response and a 9,000-entry untracked response while asserting old rows are
+  removed, later rows are reachable, focus is retained, and each list stays at 100.
+
+### Retained review RED evidence
+
+```text
+initial pre-product regression run
+Test Files  3 failed | 61 passed (64)
+Tests       9 failed | 1287 passed (1296)
+Failures    command/output had no separately labeled regions;
+            Git status and untracked lists mounted every response row;
+            a 400-line first file hid later-file evidence;
+            100 zero-line hunks rendered only one hunk and no next control;
+            responsive delayed-row fixtures could not retain the destination
+exit        1
+
+focused responsive implementation check
+Test Files  1 failed | 2 passed (3)
+Tests       1 failed | 34 passed (35)
+Failure     real virtualized 801-to-800 handoff mounted the selected destination
+            after the parent layout pass; BODY retained focus
+exit        1
+```
+
+The second RED isolated the root cause in the first layout-only implementation: the
+selected virtual row can mount in a child-only commit, so a parent-only retry never
+runs. The final stable mount callback performs the same bounded semantic match at the
+destination mount and clears the pending handoff only after focus succeeds; there is
+no timer, polling loop, or duplicate request.
+
+### Review-fix round 2 verification
+
+```text
+focused diff/command/responsive/collection suite
+Test Files  3 passed (3)
+Tests       35 passed (35)
+
+Task 7.11 + contract/application/server + adjacent 7.6-7.10 matrix
+Test Files  14 passed (14)
+Tests       308 passed (308)
+
+pnpm test
+Test Files  64 passed (64)
+Tests       1296 passed (1296)
+exit        0
+
+pnpm typecheck
+$ tsc -b --pretty false
+exit        0
+
+pnpm build
+142 modules transformed
+bootstrap CSS 23.51 kB (gzip 5.15 kB)
+bootstrap JS  372.19 kB (gzip 108.71 kB)
+exit        0
+
+git diff --check
+exit        0
+```
+
+Fresh production-only scans across all six changed UI modules found no unsafe HTML,
+browser persistence, polling/timers, raw fetch, generic artifact URL, duplicated
+authorization handling, assessment mutation, prototype/scratch import, later-task
+transport, or forbidden agent-change/final-diff language. The complete owned source,
+tests, and diff were inspected after GREEN.
+
+The browser-control skill was read in full and the exact in-app browser selector was
+used. It returned `Browser is not available: iab`. No Chrome, Computer Use,
+standalone browser, or Playwright substitute was used. Therefore the mandated live
+1440/1100/800/799/801 checks for both focus directions, later/zero-line diff pages,
+separate omitted command/output slots, near-bound status/untracked pagination,
+overflow, console, network, token/private text, and reload remain the sole explicit
+round-2 residual. Their behavioral and DOM-bound portions are covered by the fresh
+production-component regressions above.
+
+Round 2 adds no contract, server, storage, API-client, fixture, or later-task surface;
+there is no plan-file-list deviation. The pre-existing ignored scratch directory was
+not edited or staged.

@@ -1,5 +1,5 @@
 import type { RunDetailV1, TrajectoryEventV1 } from "@agentlens/api-contract";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { GitEvidenceSummary } from "../evidence/GitEvidenceSummary.js";
 import {
@@ -59,6 +59,16 @@ export function RunWorkspace(props: Readonly<{
     text: string;
     tagName: string;
   }> | null>(null);
+  const restoreFocusWithin = useCallback((root: ParentNode | null): void => {
+    const restore = focusRestoreRef.current;
+    if (restore === null || root === null) return;
+    const candidates = [...root.querySelectorAll<HTMLElement>(restore.tagName)];
+    const byId = restore.id.length === 0 ? undefined : candidates.find((element) => element.id === restore.id);
+    const candidate = byId ?? candidates.find((element) => element.textContent?.trim() === restore.text);
+    if (candidate === undefined) return;
+    candidate.focus();
+    if (document.activeElement === candidate) focusRestoreRef.current = null;
+  }, []);
   const narrow = useNarrowInspector(() => {
     const active = document.activeElement;
     if (!(active instanceof HTMLElement) ||
@@ -72,14 +82,8 @@ export function RunWorkspace(props: Readonly<{
   useEffect(() => setExpandedGroupKeys(new Set()), [props.runId]);
   useEffect(() => setInspectorSession(initialEventInspectorSession), [props.runId, props.selectedEventId]);
   useLayoutEffect(() => {
-    const restore = focusRestoreRef.current;
-    if (restore === null) return;
-    const byId = restore.id.length === 0 ? null : document.getElementById(restore.id);
-    const candidate = byId ?? [...document.querySelectorAll<HTMLElement>(restore.tagName)]
-      .find((element) => element.textContent?.trim() === restore.text);
-    candidate?.focus();
-    focusRestoreRef.current = null;
-  }, [narrow]);
+    restoreFocusWithin(document);
+  });
   const selected = props.events.find(({ eventId }) => eventId === props.selectedEventId) ?? null;
   const selectionIdentity = `${props.runId}:${props.selectedEventId ?? ""}`;
   const currentDeepEvidence = deepEvidence.identity === selectionIdentity
@@ -103,6 +107,7 @@ export function RunWorkspace(props: Readonly<{
       onViewStateChange={(viewState) => setDeepEvidence({ ...currentDeepEvidence, viewState })}
       autoFocus={currentDeepEvidence.autoFocus}
       onAutoFocusComplete={() => setDeepEvidence({ ...currentDeepEvidence, autoFocus: false })}
+      onMount={restoreFocusWithin}
     />
   );
   const inspector = selected === null || props.run === undefined ? null : (
@@ -126,6 +131,7 @@ export function RunWorkspace(props: Readonly<{
       className="trajectory-inline-inspector"
       data-testid="inline-event-inspector"
       data-inline-inspector-for={selected.eventId}
+      ref={restoreFocusWithin}
       onClick={(event) => event.stopPropagation()}
     >
       {inspector}
@@ -148,7 +154,7 @@ export function RunWorkspace(props: Readonly<{
           return next;
         })}
       />
-      {!narrow && <aside className="trajectory-inspector" aria-label="Selected evidence inspector">
+      {!narrow && <aside ref={restoreFocusWithin} className="trajectory-inspector" aria-label="Selected evidence inspector">
         {props.selectionState === "resolving" && <p role="status">Resolving selected event…</p>}
         {props.selectionState === "unavailable" && (
           <p role="alert">The selected event is unavailable in this run.</p>

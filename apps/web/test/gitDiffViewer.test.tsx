@@ -89,7 +89,7 @@ describe("structured Final Git evidence diff", () => {
     await userEvent.click(screen.getByRole("button", { name: "Expand diff for large.txt" }));
     expect(container.querySelectorAll("[data-diff-line]").length).toBeLessThanOrEqual(400);
     expect(screen.getByText("Evidence truncated at the response bound")).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "Show next 400 diff lines" }));
+    await userEvent.click(screen.getByRole("button", { name: "Show next diff evidence" }));
     expect(screen.getByText(/00400 x+/)).toBeVisible();
     expect(screen.queryByText(/00000 x+/)).not.toBeInTheDocument();
     expect(container.querySelectorAll("[data-diff-line]").length).toBeLessThanOrEqual(400);
@@ -112,12 +112,88 @@ describe("structured Final Git evidence diff", () => {
     }));
     const { container } = render(<GitDiffViewer evidence={{ state: "available", value: diff({ preamble: [], files }) }} />);
     expect(screen.getAllByRole("group").length).toBeLessThanOrEqual(50);
-    const toggles = screen.getAllByRole("button", { name: /^Expand diff for/ }).slice(0, 20);
-    for (const toggle of toggles) await userEvent.click(toggle);
+    const toggles = screen.getAllByRole("button", { name: /^Expand diff for/ });
+    await userEvent.click(toggles[0]!);
+    await userEvent.click(toggles[19]!);
+    expect(toggles[0]).toHaveAttribute("aria-expanded", "false");
+    expect(toggles[19]).toHaveAttribute("aria-expanded", "true");
     expect(container.querySelectorAll(".git-diff__hunk").length).toBeLessThanOrEqual(100);
     expect(container.querySelectorAll("[data-diff-line]").length).toBeLessThanOrEqual(400);
     expect(container.querySelectorAll("*").length).toBeLessThan(2_000);
     expect(screen.getByRole("button", { name: "Next diff files" })).toBeVisible();
+  });
+
+  it("replaces the expanded file so later file evidence remains reachable after an earlier 400-line file", async () => {
+    const firstLines = Array.from({ length: 400 }, (_, index) => ({
+      type: "add" as const,
+      oldLineNumber: null,
+      newLineNumber: index + 1,
+      text: `first-${index}`
+    }));
+    const value = diff({
+      preamble: [],
+      files: [
+        {
+          oldPath: "first.txt", newPath: "first.txt", headers: ["first header"], metadata: [],
+          hunks: [{ header: "@@ first @@", oldStart: 0, oldCount: 0, newStart: 1, newCount: 400, lines: firstLines }]
+        },
+        {
+          oldPath: "later.txt", newPath: "later.txt", headers: ["later header"],
+          metadata: [{ type: "binary", text: "later metadata" }],
+          hunks: [
+            { header: "@@ zero-line hunk @@", oldStart: 0, oldCount: 0, newStart: 0, newCount: 0, lines: [] },
+            {
+              header: "@@ later content @@", oldStart: 1, oldCount: 1, newStart: 1, newCount: 1,
+              lines: [{ type: "context", oldLineNumber: 1, newLineNumber: 1, text: "later line" }]
+            }
+          ]
+        }
+      ]
+    });
+    const { container } = render(<GitDiffViewer evidence={{ state: "available", value }} />);
+    await userEvent.click(screen.getByRole("button", { name: "Expand diff for first.txt" }));
+    expect(container.querySelectorAll("[data-diff-line]")).toHaveLength(400);
+
+    await userEvent.click(screen.getByRole("button", { name: "Expand diff for later.txt" }));
+    expect(screen.getByRole("button", { name: "Expand diff for first.txt" })).toHaveAttribute("aria-expanded", "false");
+    const later = screen.getByRole("group", { name: "Diff file later.txt" });
+    expect(within(later).getByText("later header")).toBeVisible();
+    expect(within(later).getByText("later metadata")).toBeVisible();
+    expect(within(later).getByText("@@ zero-line hunk @@")).toBeVisible();
+    expect(within(later).getByText("later line")).toBeVisible();
+    expect(container.querySelectorAll("[data-diff-line]").length).toBeLessThanOrEqual(400);
+  });
+
+  it("pages zero-line hunk headers forward and backward even when a page renders no lines", async () => {
+    const zeroHunks = Array.from({ length: 100 }, (_, index) => ({
+      header: `@@ zero ${index} @@`, oldStart: index, oldCount: 0, newStart: index, newCount: 0, lines: []
+    }));
+    const value = diff({
+      preamble: [],
+      files: [{
+        oldPath: "zero.txt", newPath: "zero.txt", headers: [], metadata: [],
+        hunks: [
+          ...zeroHunks,
+          {
+            header: "@@ reachable later hunk @@", oldStart: 1, oldCount: 1, newStart: 1, newCount: 1,
+            lines: [{ type: "add", oldLineNumber: null, newLineNumber: 1, text: "reachable later line" }]
+          }
+        ]
+      }]
+    });
+    const { container } = render(<GitDiffViewer evidence={{ state: "available", value }} />);
+    await userEvent.click(screen.getByRole("button", { name: "Expand diff for zero.txt" }));
+    expect(container.querySelectorAll(".git-diff__hunk")).toHaveLength(100);
+    expect(container.querySelectorAll("[data-diff-line]")).toHaveLength(0);
+
+    await userEvent.click(screen.getByRole("button", { name: "Show next diff evidence" }));
+    expect(screen.getByText("@@ reachable later hunk @@")).toBeVisible();
+    expect(screen.getByText("reachable later line")).toBeVisible();
+    expect(screen.queryByText("@@ zero 0 @@")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Show previous diff evidence" }));
+    expect(screen.getByText("@@ zero 0 @@")).toBeVisible();
+    expect(screen.queryByText("@@ reachable later hunk @@")).not.toBeInTheDocument();
   });
 
   it("distinguishes empty, malformed, corrupt, unreadable, and unavailable diff states", () => {

@@ -23,11 +23,26 @@ export function CommandEvidence(props: Readonly<{
   onRequestContent: () => void;
 }>) {
   const canRequest = props.detail.content.state === "available" || props.detail.output.state === "available";
-  const unavailableReason = props.detail.content.state === "unavailable"
-    ? props.detail.content.reason
-    : props.detail.output.state === "unavailable"
-      ? props.detail.output.reason
-      : "not_captured";
+  let command: Slot = props.detail.content.state === "available"
+    ? { state: "available" }
+    : { state: "unavailable", reason: props.detail.content.reason };
+  let output: Slot = props.detail.output.state === "available"
+    ? { state: "available" }
+    : { state: "unavailable", reason: props.detail.output.reason };
+  if (props.content?.content.kind === "command_evidence") {
+    command = props.content.content.command.state === "available"
+      ? { state: "available", text: props.content.content.command.text,
+          truncated: props.content.content.command.truncated }
+      : { state: "unavailable", reason: props.content.content.command.reason };
+    output = props.content.content.output.state === "available"
+      ? { state: "available", text: props.content.content.output.text,
+          truncated: props.content.content.output.truncated }
+      : { state: "unavailable", reason: props.content.content.output.reason };
+  } else if (props.content?.content.kind === "command") {
+    command = { state: "available", text: props.content.content.command };
+  } else if (props.content?.content.kind === "command_output") {
+    output = { state: "available", text: props.content.content.output };
+  }
   return (
     <section className="command-evidence">
       <h3>Command lifecycle</h3>
@@ -35,40 +50,38 @@ export function CommandEvidence(props: Readonly<{
         <div><dt>Status</dt><dd>{lifecycleLabels[props.detail.lifecycle]}</dd></div>
         <div><dt>Exit code</dt><dd>{props.detail.exitCode === null ? "Unavailable" : props.detail.exitCode}</dd></div>
       </dl>
-      {props.content === null && !canRequest && <AvailabilityNotice state={unavailableReason} />}
+      <CommandSlot title="Redacted command" slot={command} />
+      <CommandSlot title="Redacted command output" slot={output} />
       {props.content === null && canRequest && props.requestState !== "error" && (
         <button type="button" onClick={props.onRequestContent} disabled={props.requestState === "loading"}>
           {props.requestState === "loading" ? "Loading command evidence…" : "Load command evidence"}
         </button>
       )}
-      {props.requestState === "error" && <AvailabilityNotice state={props.requestError ?? "artifact_unreadable"} />}
-      {props.content?.content.kind === "command_output" && (
-        <TextEvidence title="Redacted command output" text={props.content.content.output} />
-      )}
-      {props.content?.content.kind === "command" && (
-        <TextEvidence title="Redacted command" text={props.content.content.command} />
-      )}
-      {props.content?.content.kind === "command_evidence" && (
-        <>
-          {props.content.content.command.state === "available"
-            ? <TextEvidence
-                title="Redacted command"
-                text={props.content.content.command.text}
-                truncated={props.content.content.command.truncated}
-              />
-            : <AvailabilityNotice state={props.content.content.command.reason} />}
-          {props.content.content.output.state === "available"
-            ? <TextEvidence
-                title="Redacted command output"
-                text={props.content.content.output.text}
-                truncated={props.content.content.output.truncated}
-              />
-            : <AvailabilityNotice state={props.content.content.output.reason} />}
-        </>
+      {props.requestState === "error" && (
+        <section aria-label="Command evidence request" className="command-evidence__request-error">
+          <h4>Command evidence request</h4>
+          <AvailabilityNotice state={props.requestError ?? "artifact_unreadable"} />
+        </section>
       )}
       {props.content !== null && props.content.content.kind !== "command" &&
         props.content.content.kind !== "command_output" && props.content.content.kind !== "command_evidence" &&
         <AvailabilityNotice state="unsupported_kind" />}
+    </section>
+  );
+}
+
+type Slot = Readonly<{ state: "available"; text?: string; truncated?: boolean }>
+  | Readonly<{ state: "unavailable"; reason: AvailabilityState }>;
+
+function CommandSlot(props: Readonly<{ title: string; slot: Slot }>) {
+  if (props.slot.state === "available" && props.slot.text !== undefined) {
+    return <TextEvidence title={props.title} text={props.slot.text}
+      {...(props.slot.truncated === undefined ? {} : { truncated: props.slot.truncated })} />;
+  }
+  return (
+    <section aria-label={props.title} className="command-evidence__slot">
+      <h4>{props.title}</h4>
+      <AvailabilityNotice state={props.slot.state === "available" ? "available" : props.slot.reason} />
     </section>
   );
 }

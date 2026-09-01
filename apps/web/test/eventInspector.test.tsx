@@ -4,7 +4,7 @@ import type {
   TrajectoryEventV1
 } from "@agentlens/api-contract";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -280,6 +280,56 @@ describe("bounded event inspector", () => {
     expect(screen.queryByText("Evidence corrupt or binding-invalid")).not.toBeInTheDocument();
   });
 
+  it("labels command and output availability independently before an explicit request", () => {
+    const { rerender } = render(
+      <CommandEvidence
+        detail={commandDetail({
+          content: { state: "unavailable", reason: "capture_policy" },
+          output: { state: "unavailable", reason: "not_captured" }
+        }) as Extract<EventDetailV1, { presentationClass: "command" }>}
+        content={null}
+        requestState="idle"
+        onRequestContent={vi.fn()}
+      />
+    );
+    expect(within(screen.getByRole("region", { name: "Redacted command" }))
+      .getByText("Omitted by capture policy")).toBeVisible();
+    expect(within(screen.getByRole("region", { name: "Redacted command output" }))
+      .getByText("Not captured")).toBeVisible();
+
+    rerender(
+      <CommandEvidence
+        detail={commandDetail({ output: { state: "unavailable", reason: "not_captured" } }) as Extract<EventDetailV1, { presentationClass: "command" }>}
+        content={null}
+        requestState="idle"
+        onRequestContent={vi.fn()}
+      />
+    );
+    expect(within(screen.getByRole("region", { name: "Redacted command" }))
+      .getByText("Evidence available")).toBeVisible();
+    expect(within(screen.getByRole("region", { name: "Redacted command output" }))
+      .getByText("Not captured")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Load command evidence" })).toBeVisible();
+  });
+
+  it("keeps independent command facts when the explicit evidence request fails", () => {
+    render(
+      <CommandEvidence
+        detail={commandDetail({ output: { state: "unavailable", reason: "not_captured" } }) as Extract<EventDetailV1, { presentationClass: "command" }>}
+        content={null}
+        requestState="error"
+        requestError="artifact_unreadable"
+        onRequestContent={vi.fn()}
+      />
+    );
+    expect(within(screen.getByRole("region", { name: "Redacted command" }))
+      .getByText("Evidence available")).toBeVisible();
+    expect(within(screen.getByRole("region", { name: "Redacted command output" }))
+      .getByText("Not captured")).toBeVisible();
+    expect(within(screen.getByRole("region", { name: "Command evidence request" }))
+      .getByText("Artifact unreadable")).toBeVisible();
+  });
+
   it("places the narrow inspector inside the selected virtual row", async () => {
     vi.stubGlobal("matchMedia", vi.fn(() => ({
       matches: true,
@@ -512,8 +562,11 @@ describe("bounded event inspector", () => {
     expect(screen.getAllByText("Changed")).toHaveLength(2);
   });
 
-  it("preserves expanded diff state, focus, and one request across the 800px placement boundary", async () => {
-    let narrow = false;
+  it.each([
+    ["799→801", true, false],
+    ["801→800", false, true]
+  ] as const)("preserves selected virtual-row deep state, focus, and one request across %s", async (_label, initialNarrow, nextNarrow) => {
+    let narrow = initialNarrow;
     let onChange: (() => void) | undefined;
     vi.stubGlobal("matchMedia", vi.fn(() => ({
       get matches() { return narrow; },
@@ -533,6 +586,11 @@ describe("bounded event inspector", () => {
         }]
       }))
     });
+    const events = Array.from({ length: 80 }, (_, index) => event({
+      eventId: `event-${index}`,
+      runId: "run-responsive",
+      sequence: index + 1
+    }));
     render(
       <Providers client={api}>
         <RunWorkspace
@@ -545,23 +603,36 @@ describe("bounded event inspector", () => {
               untrackedFiles: { state: "available", value: 0 }
             }
           } as never}
-          events={[event({ runId: "run-responsive" })]}
-          selectedEventId="event-command"
+          events={events}
+          selectedEventId="event-79"
           selectionState="idle"
           onSelect={vi.fn()}
         />
       </Providers>
     );
+    const trajectory = screen.getByRole("listbox", { name: "Execution trajectory" });
+    const revealSelectedVirtualRow = async (): Promise<void> => {
+      Object.defineProperty(trajectory, "clientHeight", { configurable: true, value: 520 });
+      trajectory.scrollTop = 79 * 144;
+      fireEvent.scroll(trajectory);
+      await screen.findByRole("option", { selected: true });
+    };
+    if (initialNarrow) await revealSelectedVirtualRow();
     await userEvent.click(await screen.findByRole("button", { name: "Open tracked final diff" }));
     const expand = await screen.findByRole("button", { name: "Expand diff for src/a.ts" });
     await userEvent.click(expand);
     const collapse = screen.getByRole("button", { name: "Collapse diff for src/a.ts" });
     expect(collapse).toHaveFocus();
 
-    narrow = true;
+    narrow = nextNarrow;
     act(() => onChange?.());
-    await screen.findByTestId("inline-event-inspector");
-    expect(screen.getByRole("button", { name: "Collapse diff for src/a.ts" })).toHaveFocus();
+    if (nextNarrow) {
+      await revealSelectedVirtualRow();
+      await screen.findByTestId("inline-event-inspector");
+    }
+    else await screen.findByRole("complementary", { name: "Selected evidence inspector" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Collapse diff for src/a.ts" })).toHaveFocus());
+    expect(screen.getByRole("option", { selected: true })).toHaveAttribute("aria-selected", "true");
     expect(api.getGitDiff).toHaveBeenCalledTimes(1);
   });
 });
