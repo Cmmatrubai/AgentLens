@@ -159,6 +159,15 @@
   padding: 0 var(--space-3) var(--space-2);
 }
 
+.trajectory-inline-evidence-anchor {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: var(--space-3);
+  left: var(--space-3);
+  display: flow-root;
+}
+
 .trajectory-row {
   position: relative;
   display: grid;

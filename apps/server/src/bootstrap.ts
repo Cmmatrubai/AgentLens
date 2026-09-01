@@ -45,7 +45,7 @@ document.getElementById("agentlens-bootstrap")?.remove();
 const { boot } = await import(${serializeForInlineScript(entryUrl)});
 boot(token);
 </script>`;
-  return documentShell('<main id="root"></main>', script, nonce, styleUrls);
+  return documentShell('<div id="root"></div>', script, nonce, styleUrls);
 }
 
 export function createReloadHtml(
@@ -58,7 +58,7 @@ const { boot } = await import(${serializeForInlineScript(entryUrl)});
 boot(null);
 </script>`;
   return documentShell(
-    '<main id="root"><h1>Authentication expired</h1><p>Restart AgentLens UI to reconnect.</p></main>',
+    '<div id="root"><main><h1>Authentication expired</h1><p>Restart AgentLens UI to reconnect.</p></main></div>',
     script,
     nonce,
     styleUrls

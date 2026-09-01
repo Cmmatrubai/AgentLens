@@ -31,7 +31,13 @@ export function Trajectory(props: Readonly<{
   const rowRefs = useRef(new Map<number, HTMLDivElement>());
   const eventRowRefs = useRef(new Map<string, HTMLDivElement>());
   const anchorRef = useRef<Readonly<{ eventId: string; offset: number }> | null>(null);
-  const pendingFocusRef = useRef<number | null>(null);
+  const inlineEvidenceRef = useRef<HTMLDivElement>(null);
+  const [inlineEvidenceHeight, setInlineEvidenceHeight] = useState(0);
+  const [selectedRowHeight, setSelectedRowHeight] = useState(132);
+  const pendingFocusRef = useRef<Readonly<{
+    index: number;
+    onFocused?: () => void;
+  }> | null>(null);
   const selectedIndex = rows.findIndex((row) => row.type === "event"
     ? row.event.eventId === props.selectedEventId
     : row.events.some(({ eventId }) => eventId === props.selectedEventId));
@@ -44,8 +50,7 @@ export function Trajectory(props: Readonly<{
     overscan: 3,
     rangeExtractor: (range) => {
       const indexes = defaultRangeExtractor(range);
-      if (pendingFocusRef.current !== null && focusIndex >= 0 && focusIndex < rows.length &&
-          !indexes.includes(focusIndex)) {
+      if (focusIndex >= 0 && focusIndex < rows.length && !indexes.includes(focusIndex)) {
         indexes.push(focusIndex);
       }
       if (selectedNeedsInlineEvidence && selectedIndex >= 0 && !indexes.includes(selectedIndex)) {
@@ -72,6 +77,9 @@ export function Trajectory(props: Readonly<{
     initialRect: { width: 800, height: 520 }
   });
   const virtualItems = virtualizer.getVirtualItems();
+  const selectedVirtualItem = selectedIndex < 0
+    ? undefined
+    : virtualItems.find(({ index }) => index === selectedIndex);
   const visibleEventIds = useMemo(() => {
     const ids = new Set<string>();
     const viewportStart = virtualizer.scrollOffset ?? 0;
@@ -95,6 +103,23 @@ export function Trajectory(props: Readonly<{
     liveAppend: props.liveAppend ?? { runId, revision: 0, identities: [] },
     onFollowTail: scrollToLatest
   });
+
+  useLayoutEffect(() => {
+    const element = inlineEvidenceRef.current;
+    if (element === null) {
+      setInlineEvidenceHeight(0);
+      return;
+    }
+    const publish = (): void => {
+      const next = Math.ceil(element.getBoundingClientRect().height);
+      setInlineEvidenceHeight((current) => current === next ? current : next);
+    };
+    publish();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(publish);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [props.inlineEvidence, props.selectedEventId]);
 
   useLayoutEffect(() => {
     const anchor = anchorRef.current;
@@ -136,15 +161,18 @@ export function Trajectory(props: Readonly<{
   useLayoutEffect(() => {
     const pending = pendingFocusRef.current;
     if (pending === null) return;
-    const mounted = rowRefs.current.get(pending);
+    const mounted = rowRefs.current.get(pending.index);
     if (mounted === undefined || mounted.tabIndex !== 0) return;
     mounted.focus();
+    if (document.activeElement !== mounted) return;
     pendingFocusRef.current = null;
+    pending.onFocused?.();
   }, [focusIndex, virtualItems]);
 
-  const focus = (index: number): void => {
+  const focus = (index: number, onFocused?: () => void): void => {
     const bounded = Math.max(0, Math.min(rows.length - 1, index));
-    pendingFocusRef.current = bounded;
+    const request = { index: bounded, ...(onFocused === undefined ? {} : { onFocused }) };
+    pendingFocusRef.current = request;
     setFocusIndex(bounded);
     virtualizer.scrollToIndex(bounded, { align: "auto" });
   };
@@ -160,10 +188,9 @@ export function Trajectory(props: Readonly<{
             const latest = props.events.at(-1);
             if (latest !== undefined) {
               const latestIndex = findTrajectoryRowIndex(rows, latest.eventId);
-              if (latestIndex !== -1) focus(latestIndex);
+              if (latestIndex !== -1) focus(latestIndex, followTail.jumpToLatest);
               props.onSelect(latest.eventId);
             }
-            followTail.jumpToLatest();
           }}>
             {followTail.newEventCount} new {followTail.newEventCount === 1 ? "event" : "events"}
           </button>
@@ -175,11 +202,15 @@ export function Trajectory(props: Readonly<{
       <div
         ref={scrollRef}
         className="trajectory-viewport"
-        role="listbox"
-        aria-label="Execution trajectory"
         onScroll={(event) => followTail.observeViewport(event.currentTarget)}
       >
-        <div ref={stageRef} className="trajectory-stage" style={{ height: virtualizer.getTotalSize() }}>
+        <div
+          ref={stageRef}
+          className="trajectory-stage"
+          role="listbox"
+          aria-label="Execution trajectory"
+          style={{ height: virtualizer.getTotalSize() }}
+        >
         {virtualItems.map((item) => {
           const row = rows[item.index]!;
           const containsSelection = row.type === "event"
@@ -209,6 +240,18 @@ export function Trajectory(props: Readonly<{
                   else {
                     rowRefs.current.set(item.index, element);
                     for (const eventId of eventIds) eventRowRefs.current.set(eventId, element);
+                    if (containsSelection) {
+                      const height = Math.ceil(element.getBoundingClientRect().height) || 132;
+                      setSelectedRowHeight((current) => current === height ? current : height);
+                    }
+                    const pending = pendingFocusRef.current;
+                    if (pending?.index === item.index && element.tabIndex === 0) {
+                      element.focus();
+                      if (document.activeElement === element) {
+                        pendingFocusRef.current = null;
+                        pending.onFocused?.();
+                      }
+                    }
                   }
                 }}
                 onSelect={props.onSelect}
@@ -228,7 +271,13 @@ export function Trajectory(props: Readonly<{
                   }
                 }}
               />
-              {containsSelection ? props.inlineEvidence : null}
+              {containsSelection && selectedNeedsInlineEvidence && inlineEvidenceHeight > 0 ? (
+                <div
+                  className="trajectory-inline-evidence-spacer"
+                  aria-hidden="true"
+                  style={{ height: inlineEvidenceHeight }}
+                />
+              ) : null}
             </div>
           );
         })}
@@ -241,6 +290,16 @@ export function Trajectory(props: Readonly<{
             layoutKey={virtualItems.map(({ index, start, size }) => `${index}:${start}:${size}`).join("|")}
           />
         </div>
+        {selectedNeedsInlineEvidence && selectedVirtualItem !== undefined ? (
+          <div
+            ref={inlineEvidenceRef}
+            className="trajectory-inline-evidence-anchor"
+            data-inline-evidence-anchor-for={props.selectedEventId ?? undefined}
+            style={{ transform: `translateY(${selectedVirtualItem.start + selectedRowHeight}px)` }}
+          >
+            {props.inlineEvidence}
+          </div>
+        ) : null}
       </div>
     </section>
   );

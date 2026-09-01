@@ -451,3 +451,188 @@ mutation/evidence behavior are unchanged.
   surfaces, and it exists only while announcing the pending new-event count.
 - No evidence was rewritten/reordered; no assessment was retried/resubmitted; and no
   Task 7.14 work was introduced.
+
+## Fix round 2 — preserved virtual focus and valid document structure
+
+The first fix re-review identified three Important findings and one adjacent Minor
+finding. This round closes all four without changing evidence chronology, API
+selectors, polling cadence/cancellation, assessment mutation behavior, storage, or
+Task 7.14 fixture/harness scope.
+
+### Fix-round-2 RED evidence
+
+Tests were written before the corresponding production edits and named the exact
+break they catch.
+
+The first combined RED run covered the narrow full-app listbox, real server shell,
+and bounded live-delta regressions:
+
+```text
+pnpm test apps/web/test/activePolling.test.tsx apps/web/test/accessibility.test.tsx apps/web/test/trajectoryPages.test.tsx --reporter=dot
+```
+
+Result: 3 files ran, 27 tests total, 24 passed and 3 failed. The 800 px full-app
+test proved the semantic inspector was a descendant of the execution listbox; the
+whole-document test proved the server shell and `AppShell` produced two `main`
+landmarks; and the trajectory-page hook proved the second append still published the
+cumulative `event-2:2`, `event-3:3` ledger rather than only the new delta.
+
+An initial synchronous three-row jump regression passed, exposing that it did not
+reproduce the production virtualization break. It was replaced before the focus
+production change with a routed `RunDetailPage` regression using an initial 100-row
+tail, a real one-second polling append, history mode, and 101 loaded rows whose latest
+row was outside the mounted range:
+
+```text
+pnpm test apps/web/test/activePolling.test.tsx -t "routed 150-event" --reporter=dot
+```
+
+Result on the original focus behavior: 14 tests discovered, 12 skipped, and both
+Enter and Space cases failed because the selected latest option never remained
+mounted and focus fell back to `BODY` after the jump control disappeared.
+
+The first pending-focus implementation attempt also failed those same 2 of 2 routed
+cases. Instrumenting the virtual range established the root cause: index 100 was
+correctly added, mounted, and focused, but removing the pending pin before scroll
+settled immediately unmounted it. The debugging instrumentation was removed. The
+final implementation pins the sole roving-tab-stop index as one bounded virtual item
+and acknowledges the jump only from the mounted row/ref after focus is confirmed.
+
+### Fix-round-2 implementation
+
+- `Trajectory` keeps the single roving focus row in the bounded extracted virtual
+  range. A new-event jump keeps its button/live count present until the latest
+  canonical row ref is mounted with `tabIndex=0` and confirms `document.activeElement`;
+  only then does follow-tail clear the count. This remains bounded by one focus pin,
+  and ordinary history inspection still receives no forced scroll on append.
+- The semantic execution listbox now owns only the virtual trajectory stage. At
+  800 px, the real inspector is a sibling of that listbox inside the neutral scroll
+  viewport. A measured, accessibility-hidden spacer reserves the selected row's
+  inline evidence height, while the semantic inspector is absolutely anchored at
+  the selected virtual row offset. It remains visible, interactive, and immediately
+  after the selected row without becoming an invalid listbox descendant.
+- The server bootstrap mount is now the neutral `<div id="root">`. The reload shell
+  also uses a neutral root containing its temporary semantic `main`, so React's
+  `AppShell` leaves exactly one application `main` after boot.
+- `useTrajectoryPages` publishes only the exact validated identities newly committed
+  by the current live polling page plus a monotonic revision. `useFollowTail` retains
+  only run identity and the last processed revision. Producer and consumer storage
+  are therefore bounded per poll/run; duplicate appends still publish an empty delta,
+  historical cursor/around commits never publish a delta, and run reset remains
+  explicit.
+
+### Fix-round-2 GREEN evidence
+
+Focused regressions after the last production edit:
+
+```text
+pnpm test apps/web/test/activePolling.test.tsx apps/web/test/accessibility.test.tsx apps/web/test/trajectoryPages.test.tsx --reporter=dot
+```
+
+Result: 3 files passed, 27 tests passed. This includes both routed 150-event Enter and
+Space transfers, narrow full-app axe, whole-document/server-shell axe, and per-poll
+delta/revision behavior.
+
+Focused plus accepted adjacent regressions:
+
+```text
+pnpm test apps/web/test/trajectory.test.tsx apps/web/test/eventInspector.test.tsx apps/web/test/activePolling.test.tsx apps/web/test/accessibility.test.tsx apps/web/test/trajectoryPages.test.tsx apps/web/test/assessment.test.tsx apps/server/test/readApi.integration.test.ts apps/server/test/security.integration.test.ts --reporter=dot
+```
+
+Result: 8 files passed, 128 tests passed.
+
+Fresh final verification after the final production change:
+
+```text
+pnpm test --reporter=dot
+pnpm typecheck
+pnpm build
+NPM_CONFIG_OFFLINE=true pnpm build
+git diff --check
+```
+
+Results:
+
+- Full suite: 67 files passed, 1,344 tests passed.
+- Typecheck: passed (`tsc -b --pretty false`).
+- Normal and network-disabled production builds both passed; Vite transformed 551
+  modules and emitted JS 515.82 kB (154.96 kB gzip), CSS 29.05 kB (6.01 kB gzip),
+  manifest 5.46 kB, and the same 12 local font assets. The existing greater-than-
+  500-kB advisory remains non-fatal.
+- An initial `pnpm --offline build` invocation was rejected because `offline` is not
+  a `pnpm run` option. Re-running with the package-manager offline environment setting
+  above succeeded; this was command syntax, not a source/build failure.
+- Diff whitespace validation passed with no output.
+
+### Fix-round-2 exact Browser residual
+
+At the meaningful post-build milestone I selected the explicitly required exact
+in-app Browser through the Browser runtime. The host returned exactly:
+
+```text
+Browser is not available: iab
+```
+
+Per the binding constraint, I did not substitute Chrome, standalone Playwright,
+Computer Use, or another backend. Therefore the fresh 150+ row focus transfer and
+the externalized 800 px inspector have real routed/full-app automated regression
+evidence but no new exact-Browser evidence. The earlier Task 7.13 Browser evidence
+and its fixture-limited residual remain unchanged.
+
+### Fix-round-2 scope, privacy, dependency, and graph review
+
+- The changed-source diff adds no browser storage, authorization handling, network
+  transport, external request/asset, interval, animation-frame loop, Playwright,
+  prototype, release, or Task 7.14 harness behavior. The only bearer-like text is the
+  inert test value passed to `createBootstrapHtml` for whole-document rendering.
+- Production output contains 15 local files, no source maps, and no external URL in
+  the manifest or CSS. The build-output test remains green.
+- `apps/web/package.json` and `pnpm-lock.yaml` are unchanged, so this round adds no
+  dependency or lockfile graph.
+- Graph project `AgentLens-task7` is ready at moderate generation
+  `2026-09-01T07:01:21Z`, with 2,050 nodes, 7,851 edges, and no recorded partial or
+  skipped parse failures. Final coverage is `no_recorded_issue` for all seven relied-
+  on production paths; the five edited paths are `metadata_changed`, while
+  `RunWorkspace.tsx` and `AppShell.tsx` are `metadata_match`. All edited source and
+  graph-excluded tests were read directly. Coverage remains best-effort and is not
+  proof of completeness.
+- The pre-existing ignored `.scratch-e2e-ONFuP0/` remained unstaged and was not read,
+  edited, or used. The main-repository `design-prototypes/` directory was not read or
+  touched.
+
+### Fix-round-2 changed files and deviations
+
+Modified:
+
+- `apps/server/src/bootstrap.ts`
+- `apps/web/src/styles/trajectory.css`
+- `apps/web/src/trajectory/Trajectory.tsx`
+- `apps/web/src/trajectory/useFollowTail.ts`
+- `apps/web/src/trajectory/useTrajectoryPages.ts`
+- `apps/web/test/accessibility.test.tsx`
+- `apps/web/test/activePolling.test.tsx`
+- `apps/web/test/eventInspector.test.tsx`
+- `apps/web/test/trajectory.test.tsx`
+- `apps/web/test/trajectoryPages.test.tsx`
+
+The server mount edit is the exact reviewed shell fix. The two adjacent accepted
+trajectory/inspector tests required small scroll-container and semantic-placement
+updates because the listbox moved from the neutral viewport to the owned virtual
+stage; they do not change production semantics or broaden scope.
+
+### Fix-round-2 self-review
+
+- Latest-row focus is acknowledged only by the actual mounted, roving option, and the
+  focus row remains one bounded virtual pin after the jump button unmounts.
+- The inline inspector remains semantic and interactive but cannot be an invalid
+  listbox descendant. Selected-row/evidence identity and responsive focus restoration
+  regressions remain green.
+- The server shell has one application main after bootstrap, and the test runs axe on
+  the complete document rather than an isolated component container.
+- Append counting consumes only the exact validated per-poll delta, with monotonic
+  revision dedupe and run reset; no cumulative identity Set or array remains.
+- The sole polite live region remains the pending new-event count. Degradation and
+  loading facts remain visible but non-live.
+- No evidence was reordered/rewritten, no assessment write was retried/resubmitted,
+  polling cancellation and contradiction containment remain covered, and Task 7.14
+  was not started.

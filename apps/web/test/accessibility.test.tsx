@@ -13,6 +13,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { createBootstrapHtml } from "../../server/src/bootstrap.js";
 import { AgentLensAssessmentConflictError, type AgentLensApiClient } from "../src/api/client.js";
 import { ApiClientProvider } from "../src/api/queries.js";
 import { App } from "../src/app/App.js";
@@ -272,6 +273,61 @@ describe("production accessibility", () => {
     const row = screen.getByRole("option", { selected: true });
     expect(row).toHaveAttribute("aria-expanded", "false");
     expect(row.style.getPropertyValue("--selection-duration")).toBe("0ms");
+  });
+
+  it("keeps the real 800px inspector semantic and outside the execution listbox", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
+      matches: query === "(max-width: 800px)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn()
+    })));
+    const view = renderApp("/runs/run-accessible?event=event-command");
+    const selected = await screen.findByRole("option", { selected: true });
+    const inspector = await screen.findByTestId("inline-event-inspector");
+    const listbox = screen.getByRole("listbox", { name: "Execution trajectory" });
+
+    expect(inspector).toContainElement(screen.getByRole("tablist", { name: "Event inspector views" }));
+    expect(listbox).not.toContainElement(inspector);
+    expect(selected).toHaveAttribute("data-event-id", "event-command");
+    await expectNoAxeViolations(view.container);
+  });
+
+  it("keeps one top-level main landmark in the real server bootstrap document", async () => {
+    const parsed = new DOMParser().parseFromString(
+      createBootstrapHtml("fixture-bearer", "/assets/bootstrap.js", "fixture-nonce"),
+      "text/html"
+    );
+    const previousLang = document.documentElement.lang;
+    const previousTitle = document.title;
+    document.documentElement.lang = parsed.documentElement.lang;
+    document.title = parsed.title;
+    document.body.innerHTML = parsed.body.innerHTML;
+    const root = document.getElementById("root");
+    if (!(root instanceof HTMLElement)) throw new Error("server root missing");
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/runs"]} future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
+          <App client={client()} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+      { container: root }
+    );
+    try {
+      expect(await screen.findByRole("heading", { level: 1, name: "Run ledger" })).toBeVisible();
+      expect(document.querySelectorAll("main")).toHaveLength(1);
+      await expectNoAxeViolations(document.documentElement);
+    } finally {
+      view.unmount();
+      document.body.innerHTML = "";
+      document.documentElement.lang = previousLang;
+      document.title = previousTitle;
+    }
   });
 
   it("catches focus falling to BODY after Review latest removes its own focused button", async () => {

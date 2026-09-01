@@ -257,6 +257,39 @@ describe("trajectory request ownership", () => {
 });
 
 describe("trajectory merge containment", () => {
+  it("publishes only the latest validated live identity delta instead of a cumulative run ledger", async () => {
+    const first = event("run-a", "event-1", 1);
+    const client = {
+      listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(),
+      getEvents: vi.fn(async () => page("run-a", [first]))
+    } as AgentLensApiClient;
+    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    await waitFor(() => expect(view.result.current.state).toBe("ready"));
+
+    const second = event("run-a", "event-2", 2);
+    await act(async () => {
+      view.result.current.appendPage({ ...page("run-a", [second]), mode: "after" });
+    });
+    expect(view.result.current.liveAppend).toEqual({
+      runId: "run-a", revision: 1, identities: ["event-2:2"]
+    });
+
+    const third = event("run-a", "event-3", 3);
+    await act(async () => {
+      view.result.current.appendPage({ ...page("run-a", [third]), mode: "after" });
+    });
+    expect(view.result.current.liveAppend).toEqual({
+      runId: "run-a", revision: 2, identities: ["event-3:3"]
+    });
+
+    await act(async () => {
+      view.result.current.appendPage({ ...page("run-a", [third]), mode: "after" });
+    });
+    expect(view.result.current.liveAppend).toEqual({
+      runId: "run-a", revision: 3, identities: []
+    });
+  });
+
   it("rejects a contradictory cursor page before it can unmount the trajectory", async () => {
     const headEvent = event("run-a", "event-1", 1);
     const head = page("run-a", [headEvent], { hasLater: true, latest: 2 });

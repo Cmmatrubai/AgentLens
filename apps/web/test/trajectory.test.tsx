@@ -622,7 +622,8 @@ describe("virtualized execution trajectory", () => {
       </>
     );
     screen.getByRole("button", { name: "Before trajectory" }).focus();
-    const viewport = screen.getByRole("listbox");
+    const listbox = screen.getByRole("listbox");
+    const viewport = listbox.closest<HTMLElement>(".trajectory-viewport") ?? listbox;
     Object.defineProperty(viewport, "scrollTop", { configurable: true, value: 144 * 40, writable: true });
     fireEvent.scroll(viewport);
 

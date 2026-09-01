@@ -164,6 +164,10 @@ function renderDetail(client: AgentLensApiClient, path = "/runs/run-active") {
   );
 }
 
+function trajectoryViewport(listbox: HTMLElement): HTMLElement {
+  return listbox.closest<HTMLElement>(".trajectory-viewport") ?? listbox;
+}
+
 async function flushQueries(): Promise<void> {
   await act(async () => {
     await Promise.resolve();
@@ -320,7 +324,7 @@ describe("follow tail", () => {
         onRelationshipJump={vi.fn()}
       />
     );
-    const viewport = screen.getByRole("listbox", { name: "Execution trajectory" });
+    const viewport = trajectoryViewport(screen.getByRole("listbox", { name: "Execution trajectory" }));
     Object.defineProperties(viewport, {
       clientHeight: { configurable: true, value: 200 },
       scrollHeight: { configurable: true, value: 1_000 },
@@ -397,7 +401,7 @@ describe("follow tail", () => {
       return initial;
     });
     renderDetail(api({ getRun: vi.fn(async () => run("completed", 100)), getEvents }));
-    const viewport = await screen.findByRole("listbox", { name: "Execution trajectory" });
+    const viewport = trajectoryViewport(await screen.findByRole("listbox", { name: "Execution trajectory" }));
     Object.defineProperties(viewport, {
       clientHeight: { configurable: true, value: 200 },
       scrollHeight: { configurable: true, value: 1_000 },
@@ -461,7 +465,7 @@ describe("follow tail", () => {
     const client = api({ getRun: vi.fn(async () => run("completed", 100)), getEvents });
     client.getEvent = getEvent;
     renderDetail(client, "/runs/run-active?event=event-75");
-    const viewport = await screen.findByRole("listbox", { name: "Execution trajectory" });
+    const viewport = trajectoryViewport(await screen.findByRole("listbox", { name: "Execution trajectory" }));
     Object.defineProperties(viewport, {
       clientHeight: { configurable: true, value: 200 },
       scrollHeight: { configurable: true, value: 1_000 },
@@ -483,7 +487,7 @@ describe("follow tail", () => {
       .mockResolvedValueOnce(page("after", [event(3)], 3));
     renderDetail(api({ getRun, getEvents }));
     await flushQueries();
-    const viewport = screen.getByRole("listbox", { name: "Execution trajectory" });
+    const viewport = trajectoryViewport(screen.getByRole("listbox", { name: "Execution trajectory" }));
     Object.defineProperties(viewport, {
       clientHeight: { configurable: true, value: 200 },
       scrollHeight: { configurable: true, value: 1_000 },
@@ -534,7 +538,7 @@ describe("follow tail", () => {
     }));
     const view = renderDetail(client, "/runs/run-active?event=event-3");
     await flushQueries();
-    const viewport = screen.getByRole("listbox", { name: "Execution trajectory" });
+    const viewport = trajectoryViewport(screen.getByRole("listbox", { name: "Execution trajectory" }));
     Object.defineProperties(viewport, {
       clientHeight: { configurable: true, value: 200 },
       scrollHeight: { configurable: true, value: 1_000 },
@@ -573,7 +577,7 @@ describe("follow tail", () => {
         onRelationshipJump={vi.fn()}
       />
     );
-    const viewport = screen.getByRole("listbox", { name: "Execution trajectory" });
+    const viewport = trajectoryViewport(screen.getByRole("listbox", { name: "Execution trajectory" }));
     Object.defineProperties(viewport, {
       clientHeight: { configurable: true, value: 200 },
       scrollHeight: { configurable: true, value: 1_000 },
@@ -635,7 +639,7 @@ describe("follow tail", () => {
         liveAppend={{ runId: "run-active", revision: 0, identities: [] }}
       />
     );
-    const viewport = screen.getByRole("listbox", { name: "Execution trajectory" });
+    const viewport = trajectoryViewport(screen.getByRole("listbox", { name: "Execution trajectory" }));
     Object.defineProperties(viewport, {
       clientHeight: { configurable: true, value: 200 },
       scrollHeight: { configurable: true, value: 1_000 },
@@ -655,6 +659,35 @@ describe("follow tail", () => {
     const latest = screen.getByRole("option", { selected: true });
     await waitFor(() => expect(latest).toHaveFocus());
     expect(latest).toHaveAttribute("data-event-id", "event-3");
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it.each(["{Enter}", " "])("keeps the %s jump mounted until the routed 150-event virtual tail owns focus", async (key) => {
+    const initial = Array.from({ length: 100 }, (_, index) => event(index + 50));
+    const getRun = vi.fn()
+      .mockResolvedValueOnce(run("running", 149))
+      .mockResolvedValue(run("running", 150));
+    const getEvents = vi.fn()
+      .mockResolvedValueOnce(page("tail", initial, 149))
+      .mockResolvedValue(page("after", [event(150)], 150));
+    renderDetail(api({ getRun, getEvents }), "/runs/run-active?event=event-50");
+    const listbox = await screen.findByRole("listbox", { name: "Execution trajectory" });
+    const viewport = listbox.closest<HTMLElement>(".trajectory-viewport") ?? listbox;
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 24_000 },
+      scrollTop: { configurable: true, writable: true, value: 100 }
+    });
+    fireEvent.scroll(viewport);
+
+    const jump = await screen.findByRole("button", { name: "1 new event" }, { timeout: 2_500 });
+    expect(screen.queryByRole("option", { name: /Committed event 150/ })).not.toBeInTheDocument();
+    jump.focus();
+    await userEvent.keyboard(key);
+
+    const latest = await screen.findByRole("option", { selected: true, name: /Committed event 150/ });
+    await waitFor(() => expect(latest).toHaveFocus());
+    expect(screen.queryByRole("button", { name: /new events?/ })).not.toBeInTheDocument();
     expect(document.activeElement).not.toBe(document.body);
   });
 });

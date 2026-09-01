@@ -368,8 +368,12 @@ describe("bounded event inspector", () => {
 
     await screen.findByText("Command lifecycle");
     const selectedRow = screen.getByRole("option", { selected: true });
-    await waitFor(() => expect(selectedRow.parentElement)
-      .toContainElement(screen.getByTestId("inline-event-inspector")));
+    const inlineInspector = await screen.findByTestId("inline-event-inspector");
+    const listbox = screen.getByRole("listbox", { name: "Execution trajectory" });
+    expect(listbox).not.toContainElement(inlineInspector);
+    expect(listbox.closest(".trajectory-viewport")).toContainElement(inlineInspector);
+    expect(inlineInspector.closest("[data-inline-evidence-anchor-for]"))
+      .toHaveAttribute("data-inline-evidence-anchor-for", selectedRow.dataset.eventId);
   });
 
   it("restores the focused inspector control when responsive placement changes", async () => {

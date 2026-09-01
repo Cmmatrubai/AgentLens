@@ -15,29 +15,22 @@ export function useFollowTail(input: Readonly<{
   const processedRef = useRef<Readonly<{
     runId: string;
     revision: number;
-    identities: Set<string>;
-  }>>({ runId: input.runId, revision: 0, identities: new Set() });
+  }>>({ runId: input.runId, revision: 0 });
   const [countState, setCountState] = useState({ runId: input.runId, count: 0 });
   const newEventCount = countState.runId === input.runId ? countState.count : 0;
 
   useLayoutEffect(() => {
     if (processedRef.current.runId !== input.runId) {
-      processedRef.current = { runId: input.runId, revision: 0, identities: new Set() };
+      processedRef.current = { runId: input.runId, revision: 0 };
       followingRef.current = true;
       setCountState({ runId: input.runId, count: 0 });
     }
     if (input.liveAppend.runId !== input.runId ||
         input.liveAppend.revision <= processedRef.current.revision) return;
-    const identities = new Set(processedRef.current.identities);
-    const appended = input.liveAppend.identities.filter((identity) => {
-      if (identities.has(identity)) return false;
-      identities.add(identity);
-      return true;
-    }).length;
+    const appended = input.liveAppend.identities.length;
     processedRef.current = {
       runId: input.runId,
-      revision: input.liveAppend.revision,
-      identities
+      revision: input.liveAppend.revision
     };
     if (appended === 0) return;
     if (followingRef.current) {

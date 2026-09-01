@@ -137,8 +137,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     const current = liveAppendRef.current.runId === runId
       ? liveAppendRef.current
       : { runId, revision: 0, identities: [] };
-    const identities = [...new Set([...current.identities, ...appended])];
-    const next = { runId, revision: current.revision + 1, identities };
+    const next = { runId, revision: current.revision + 1, identities: appended };
     liveAppendRef.current = next;
     setLiveAppend(next);
     return appended.length;
