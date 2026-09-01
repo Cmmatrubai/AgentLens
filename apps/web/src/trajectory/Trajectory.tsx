@@ -142,11 +142,12 @@ export function Trajectory(props: Readonly<{
       <div ref={stageRef} className="trajectory-stage" style={{ height: virtualizer.getTotalSize() }}>
         {virtualItems.map((item) => {
           const row = rows[item.index]!;
-          const primary = row.type === "event" ? row.event : row.events.at(-1)!;
           return (
             <div
               key={item.key}
+              ref={virtualizer.measureElement}
               className="trajectory-virtual-row"
+              data-index={item.index}
               style={{ transform: `translateY(${item.start}px)` }}
             >
               <TrajectoryRow
@@ -165,7 +166,6 @@ export function Trajectory(props: Readonly<{
                   else {
                     rowRefs.current.set(item.index, element);
                     for (const eventId of eventIds) eventRowRefs.current.set(eventId, element);
-                    virtualizer.measureElement(element);
                   }
                 }}
                 onSelect={props.onSelect}

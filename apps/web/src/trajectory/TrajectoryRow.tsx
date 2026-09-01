@@ -100,7 +100,7 @@ export function TrajectoryRow(props: Readonly<{
       aria-keyshortcuts={actions.length > 1 ? "ArrowLeft ArrowRight Enter Space" : "Enter Space"}
       className={`trajectory-row trajectory-row--${primary.provenance}${selected ? " trajectory-row--selected" : ""}`}
       data-event-id={primary.eventId}
-      data-index={primary.sequence}
+      data-sequence={primary.sequence}
       tabIndex={props.tabIndex}
       onClick={() => props.onSelect(primary.eventId)}
       onKeyDown={(keyboard) => {

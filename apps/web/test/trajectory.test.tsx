@@ -45,6 +45,26 @@ function events(count: number): TrajectoryEventV1[] {
   });
 }
 
+function rect(top: number, bottom: number, left = 0, right = 800): DOMRect {
+  return {
+    x: left,
+    y: top,
+    top,
+    bottom,
+    left,
+    right,
+    width: right - left,
+    height: bottom - top,
+    toJSON: () => ({})
+  } as DOMRect;
+}
+
+function translatedTop(element: HTMLElement): number {
+  const match = /translateY\(([-\d.]+)px\)/.exec(element.style.transform);
+  if (match?.[1] === undefined) throw new Error(`Missing translateY offset: ${element.style.transform}`);
+  return Number(match[1]);
+}
+
 describe("virtualized execution trajectory", () => {
   it.each([10, 50, 250, 1_000])("keeps the mounted row DOM bounded for %i events", (count) => {
     render(
@@ -61,6 +81,115 @@ describe("virtualized execution trajectory", () => {
     const rows = screen.getAllByRole("option");
     expect(rows.length).toBeLessThanOrEqual(Math.min(count, 18));
     expect(rows.filter((row) => row.tabIndex === 0)).toHaveLength(1);
+  });
+
+  it("measures a wrapped lifecycle row by virtual index while focus and connectors use its event row", async () => {
+    const groupKey = `grp_${"d".repeat(64)}`;
+    const fixture = events(3).map((event, index) => ({
+      ...event,
+      eventId: `measured-${index + 1}`,
+      sequence: 41 + index,
+      kind: index === 0 ? "turn.started" : index === 1 ? "turn.completed" : "message",
+      presentationClass: index < 2 ? "lifecycle" as const : "message" as const,
+      lifecycleGroupKey: index < 2 ? groupKey : null,
+      lifecycle: index < 2 ? {
+        domain: "turn" as const,
+        phase: index === 0 ? "started" as const : "completed" as const
+      } : null,
+      relationships: index === 1
+        ? [{ type: "correlates_with" as const, eventId: "measured-3" }]
+        : []
+    }));
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+      if (this.classList.contains("trajectory-viewport") || this.classList.contains("trajectory-stage")) {
+        return rect(0, 520);
+      }
+      if (this.classList.contains("trajectory-virtual-row")) {
+        return this.querySelector('[data-event-id="measured-2"]') === null
+          ? rect(220, 352)
+          : rect(0, 220);
+      }
+      if (this.dataset.eventId === "measured-2") return rect(20, 200, 100, 700);
+      if (this.dataset.eventId === "measured-3") return rect(240, 340, 100, 700);
+      return rect(0, 132);
+    });
+    try {
+      const { container } = render(
+        <Trajectory
+          events={fixture}
+          selectedEventId="measured-2"
+          expandedGroupKeys={new Set()}
+          onSelect={vi.fn()}
+          onEscapeDeepEvidence={vi.fn()}
+          onRelationshipJump={vi.fn()}
+        />
+      );
+
+      const wrappers = [...container.querySelectorAll<HTMLElement>(".trajectory-virtual-row")];
+      await waitFor(() => expect(translatedTop(wrappers[1]!)).toBe(220));
+      expect(wrappers[0]).toHaveAttribute("data-index", "0");
+      expect(wrappers[1]).toHaveAttribute("data-index", "1");
+      expect(translatedTop(wrappers[1]!)).toBeGreaterThanOrEqual(
+        translatedTop(wrappers[0]!) + wrappers[0]!.getBoundingClientRect().height
+      );
+
+      const groupedRow = screen.getByRole("option", { selected: true });
+      expect(groupedRow).toHaveAttribute("data-event-id", "measured-2");
+      expect(groupedRow).toHaveAttribute("data-sequence", "42");
+      expect(groupedRow).not.toHaveAttribute("data-index");
+      groupedRow.focus();
+      expect(document.activeElement).toBe(groupedRow);
+
+      await waitFor(() => expect(container.querySelector("[data-relationship-connector]"))
+        .toHaveAttribute("y1", "110"));
+      expect(container.querySelector("[data-relationship-connector]")).toHaveAttribute("y2", "290");
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it("measures a nonzero-sequence around window without overlapping adjacent wrappers", async () => {
+    const fixture = events(2).map((event, index) => ({
+      ...event,
+      eventId: `around-${500 + index}`,
+      sequence: 500 + index,
+      kind: "message",
+      presentationClass: "message" as const
+    }));
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+      if (this.classList.contains("trajectory-viewport") || this.classList.contains("trajectory-stage")) {
+        return rect(0, 520);
+      }
+      if (this.classList.contains("trajectory-virtual-row")) {
+        return this.querySelector('[data-event-id="around-500"]') === null
+          ? rect(196, 328)
+          : rect(0, 196);
+      }
+      return rect(0, 132);
+    });
+    try {
+      const { container } = render(
+        <Trajectory
+          events={fixture}
+          selectedEventId={null}
+          expandedGroupKeys={new Set()}
+          onSelect={vi.fn()}
+          onEscapeDeepEvidence={vi.fn()}
+          onRelationshipJump={vi.fn()}
+        />
+      );
+
+      const wrappers = [...container.querySelectorAll<HTMLElement>(".trajectory-virtual-row")];
+      await waitFor(() => expect(translatedTop(wrappers[1]!)).toBe(196));
+      expect(wrappers.map(({ dataset }) => dataset.index)).toEqual(["0", "1"]);
+      expect(screen.getAllByRole("option").map(({ dataset }) => dataset.sequence)).toEqual(["500", "501"]);
+      expect(screen.getAllByRole("option").every((row) => row.dataset.index === undefined)).toBe(true);
+      expect(translatedTop(wrappers[1]!)).toBeGreaterThanOrEqual(
+        translatedTop(wrappers[0]!) + wrappers[0]!.getBoundingClientRect().height
+      );
+    } finally {
+      rectSpy.mockRestore();
+    }
   });
 
   it("scopes arrows to trajectory focus and selects with Enter or Space", async () => {
@@ -300,11 +429,11 @@ describe("virtualized execution trajectory", () => {
     fireEvent.scroll(viewport);
 
     await waitFor(() => expect(screen.getAllByRole("option").some((row) =>
-      Number(row.dataset.index) >= 40
+      Number(row.dataset.sequence) >= 40
     )).toBe(true));
     const tabStops = screen.getAllByRole("option").filter((row) => row.tabIndex === 0);
     expect(tabStops).toHaveLength(1);
-    expect(Number(tabStops[0]!.dataset.index)).toBeGreaterThanOrEqual(40);
+    expect(Number(tabStops[0]!.dataset.sequence)).toBeGreaterThanOrEqual(40);
 
     await userEvent.tab();
     expect(document.activeElement).toBe(tabStops[0]);

@@ -4,7 +4,8 @@
 > retained as history. The final sections record the focused fix rounds after review
 > rejected `69ccffa4ca95c85e974bdc4c20d5ef2018e0a68a` and then
 > `7efa195a2d88ddbf66d07794164e6b8b2627dade` and
-> `cf2463191a351322d45766eee3bdb89c7ad58e4a`; the latest results and
+> `cf2463191a351322d45766eee3bdb89c7ad58e4a`, followed by the focused
+> measurement fix after `d49bd5f9a7326a16f7486d35c94ef15003b455c2`; the latest results and
 > residuals supersede the earlier completion/browser claims.
 
 ## Result
@@ -532,4 +533,109 @@ Task 7.10 review-fix matrix. No other known Task 7.10 residual remains.
   `apps/web/test/trajectory.test.tsx`: visible roving entry, composite row actions,
   same-row relationship semantics, resize fallback, and focused virtual interaction
   coverage.
+- this report.
+
+## Review-fix round 4 after `d49bd5f`
+
+The remaining Important browser finding was reproduced before implementation. The
+inner event option carried canonical sequence in TanStack Virtual's reserved
+`data-index`, and that same inner element was passed to `measureElement`. A compact
+row whose primary event was sequence 42 therefore attempted to measure virtual item
+42 rather than virtual item 0; an around-sequence window beginning at 500 attempted to
+measure virtual item 500. Both were outside their two-row virtual windows, leaving the
+144-pixel estimate and overlapping the taller first row.
+
+The narrow fix gives each complete positioned `.trajectory-virtual-row` wrapper its
+actual virtual `data-index` and TanStack measurement ref. The inner role-option keeps
+only `data-sequence` plus its event ID and remains the sole focus and relationship-
+geometry element. Overscan, row bounds, selection, scroll anchoring, and relationship
+geometry are otherwise unchanged.
+
+### Round-4 RED evidence
+
+The first run used the repository test script with a file argument; that script runs
+the whole workspace. It produced the two new offset failures plus the existing manual-
+scroll assertion after the test was updated to the intended `data-sequence` contract:
+
+```text
+pnpm test -- apps/web/test/trajectory.test.tsx
+Test Files  1 failed, 60 passed (61)
+Tests       3 failed, 1253 passed (1256)
+Failures    compact virtual row 1 stayed at 144px instead of 220px;
+            around-window virtual row 1 stayed at 144px instead of 196px;
+            inner rows did not yet expose data-sequence for manual-scroll entry
+```
+
+These failures directly demonstrated the production break: TanStack could not apply
+the measured wrapper heights when the measured nodes advertised canonical sequences.
+
+### Round-4 GREEN and fresh verification
+
+```text
+Focused trajectory GREEN
+pnpm exec vitest --run apps/web/test/trajectory.test.tsx
+Test Files  1 passed (1)
+Tests       15 passed (15)
+
+Full Task 7.10 matrix
+Test Files  8 passed (8)
+Tests       116 passed (116)
+
+Adjacent Tasks 7.6-7.9 matrix
+Test Files  13 passed (13)
+Tests       459 passed (459)
+
+pnpm typecheck
+$ tsc -b --pretty false
+exit 0
+
+pnpm build
+129 modules transformed
+bootstrap CSS 17.66 kB (gzip 4.13 kB)
+bootstrap JS 342.80 kB (gzip 101.56 kB)
+exit 0
+
+pnpm test
+Test Files  61 passed (61)
+Tests       1256 passed (1256)
+exit 0
+
+git diff --check
+exit 0
+```
+
+The focused regression suite now proves that a 220-pixel compact lifecycle wrapper at
+virtual index 0 advances its adjacent wrapper to 220 pixels even though its primary
+canonical sequence is 42, and that a 196-pixel around-window wrapper does the same for
+canonical sequences 500/501. It also verifies non-overlap, virtual indices only on
+wrappers, canonical sequence only on inner rows, inner-option focus ownership, and
+connector endpoints measured from the actual inner event rows.
+
+Fresh source-addition scans found no polling/timers, browser storage/cookies,
+bearer/bootstrap-token handling, unsafe HTML, content/native/artifact/evidence fetches,
+external URLs, or absolute user paths. The production build contains no source maps,
+absolute user paths, scratch/prototype references, or source-map trailers. The round-4
+diff contains no Task 7.11-7.14, favicon, Playwright/E2E, assessment, evidence, or
+prototype files. `.scratch-e2e-ONFuP0/` remains untouched, untracked, and excluded from
+staging.
+
+### Round-4 browser limitation and residual
+
+After the latest production build, the in-app browser runtime reported `No browser is
+available`; the required troubleshooting discovery returned an empty browser list.
+No standalone or prohibited substitute was used. Fresh 1440x1000 and 1100x900 checks
+for compact wrapped lifecycle rows, nonzero-sequence around windows, real rectangle
+overlap, hit testing, focus/connectors, 10/250/1,000 bounded rows, overflow,
+console/network cleanliness, token absence, and reload therefore remain an explicit
+release residual. Automated tests cover the underlying measurement and interaction
+contracts, but they are not claimed as visual browser evidence.
+
+### Round-4 changed files
+
+- `apps/web/src/trajectory/Trajectory.tsx`: measure the complete positioned wrapper
+  by virtual index while keeping event-row refs separate.
+- `apps/web/src/trajectory/TrajectoryRow.tsx`: expose canonical sequence as
+  non-reserved `data-sequence` metadata.
+- `apps/web/test/trajectory.test.tsx`: variable-height compact/around measurement,
+  non-overlap, wrapper/inner metadata, focus, connector, and manual-scroll coverage.
 - this report.
