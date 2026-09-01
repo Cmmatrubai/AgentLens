@@ -253,6 +253,7 @@ describe("active run polling", () => {
     expect(getRun).toHaveBeenCalledTimes(4);
     expect(getEvents).toHaveBeenCalledTimes(4);
     expect(screen.getByText("completed")).toBeVisible();
+    expect(getEvents.mock.calls.at(-1)?.[2]?.aborted).toBe(false);
   });
 
   it("catches blanking valid evidence, hiding degradation, or silently stopping after a retryable 503", async () => {

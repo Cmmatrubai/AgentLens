@@ -51,16 +51,18 @@ export function useActiveRunPolling(input: Readonly<{
       timer = setTimeout(() => { void poll(); }, pollIntervalMs);
     };
     const poll = async (): Promise<void> => {
-      controller = new AbortController();
+      const pollController = new AbortController();
+      controller = pollController;
       const lastSequence = eventsRef.current.at(-1)?.sequence;
       const eventQuery = lastSequence === undefined
         ? { limit: pollLimit }
         : { limit: pollLimit, afterSequence: lastSequence };
       const [runResult, pageResult] = await Promise.allSettled([
-        input.client.getRun(input.runId, controller.signal),
-        input.client.getEvents(input.runId, eventQuery, controller.signal)
+        input.client.getRun(input.runId, pollController.signal),
+        input.client.getEvents(input.runId, eventQuery, pollController.signal)
       ]);
-      if (disposed || controller.signal.aborted) return;
+      if (disposed || pollController.signal.aborted) return;
+      if (controller === pollController) controller = null;
 
       let latestStatus = input.status;
       let degraded = false;
