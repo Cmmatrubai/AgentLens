@@ -4,7 +4,7 @@ import type {
   TrajectoryEventV1
 } from "@agentlens/api-contract";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -591,6 +591,7 @@ describe("bounded event inspector", () => {
       runId: "run-responsive",
       sequence: index + 1
     }));
+    const selectedEventId = initialNarrow ? "event-0" : "event-79";
     render(
       <Providers client={api}>
         <RunWorkspace
@@ -604,20 +605,14 @@ describe("bounded event inspector", () => {
             }
           } as never}
           events={events}
-          selectedEventId="event-79"
+          selectedEventId={selectedEventId}
           selectionState="idle"
           onSelect={vi.fn()}
         />
       </Providers>
     );
-    const trajectory = screen.getByRole("listbox", { name: "Execution trajectory" });
-    const revealSelectedVirtualRow = async (): Promise<void> => {
-      Object.defineProperty(trajectory, "clientHeight", { configurable: true, value: 520 });
-      trajectory.scrollTop = 79 * 144;
-      fireEvent.scroll(trajectory);
-      await screen.findByRole("option", { selected: true });
-    };
-    if (initialNarrow) await revealSelectedVirtualRow();
+    expect(screen.queryByRole("option", { selected: true })?.getAttribute("data-event-id") ?? null)
+      .toBe(initialNarrow ? selectedEventId : null);
     await userEvent.click(await screen.findByRole("button", { name: "Open tracked final diff" }));
     const expand = await screen.findByRole("button", { name: "Expand diff for src/a.ts" });
     await userEvent.click(expand);
@@ -626,13 +621,10 @@ describe("bounded event inspector", () => {
 
     narrow = nextNarrow;
     act(() => onChange?.());
-    if (nextNarrow) {
-      await revealSelectedVirtualRow();
-      await screen.findByTestId("inline-event-inspector");
-    }
+    if (nextNarrow) await screen.findByTestId("inline-event-inspector");
     else await screen.findByRole("complementary", { name: "Selected evidence inspector" });
     await waitFor(() => expect(screen.getByRole("button", { name: "Collapse diff for src/a.ts" })).toHaveFocus());
-    expect(screen.getByRole("option", { selected: true })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", selectedEventId);
     expect(api.getGitDiff).toHaveBeenCalledTimes(1);
   });
 });

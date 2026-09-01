@@ -31,6 +31,7 @@ export function Trajectory(props: Readonly<{
   const selectedIndex = rows.findIndex((row) => row.type === "event"
     ? row.event.eventId === props.selectedEventId
     : row.events.some(({ eventId }) => eventId === props.selectedEventId));
+  const selectedNeedsInlineEvidence = props.inlineEvidence !== undefined && props.inlineEvidence !== null;
   const [focusIndex, setFocusIndex] = useState(() => Math.max(0, selectedIndex));
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -42,8 +43,11 @@ export function Trajectory(props: Readonly<{
       if (pendingFocusRef.current !== null && focusIndex >= 0 && focusIndex < rows.length &&
           !indexes.includes(focusIndex)) {
         indexes.push(focusIndex);
-        indexes.sort((left, right) => left - right);
       }
+      if (selectedNeedsInlineEvidence && selectedIndex >= 0 && !indexes.includes(selectedIndex)) {
+        indexes.push(selectedIndex);
+      }
+      indexes.sort((left, right) => left - right);
       return indexes;
     },
     getItemKey: (index) => rows[index]!.key,

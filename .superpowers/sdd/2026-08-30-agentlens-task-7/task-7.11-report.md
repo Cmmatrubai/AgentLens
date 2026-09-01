@@ -424,3 +424,103 @@ production-component regressions above.
 Round 2 adds no contract, server, storage, API-client, fixture, or later-task surface;
 there is no plan-file-list deviation. The pre-existing ignored scratch directory was
 not edited or staged.
+
+## Review-fix round 3
+
+Review base: `f220b35cc3d5f0573594b3c2c7b1c48cea1ab414`.
+
+### Root cause and hypothesis
+
+The production implementation is `apps/web/src/trajectory/Trajectory.tsx`; the
+review-candidate `VirtualizedTrajectory.tsx` does not exist. Graph generation
+`2026-09-01T04:28:18Z` reported the real `Trajectory.tsx` and `RunWorkspace.tsx`
+paths as `metadata_match/no_recorded_issue` before editing, while the nonexistent
+candidate had missing freshness. All affected source and excluded tests were read
+directly.
+
+The confirmed root cause was the virtual range, not focus matching. At desktop width,
+deep evidence can be focused in the sticky inspector while its selected trajectory
+row is outside the current virtual window. Changing to narrow supplies inline
+evidence, but `selectedIndex` itself does not change, so the existing selection-scroll
+effect does not rerun. The range extractor previously pinned only a pending roving-
+focus row; it did not pin the selected row that owns inline evidence. Consequently no
+selected row, inline inspector, or destination control mounted, leaving focus on
+`BODY`.
+
+The tested hypothesis was that pinning exactly the selected layout-row index only
+while non-null inline evidence is active would make the narrow destination mount
+without disabling virtualization or moving evidence to the trace end. This was
+confirmed. The range remains the normal visible/overscan set plus at most one selected
+row, and the existing mount callback restores the semantic control. Desktop behavior,
+scroll anchoring, canonical selection, and evidence query identity are unchanged.
+
+### Retained RED
+
+```text
+pnpm exec vitest --run apps/web/test/eventInspector.test.tsx \
+  -t "preserves selected virtual-row deep state"
+Test Files  1 failed (1)
+Tests       1 failed | 1 passed | 24 skipped (26)
+Failure     801-to-800 could not find [data-testid="inline-event-inspector"];
+            only virtual rows 0-2 were mounted while selected event-79 was absent
+exit        1
+```
+
+The regression performs the real breakpoint transition without programmatically
+scrolling the selected row. The reverse 799-to-801 case starts with a naturally
+visible selected row; both cases preserve the expanded diff control, selected event,
+focus, and exactly one immutable diff request.
+
+### Fresh GREEN and verification
+
+```text
+no-manual-scroll breakpoint regression
+Test Files  1 passed (1)
+Tests       2 passed | 24 skipped (26)
+
+Task 7.11 + 10/50/250/1000 trajectory/merge/page matrix
+Test Files  7 passed (7)
+Tests       90 passed (90)
+
+pnpm test
+Test Files  64 passed (64)
+Tests       1296 passed (1296)
+exit        0
+
+pnpm typecheck
+$ tsc -b --pretty false
+exit        0
+
+pnpm build
+142 modules transformed
+bootstrap CSS 23.51 kB (gzip 5.15 kB)
+bootstrap JS  372.27 kB (gzip 108.74 kB)
+exit        0
+
+git diff --check
+exit        0
+```
+
+The existing 10/50/250/1,000-event virtualization tests remain green with bounded
+overscan and one roving tab stop. The responsive regression proves both directions,
+selected-row ownership, focused expanded state, and one `getGitDiff` call without a
+manual scroll. Production-only scans of the two changed code/test paths found no raw
+HTML, persistence, timers/polling, fetch/auth duplication, generic artifact URL,
+prototype/scratch import, later-task transport, or forbidden Git wording. There is no
+page-level layout or evidence-query code change.
+
+After the source change, coverage remained `no_recorded_issue`; `Trajectory.tsx`
+correctly reported `metadata_changed`, so its complete source and full diff were read
+directly. `RunWorkspace.tsx` remained unchanged and `metadata_match`.
+
+The exact in-app browser selector was retried after the production build and returned
+`Browser is not available: iab`. No Chrome, Computer Use, standalone browser, or
+Playwright substitute was used. The production 801/800/799 visual, overflow, console,
+network, external-asset, token/private-text, and reload checks therefore remain the
+only round-3 residual; their responsive state, request-count, selection, focus, and
+DOM-bound behavior is covered by the fresh component and virtualization suites.
+
+Round 3 changes only `Trajectory.tsx`, the existing responsive regression, and this
+report. It adds no Task 7.12/7.13 behavior, API or persistence surface, global
+virtualization disablement, duplicated evidence, or trace-end inspector. The existing
+ignored scratch directory was not edited or staged.
