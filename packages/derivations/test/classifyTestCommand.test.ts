@@ -125,8 +125,20 @@ describe("classifyTestCommand", () => {
     "sh -c \"pnpm test && /bin/dash -c 'pnpm test'\"",
     "sh -c \"pnpm test && command /bin/dash -c 'pnpm test'\"",
     "sh -c \"pnpm test && env /bin/fish -c 'pnpm test'\"",
-    "sh -c \"pnpm test && busybox sh -c 'pnpm test'\""
-  ])("rejects a nested shell command in every constrained compound wrapper form: %s", (command) => {
+    "sh -c \"pnpm test && busybox sh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && /bin/bash -c 'pnpm test'\"",
+    "sh -c \"pnpm test && env /bin/bash -c 'pnpm test'\"",
+    "sh -c \"pnpm test && /bin/fish -c 'pnpm test'\"",
+    "sh -c \"pnpm test && command /bin/fish -c 'pnpm test'\"",
+    "sh -c \"pnpm test && env /bin/dash -c 'pnpm test'\"",
+    "sh -c \"pnpm test && busybox env sh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && busybox -- sh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && toybox sh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && exec /bin/dash -c 'pnpm test'\"",
+    "sh -c \"pnpm test && dispatcher /usr/bin/zsh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && sudo -n /opt/homebrew/bin/bash -c 'pnpm test'\"",
+    "sh -c \"pnpm test && wrapper --shell=/bin/fish -c 'pnpm test'\""
+  ])("rejects shell-launch tokens in unrecognized compound segments: %s", (command) => {
     expect(classify(command)).toBeNull();
   });
 

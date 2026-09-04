@@ -117,8 +117,9 @@ export function classifyTestCommand(
   let firstRecognized: RecognizedTestCommand | null = null;
   for (const segment of envelope.segments) {
     const segmentCommand = tokenizeSimpleCommand(segment);
-    if (segmentCommand === null || isShellCommand(segmentCommand.argv)) return null;
+    if (segmentCommand === null) return null;
     const recognized = recognize(segmentCommand.argv);
+    if (recognized === null && hasShellLaunchToken(segmentCommand.argv)) return null;
     if (firstRecognized === null && recognized !== null) firstRecognized = recognized;
   }
   if (firstRecognized === null) return null;
@@ -192,11 +193,11 @@ function isShellFamilyExecutable(executable: string | undefined): boolean {
   return executable !== undefined && shellFamilyExecutables.has(executableName(executable));
 }
 
-function isShellCommand(argv: readonly string[]): boolean {
-  // tokenizeSimpleCommand already strips its constrained `command` and `env`
-  // wrappers. BusyBox selects its applet from argv[1], so inspect that slot too.
-  if (isShellFamilyExecutable(argv[0])) return true;
-  return executableName(argv[0] ?? "") === "busybox" && isShellFamilyExecutable(argv[1]);
+function hasShellLaunchToken(argv: readonly string[]): boolean {
+  // Unrecognized segments cannot safely distinguish executable position from
+  // dispatcher arguments, so reject a shell token anywhere in the segment.
+  // Recognized test commands are intentionally excluded before this check.
+  return argv.some(isShellFamilyExecutable);
 }
 
 function recognizeNpm(argv: readonly string[]): RecognizedTestCommand | null {
