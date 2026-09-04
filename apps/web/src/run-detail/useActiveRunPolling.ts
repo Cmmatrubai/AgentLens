@@ -48,6 +48,8 @@ export function useActiveRunPolling(input: Readonly<{
       const pollController = new AbortController();
       controller = pollController;
       let terminalFailure: unknown = null;
+      let terminalRun: RunDetailV1 | null = null;
+      let pageSettled = false;
       const lastSequence = eventsRef.current.at(-1)?.sequence;
       const eventQuery = lastSequence === undefined
         ? { limit: pollLimit }
@@ -63,26 +65,46 @@ export function useActiveRunPolling(input: Readonly<{
         terminalFailure ??= failure;
         pollController.abort();
       };
-      const [runResult, pageResult] = await Promise.allSettled([
-        retryActiveSnapshotRequest({
-          request: () => input.client.getRun(input.runId, pollController.signal),
-          signal: pollController.signal,
-          onRetryableFailure: markRetrying
-        }).catch((failure: unknown) => {
-          stopOnTerminalFailure(failure);
-          throw failure;
-        }),
-        retryActiveSnapshotRequest({
-          request: () => input.client.getEvents(input.runId, eventQuery, pollController.signal),
-          signal: pollController.signal,
-          onRetryableFailure: markRetrying
-        }).catch((failure: unknown) => {
-          stopOnTerminalFailure(failure);
-          throw failure;
-        })
-      ]);
-      if (disposed || (pollController.signal.aborted && terminalFailure === null)) return;
+      const pageRequest = retryActiveSnapshotRequest({
+        request: () => input.client.getEvents(input.runId, eventQuery, pollController.signal),
+        signal: pollController.signal,
+        onRetryableFailure: markRetrying
+      }).then((page) => {
+        pageSettled = true;
+        return page;
+      }).catch((failure: unknown) => {
+        pageSettled = true;
+        stopOnTerminalFailure(failure);
+        throw failure;
+      });
+      const runRequest = retryActiveSnapshotRequest({
+        request: () => input.client.getRun(input.runId, pollController.signal),
+        signal: pollController.signal,
+        onRetryableFailure: markRetrying
+      }).then((nextRun) => {
+        if (!active(nextRun.status)) {
+          terminalRun = nextRun;
+          queueMicrotask(() => {
+            if (terminalRun === nextRun && !pageSettled && !pollController.signal.aborted) {
+              pollController.abort();
+            }
+          });
+          try {
+            onRunRef.current(nextRun);
+            setPollState({ runId: input.runId, degraded: false, error: null });
+          } catch (error) {
+            terminalFailure ??= error;
+            setPollState({ runId: input.runId, degraded: false, error });
+          }
+        }
+        return nextRun;
+      }).catch((failure: unknown) => {
+        stopOnTerminalFailure(failure);
+        throw failure;
+      });
+      const [runResult, pageResult] = await Promise.allSettled([runRequest, pageRequest]);
       if (controller === pollController) controller = null;
+      if (disposed || terminalRun !== null || (pollController.signal.aborted && terminalFailure === null)) return;
 
       let latestStatus = input.status;
       let degraded = false;

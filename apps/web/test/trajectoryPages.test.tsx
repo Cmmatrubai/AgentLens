@@ -275,6 +275,64 @@ describe("trajectory request ownership", () => {
     });
   });
 
+  it("keeps retry state owned by a selected-event backoff while a cursor request succeeds", async () => {
+    vi.useFakeTimers();
+    const retryable = new AgentLensClientError({
+      code: "active_snapshot_unavailable",
+      status: 503,
+      retryable: true,
+      message: "safe fixture message"
+    });
+    const selected = event("run-a", "event-selected", 20);
+    let detailAttempts = 0;
+    const client = {
+      listRuns: vi.fn(), getRun: vi.fn(),
+      getEvent: vi.fn(() => {
+        detailAttempts += 1;
+        return detailAttempts === 1 ? Promise.reject(retryable) : Promise.resolve(detail(selected));
+      }),
+      getEvents: vi.fn((_runId: string, query: { cursor?: string; aroundSequence?: number }) => {
+        if (query.cursor === "later-run-a") {
+          return Promise.resolve({
+            ...page("run-a", [event("run-a", "event-later", 100)], { hasEarlier: true, latest: 100 }),
+            mode: "cursor" as const
+          });
+        }
+        if (query.aroundSequence === selected.sequence) {
+          return Promise.resolve({
+            ...page("run-a", [selected], { hasEarlier: true, hasLater: true, latest: 100 }),
+            mode: "around" as const
+          });
+        }
+        return Promise.resolve(page("run-a", [event("run-a", "event-head", 50)], {
+          hasEarlier: true, hasLater: true, latest: 100
+        }));
+      })
+    } as AgentLensApiClient;
+    const view = renderHook(({ selectedEventId }) => useTrajectoryPages("run-a", selectedEventId), {
+      initialProps: { selectedEventId: null as string | null }, wrapper: wrapper(client)
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(view.result.current.hasLater).toBe(true);
+
+    await act(async () => {
+      view.rerender({ selectedEventId: selected.eventId });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(view.result.current.retrying).toBe(true);
+
+    await act(async () => { await view.result.current.loadLater?.(); });
+    expect(view.result.current.events.map(({ eventId }) => eventId)).toEqual(["event-head", "event-later"]);
+    expect(view.result.current.retrying).toBe(true);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(view.result.current.events.map(({ eventId }) => eventId)).toEqual([
+      "event-selected", "event-head", "event-later"
+    ]);
+    expect(view.result.current.retrying).toBe(false);
+  });
+
   it("ignores an initial page that resolves after navigation aborted its run", async () => {
     const runA = deferred<TrajectoryPageV1>();
     const runB = deferred<TrajectoryPageV1>();

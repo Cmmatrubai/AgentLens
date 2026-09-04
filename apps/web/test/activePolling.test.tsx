@@ -313,6 +313,33 @@ describe("active run polling", () => {
     );
   });
 
+  it("commits a terminal run promptly and aborts a sibling active-snapshot retry", async () => {
+    vi.useFakeTimers();
+    const retryable = new AgentLensClientError({
+      code: "active_snapshot_unavailable",
+      status: 503,
+      retryable: true,
+      message: "safe fixture message"
+    });
+    const getRun = vi.fn()
+      .mockResolvedValueOnce(run("running", 4))
+      .mockResolvedValueOnce(run("completed", 4));
+    const getEvents = vi.fn()
+      .mockResolvedValueOnce(page("tail", [event(1), event(2), event(3), event(4)], 4))
+      .mockRejectedValue(retryable);
+    renderDetail(api({ getRun, getEvents }));
+
+    await flushQueries();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(screen.getByText("completed")).toBeVisible();
+    const retrySignal = getEvents.mock.calls.at(-1)?.[2] as AbortSignal | undefined;
+    expect(retrySignal?.aborted).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(getEvents).toHaveBeenCalledTimes(2);
+  });
+
   it("catches an unhandled merge failure, mutated valid evidence, or continued polling after a contract contradiction", async () => {
     vi.useFakeTimers();
     const contradictoryEvent = { ...event(5), eventId: "event-4" };

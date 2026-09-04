@@ -98,7 +98,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
   }>[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [error, setError] = useState<unknown>(null);
-  const [retrying, setRetrying] = useState(false);
+  const [retryingRequestIdentities, setRetryingRequestIdentities] = useState<ReadonlySet<object>>(() => new Set());
   const [selectionState, setSelectionState] = useState<"idle" | "resolving" | "unavailable">("idle");
   const [pagingState, setPagingState] = useState<"idle" | "loading" | "error">("idle");
   const [liveAppend, setLiveAppend] = useState<LiveTrajectoryAppend>({
@@ -118,6 +118,25 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
   const events = useMemo(() => mergeTrajectoryPages(pages), [pages]);
   const eventsRef = useRef(events);
   eventsRef.current = events;
+  const retrying = retryingRequestIdentities.size > 0;
+
+  const markRetrying = useCallback((identity: object): void => {
+    setRetryingRequestIdentities((current) => {
+      if (current.has(identity)) return current;
+      return new Set([...current, identity]);
+    });
+  }, []);
+  const clearRetrying = useCallback((identity: object): void => {
+    setRetryingRequestIdentities((current) => {
+      if (!current.has(identity)) return current;
+      const next = new Set(current);
+      next.delete(identity);
+      return next;
+    });
+  }, []);
+  const clearAllRetrying = useCallback((): void => {
+    setRetryingRequestIdentities(new Set());
+  }, []);
 
   const commitPage = useCallback((page: TrajectoryPageV1, request: TrajectoryCursorRequest | null = null): readonly string[] => {
     const before = mergeTrajectoryPages(entriesRef.current.map((entry) => entry.page));
@@ -161,29 +180,29 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     setEntries([]);
     setState("loading");
     setError(null);
-    setRetrying(false);
+    clearAllRetrying();
     setSelectionState("idle");
     setPagingState("idle");
     void retryActiveSnapshotRequest({
       request: () => client.getEvents(runId, { limit: pageLimit }, controller.signal),
       signal: controller.signal,
-      onRetryableFailure: () => setRetrying(true)
+      onRetryableFailure: () => markRetrying(identity)
     }).then((page) => {
       if (controller.signal.aborted || initialRequestRef.current?.identity !== identity) return;
       initialRequestRef.current = null;
       try {
         commitPage(page);
-        setRetrying(false);
+        clearRetrying(identity);
         setState("ready");
       } catch (failure) {
-        setRetrying(false);
+        clearRetrying(identity);
         setError(failure);
         setState("error");
       }
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted && initialRequestRef.current?.identity === identity) {
         initialRequestRef.current = null;
-        setRetrying(false);
+        clearRetrying(identity);
         setError(failure);
         setState("error");
       }
@@ -193,10 +212,13 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
         controller.abort();
         initialRequestRef.current = null;
       }
-      cursorRequestRef.current?.controller.abort();
+      clearRetrying(identity);
+      const cursorRequest = cursorRequestRef.current;
+      cursorRequest?.controller.abort();
+      if (cursorRequest !== null) clearRetrying(cursorRequest.identity);
       cursorRequestRef.current = null;
     };
-  }, [client, commitPage, runId]);
+  }, [clearAllRetrying, clearRetrying, client, commitPage, markRetrying, runId]);
 
   useEffect(() => {
     if (state !== "ready" || selectedEventId === null ||
@@ -218,28 +240,28 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
         signal: controller.signal
       }),
       signal: controller.signal,
-      onRetryableFailure: () => setRetrying(true)
+      onRetryableFailure: () => markRetrying(identity)
     }).then((resolution) => {
       if (controller.signal.aborted || selectionRequestRef.current !== identity) return;
       selectionRequestRef.current = null;
       if (resolution.state === "resolved") {
         try {
           if (resolution.page !== null) commitPage(resolution.page);
-          setRetrying(false);
+          clearRetrying(identity);
           setSelectionState("idle");
         } catch (failure) {
-          setRetrying(false);
+          clearRetrying(identity);
           setError(failure);
           setState("error");
         }
       } else if (resolution.state === "unavailable") {
-        setRetrying(false);
+        clearRetrying(identity);
         setSelectionState("unavailable");
       }
     }).catch(() => {
       if (!controller.signal.aborted && selectionRequestRef.current === identity) {
         selectionRequestRef.current = null;
-        setRetrying(false);
+        clearRetrying(identity);
         setSelectionState("unavailable");
       }
     });
@@ -248,11 +270,14 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
         controller.abort();
         selectionRequestRef.current = null;
       }
+      clearRetrying(identity);
     };
-  }, [client, commitPage, runId, selectedEventId, state]);
+  }, [clearRetrying, client, commitPage, markRetrying, runId, selectedEventId, state]);
 
   const loadCursor = useCallback(async (direction: "earlier" | "later", cursor: string) => {
-    cursorRequestRef.current?.controller.abort();
+    const previousCursorRequest = cursorRequestRef.current;
+    previousCursorRequest?.controller.abort();
+    if (previousCursorRequest !== null) clearRetrying(previousCursorRequest.identity);
     const controller = new AbortController();
     const identity = {};
     cursorRequestRef.current = { identity, controller };
@@ -261,21 +286,21 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
       const page = await retryActiveSnapshotRequest({
         request: () => client.getEvents(runId, { limit: pageLimit, cursor }, controller.signal),
         signal: controller.signal,
-        onRetryableFailure: () => setRetrying(true)
+        onRetryableFailure: () => markRetrying(identity)
       });
       if (controller.signal.aborted || cursorRequestRef.current?.identity !== identity) return;
       commitPage(page, { direction, cursor });
       cursorRequestRef.current = null;
-      setRetrying(false);
+      clearRetrying(identity);
       setPagingState("idle");
     } catch {
       if (!controller.signal.aborted && cursorRequestRef.current?.identity === identity) {
         cursorRequestRef.current = null;
-        setRetrying(false);
+        clearRetrying(identity);
         setPagingState("error");
       }
     }
-  }, [client, commitPage, runId]);
+  }, [clearRetrying, client, commitPage, markRetrying, runId]);
 
   const cursors = useMemo(() => trajectoryPageCursors(
     pages,
