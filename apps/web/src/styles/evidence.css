@@ -16,6 +16,34 @@
   min-width: 0;
 }
 
+.trajectory-inspector {
+  display: flex;
+  height: var(--trajectory-viewport-height);
+  max-height: none;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.trajectory-inspector > .event-inspector {
+  flex: 1 1 0;
+}
+
+.event-inspector {
+  display: grid;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  min-height: 0;
+  max-height: 100%;
+}
+
+.event-inspector__body {
+  min-height: 0;
+  padding-right: var(--space-1);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
 .event-inspector h2,
 .git-evidence-summary h3,
 .deep-evidence-panel h2,

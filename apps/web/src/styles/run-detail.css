@@ -133,6 +133,7 @@
 }
 
 .run-workspace {
+  --trajectory-viewport-height: clamp(560px, calc(100vh - 248px), 790px);
   display: grid;
   grid-template-columns: minmax(620px, 1fr) minmax(340px, 380px);
   gap: var(--space-4);
@@ -165,7 +166,7 @@
 
 .trajectory-viewport {
   position: relative;
-  height: clamp(560px, calc(100vh - 248px), 790px);
+  height: var(--trajectory-viewport-height);
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -196,7 +197,7 @@
     align-items: start;
   }
 
-  .run-workspace {
-    grid-template-columns: minmax(0, 1fr) minmax(340px, 340px);
+  .run-detail-page .run-workspace {
+    grid-template-columns: minmax(0, 1fr) minmax(340px, 380px);
   }
 }

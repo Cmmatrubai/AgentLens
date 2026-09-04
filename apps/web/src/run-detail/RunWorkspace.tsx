@@ -170,8 +170,6 @@ export function RunWorkspace(props: Readonly<{
         className="trajectory-inspector"
         aria-label="Selected evidence inspector"
         initial={false}
-        layout="position"
-        transition={motionPolicy.inspector}
         data-motion={motionPolicy.reduced ? "reduced" : "standard"}
       >
         {props.selectionState === "resolving" && <p>Resolving selected event…</p>}

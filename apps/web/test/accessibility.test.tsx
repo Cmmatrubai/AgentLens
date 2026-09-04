@@ -292,6 +292,8 @@ describe("production accessibility", () => {
     const listbox = screen.getByRole("listbox", { name: "Execution trajectory" });
 
     expect(inspector).toContainElement(screen.getByRole("tablist", { name: "Event inspector views" }));
+    expect(screen.getByTestId("event-inspector-body"))
+      .toHaveAttribute("data-inspector-event", "event-command");
     expect(listbox).not.toContainElement(inspector);
     expect(selected).toHaveAttribute("data-event-id", "event-command");
     await expectNoAxeViolations(view.container);
