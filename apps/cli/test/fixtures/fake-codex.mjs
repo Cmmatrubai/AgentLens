@@ -1,14 +1,21 @@
 #!/usr/bin/env node
 
-import { appendFileSync, closeSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
 import { execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:net";
 
 const args = process.argv.slice(2);
 const modeArg = args.find((argument) => argument.startsWith("--fake-mode="));
 const mode = modeArg?.slice("--fake-mode=".length) ?? "success";
 const startupDelayMs = Number(process.env.AGENTLENS_FAKE_STARTUP_DELAY_MS ?? 0);
 
-if (process.env.AGENTLENS_FAKE_STARTED_FILE && mode !== "hang") {
+if (process.env.AGENTLENS_FAKE_STARTED_FILE && mode !== "hang" && mode !== "crash-barrier") {
   appendFileSync(process.env.AGENTLENS_FAKE_STARTED_FILE, "child-started\n");
 }
 if (process.env.AGENTLENS_ARGV_CAPTURE) {
@@ -42,7 +49,7 @@ const terminal = () => emit({
   usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 2 }
 });
 
-if (mode !== "hang") {
+if (mode !== "hang" && mode !== "crash-barrier") {
   emit({ type: "thread.started", thread_id: "fixture-thread" });
   emit({ type: "turn.started", thread_id: "fixture-thread", turn_id: "fixture-turn" });
 }
@@ -283,6 +290,30 @@ switch (mode) {
     }
     setInterval(() => {}, 1_000);
     break;
+  case "crash-barrier": {
+    const readyFile = process.env.AGENTLENS_FAKE_READY_FILE;
+    const barrierSocket = process.env.AGENTLENS_FAKE_BARRIER_SOCKET;
+    if (!readyFile || !barrierSocket) throw new Error("Crash barrier endpoints are required.");
+    await new Promise((resolve, reject) => {
+      const server = createServer((socket) => {
+        socket.once("data", () => {
+          socket.end();
+          server.close((error) => error ? reject(error) : resolve());
+        });
+        socket.resume();
+      });
+      server.once("error", reject);
+      server.listen(barrierSocket, () => {
+        writeFileSync(readyFile, "provider-ready\n");
+      });
+    });
+    started("hanging-command");
+    if (process.env.AGENTLENS_FAKE_STARTED_FILE) {
+      appendFileSync(process.env.AGENTLENS_FAKE_STARTED_FILE, "child-started\n");
+    }
+    setInterval(() => {}, 1_000);
+    break;
+  }
   case "ignore-term": {
     process.on("SIGTERM", () => {});
     const grandchild = spawn(process.execPath, [
