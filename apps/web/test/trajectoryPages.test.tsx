@@ -107,7 +107,8 @@ describe("trajectory request ownership", () => {
     const runB = deferred<TrajectoryPageV1>();
     const client = {
       listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(),
-      getEvents: vi.fn((runId: string) => runId === "run-a" ? runA.promise : runB.promise)
+      getEvents: vi.fn((runId: string, _query: unknown, _signal?: AbortSignal) =>
+        runId === "run-a" ? runA.promise : runB.promise)
     } as AgentLensApiClient;
     const view = renderHook(({ runId }) => useTrajectoryPages(runId, null), {
       initialProps: { runId: "run-a" },
@@ -115,12 +116,33 @@ describe("trajectory request ownership", () => {
     });
 
     view.rerender({ runId: "run-b" });
+    expect(client.getEvents.mock.calls[0]?.[2]?.aborted).toBe(true);
     await act(async () => runB.resolve(page("run-b", [event("run-b", "event-b", 1)])));
     await waitFor(() => expect(view.result.current.events.map(({ eventId }) => eventId)).toEqual(["event-b"]));
     await act(async () => runA.resolve(page("run-a", [event("run-a", "event-a", 1)])));
 
     expect(view.result.current.events.map(({ eventId }) => eventId)).toEqual(["event-b"]);
     expect(view.result.current.state).toBe("ready");
+  });
+
+  it("does not abort a settled initial page when later navigation changes the run", async () => {
+    const getEvents = vi.fn((runId: string, _query: unknown, _signal?: AbortSignal) =>
+      Promise.resolve(page(runId, [event(runId, `${runId}-event`, 1)])));
+    const client = {
+      listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents
+    } as AgentLensApiClient;
+    const view = renderHook(({ runId }) => useTrajectoryPages(runId, null), {
+      initialProps: { runId: "run-a" },
+      wrapper: wrapper(client)
+    });
+    await waitFor(() => expect(view.result.current.events.map(({ eventId }) => eventId)).toEqual(["run-a-event"]));
+    const settledSignal = getEvents.mock.calls[0]?.[2];
+    expect(settledSignal?.aborted).toBe(false);
+
+    view.rerender({ runId: "run-b" });
+    await waitFor(() => expect(view.result.current.events.map(({ eventId }) => eventId)).toEqual(["run-b-event"]));
+
+    expect(settledSignal?.aborted).toBe(false);
   });
 
   it("ignores stale selection resolution after a rapid selected-event change", async () => {

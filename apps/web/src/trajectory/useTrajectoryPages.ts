@@ -105,7 +105,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     identities: []
   });
   const liveAppendRef = useRef<LiveTrajectoryAppend>(liveAppend);
-  const initialRequestRef = useRef<object | null>(null);
+  const initialRequestRef = useRef<Readonly<{ identity: object; controller: AbortController }> | null>(null);
   const selectionRequestRef = useRef<object | null>(null);
   const cursorRequestRef = useRef<Readonly<{ identity: object; controller: AbortController }> | null>(null);
   const entriesRef = useRef<readonly Readonly<{
@@ -148,7 +148,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
   useEffect(() => {
     const controller = new AbortController();
     const identity = {};
-    initialRequestRef.current = identity;
+    initialRequestRef.current = { identity, controller };
     cursorRequestRef.current?.controller.abort();
     cursorRequestRef.current = null;
     selectionRequestRef.current = null;
@@ -162,18 +162,27 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     setSelectionState("idle");
     setPagingState("idle");
     void client.getEvents(runId, { limit: pageLimit }, controller.signal).then((page) => {
-      if (controller.signal.aborted || initialRequestRef.current !== identity) return;
-      commitPage(page);
-      setState("ready");
+      if (controller.signal.aborted || initialRequestRef.current?.identity !== identity) return;
+      initialRequestRef.current = null;
+      try {
+        commitPage(page);
+        setState("ready");
+      } catch (failure) {
+        setError(failure);
+        setState("error");
+      }
     }).catch((failure: unknown) => {
-      if (!controller.signal.aborted && initialRequestRef.current === identity) {
+      if (!controller.signal.aborted && initialRequestRef.current?.identity === identity) {
+        initialRequestRef.current = null;
         setError(failure);
         setState("error");
       }
     });
     return () => {
-      controller.abort();
-      if (initialRequestRef.current === identity) initialRequestRef.current = null;
+      if (initialRequestRef.current?.identity === identity) {
+        controller.abort();
+        initialRequestRef.current = null;
+      }
       cursorRequestRef.current?.controller.abort();
       cursorRequestRef.current = null;
     };
