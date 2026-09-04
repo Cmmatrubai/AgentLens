@@ -600,7 +600,7 @@ describe("trajectory request ownership", () => {
 
 describe("completed trajectory bounded auto-fill", () => {
   it("keeps a completed 100-event trajectory on its initial page", async () => {
-    const initial = page("run-100", eventRange("run-100", 1, 100), { latest: 100 });
+    const initial = page("run-100", eventRange("run-100", 0, 99), { latest: 99 });
     const getEvents = vi.fn(async () => initial);
     const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
     const view = renderHook(
@@ -618,16 +618,50 @@ describe("completed trajectory bounded auto-fill", () => {
     }).toEqual({ loaded: 100, total: 100, complete: true });
   });
 
+  it("does not complete an equal-count trajectory shifted past sequence zero", async () => {
+    const initial = page("run-shifted", eventRange("run-shifted", 1, 100), { latest: 100 });
+    const getEvents = vi.fn(async () => initial);
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(
+      () => useTrajectoryPages("run-shifted", null, completedRun(100)),
+      { wrapper: wrapper(client) }
+    );
+
+    await waitFor(() => expect(view.result.current.state).toBe("ready"));
+
+    expect(view.result.current.events).toHaveLength(100);
+    expect(view.result.current.events[0]?.sequence).toBe(1);
+    expect(view.result.current.events.at(-1)?.sequence).toBe(100);
+    expect(view.result.current.hasEarlier).toBe(false);
+    expect(view.result.current.hasLater).toBe(false);
+    expect(view.result.current.isComplete).toBe(false);
+  });
+
+  it("marks an empty zero-event trajectory complete when no cursors remain", async () => {
+    const getEvents = vi.fn(async () => page("run-empty", []));
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(
+      () => useTrajectoryPages("run-empty", null, completedRun(0)),
+      { wrapper: wrapper(client) }
+    );
+
+    await waitFor(() => expect(view.result.current.state).toBe("ready"));
+
+    expect(view.result.current.loadedEventCount).toBe(0);
+    expect(view.result.current.totalEventCount).toBe(0);
+    expect(view.result.current.isComplete).toBe(true);
+  });
+
   it("loads exactly one final completed-run page at 101 events and resolves its reconciliation selection", async () => {
-    const initial = page("run-101", eventRange("run-101", 1, 100), {
+    const initial = page("run-101", eventRange("run-101", 0, 99), {
       hasLater: true,
-      latest: 101
+      latest: 100
     });
     const reconciled = "run-101-reconciled";
     const later = {
-      ...page("run-101", eventRange("run-101", 101, 101, reconciled), {
+      ...page("run-101", eventRange("run-101", 100, 100, reconciled), {
         hasEarlier: true,
-        latest: 101
+        latest: 100
       }),
       mode: "cursor" as const
     };
@@ -651,14 +685,14 @@ describe("completed trajectory bounded auto-fill", () => {
   });
 
   it("loads exactly one final completed-run page at 200 events", async () => {
-    const initial = page("run-200", eventRange("run-200", 1, 100), {
+    const initial = page("run-200", eventRange("run-200", 0, 99), {
       hasLater: true,
-      latest: 200
+      latest: 199
     });
     const later = {
-      ...page("run-200", eventRange("run-200", 101, 200), {
+      ...page("run-200", eventRange("run-200", 100, 199), {
         hasEarlier: true,
-        latest: 200
+        latest: 199
       }),
       mode: "cursor" as const
     };
@@ -678,19 +712,19 @@ describe("completed trajectory bounded auto-fill", () => {
   });
 
   it("does not auto-fill a completed 201-event trajectory or an active 101-event trajectory", async () => {
-    const completedInitial = page("run-201", eventRange("run-201", 1, 100), {
+    const completedInitial = page("run-201", eventRange("run-201", 0, 99), {
       hasLater: true,
-      latest: 201
+      latest: 200
     });
-    const activeInitial = page("run-active-101", eventRange("run-active-101", 1, 100), {
+    const activeInitial = page("run-active-101", eventRange("run-active-101", 0, 99), {
       hasLater: true,
-      latest: 101
+      latest: 100
     });
     const completedLater = {
-      ...page("run-201", eventRange("run-201", 101, 200), {
+      ...page("run-201", eventRange("run-201", 100, 199), {
         hasEarlier: true,
         hasLater: true,
-        latest: 201
+        latest: 200
       }),
       mode: "cursor" as const
     };
@@ -755,14 +789,14 @@ describe("completed trajectory bounded auto-fill", () => {
 
   it("retains its initial page while an automatic final-page read retries a safe active-snapshot refusal", async () => {
     vi.useFakeTimers();
-    const initial = page("run-auto-retry", eventRange("run-auto-retry", 1, 100), {
+    const initial = page("run-auto-retry", eventRange("run-auto-retry", 0, 99), {
       hasLater: true,
-      latest: 101
+      latest: 100
     });
     const final = {
-      ...page("run-auto-retry", eventRange("run-auto-retry", 101, 101), {
+      ...page("run-auto-retry", eventRange("run-auto-retry", 100, 100), {
         hasEarlier: true,
-        latest: 101
+        latest: 100
       }),
       mode: "cursor" as const
     };
@@ -798,9 +832,9 @@ describe("completed trajectory bounded auto-fill", () => {
   });
 
   it("retains its first page and manual later control when the final cursor page fails", async () => {
-    const initial = page("run-second-page-failure", eventRange("run-second-page-failure", 1, 100), {
+    const initial = page("run-second-page-failure", eventRange("run-second-page-failure", 0, 99), {
       hasLater: true,
-      latest: 101
+      latest: 100
     });
     const failure = new AgentLensClientError({
       code: "invalid_cursor",

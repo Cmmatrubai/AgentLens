@@ -321,9 +321,13 @@ export function useTrajectoryPages(
   ), [entries, pages]);
   const loadedEventCount = events.length;
   const totalEventCount = run?.totalEventCount ?? null;
+  const hasCanonicalBounds = totalEventCount !== null && (totalEventCount === 0
+    ? loadedEventCount === 0
+    : events[0]?.sequence === 0 && events.at(-1)?.sequence === totalEventCount - 1);
   const isComplete = totalEventCount !== null &&
     loadedEventCount === totalEventCount &&
     !hasCanonicalGap(events) &&
+    hasCanonicalBounds &&
     cursors.earlier === null &&
     cursors.later === null;
 
