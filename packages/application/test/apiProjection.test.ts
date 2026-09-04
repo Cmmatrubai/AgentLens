@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { TraceEventV1 } from "@agentlens/core";
-import { MAX_COMMAND_EVIDENCE_BYTES, type RunSummary } from "@agentlens/derivations";
+import { MAX_COMMAND_EVIDENCE_BYTES, summarizeRun, type RunSummary } from "@agentlens/derivations";
 import type { CurrentAssessment, EventWindowRecord, RunListRecord } from "@agentlens/storage";
 import type { OwnershipDiagnosis } from "../src/ownership.js";
 
@@ -523,7 +523,8 @@ describe("browser-safe projectors", () => {
         availability: "available",
         provenance: "observed",
         supportingEventIds: ["exact-summary-event"],
-        supportingArtifactIds: ["exact-summary-artifact"]
+        supportingArtifactIds: ["exact-summary-artifact"],
+        omittedSupportingEventIds: 0
       },
       likelyTests: {
         state: "none_detected",
@@ -573,7 +574,8 @@ describe("browser-safe projectors", () => {
       },
       origin: { type: "event", provenance: "observed" },
       supportingEventIds: ["exact-summary-event"],
-      supportingArtifactIds: ["exact-summary-artifact"]
+      supportingArtifactIds: ["exact-summary-artifact"],
+      omittedSupportingEventIds: 0
     });
     for (const reason of [
       "not_yet_available",
@@ -590,14 +592,16 @@ describe("browser-safe projectors", () => {
           provenance: null,
           reason,
           supportingEventIds: [],
-          supportingArtifactIds: []
+          supportingArtifactIds: [],
+          omittedSupportingEventIds: 0
         }
       }, "codex-exec").observedTokenUsage).toEqual({
         state: "unavailable",
         reason,
         origin: null,
         supportingEventIds: [],
-        supportingArtifactIds: []
+        supportingArtifactIds: [],
+        omittedSupportingEventIds: 0
       });
     }
     expect(JSON.stringify(projected)).not.toContain("SENTINEL_MUST_NOT_CROSS_HTTP");
@@ -647,6 +651,91 @@ describe("browser-safe projectors", () => {
       summary,
       ownership
     })).toThrow();
+  });
+
+  it("projects a fallback provider's unavailable token-usage limitation through the API boundary", () => {
+    const summary = summarizeRun({
+      run: {
+        id: "fallback-run",
+        provider: "claude-code",
+        capturePolicy: "standard",
+        startedAt: 1_000,
+        endedAt: 1_500
+      },
+      events: [],
+      gitEvidence: null,
+      validatedUntrackedFileCount: null,
+      currentAssessment: null,
+      providerCapabilities: {
+        sourceTimestamps: false,
+        fileReads: "unavailable",
+        toolOutput: "unavailable",
+        toolDurations: "unavailable",
+        tokenUsage: "unavailable",
+        interruptionSignal: "recorder_only"
+      }
+    });
+
+    const projected = projectRunSummaryV1(summary, "claude-code");
+
+    expect(projected.providerCapabilityLimitations).toMatchObject({
+      state: "available",
+      value: expect.arrayContaining([
+        { capability: "token_usage", availability: "unavailable" }
+      ]),
+      origin: {
+        type: "provider_capability",
+        provider: { state: "known", value: "claude-code" }
+      }
+    });
+  });
+
+  it("projects all token totals with bounded observed supporting-event provenance", () => {
+    const events = Array.from({ length: 1_001 }, (_, index) => {
+      const sequence = index + 1;
+      return event({
+        id: `usage-${String(sequence).padStart(4, "0")}`,
+        runId: "long-token-run",
+        sequence,
+        kind: "turn.completed",
+        normalizedPayload: { usageCounters: { input: 1 } }
+      });
+    }).reverse();
+    const summary = summarizeRun({
+      run: {
+        id: "long-token-run",
+        provider: "codex-exec",
+        capturePolicy: "standard",
+        startedAt: 1_000,
+        endedAt: 1_500
+      },
+      events,
+      gitEvidence: null,
+      validatedUntrackedFileCount: null,
+      currentAssessment: null,
+      providerCapabilities: {
+        sourceTimestamps: false,
+        fileReads: "unavailable",
+        toolOutput: "partial",
+        toolDurations: "unavailable",
+        tokenUsage: "native",
+        interruptionSignal: "partial"
+      }
+    });
+
+    const projected = projectRunSummaryV1(summary, "codex-exec");
+
+    expect(projected.observedTokenUsage).toMatchObject({
+      state: "available",
+      value: { inputTokens: 1_001 },
+      omittedSupportingEventIds: 1
+    });
+    if (projected.observedTokenUsage.state !== "available") {
+      throw new Error("Expected available observed token usage.");
+    }
+    expect(projected.observedTokenUsage.supportingEventIds).toHaveLength(1_000);
+    expect(projected.observedTokenUsage.supportingEventIds.at(0)).toBe("usage-0001");
+    expect(projected.observedTokenUsage.supportingEventIds.at(-1)).toBe("usage-1000");
   });
 
   it("projects empty and nonempty windows with authenticated page cursors", () => {

@@ -88,7 +88,7 @@ function run(assessment: CurrentAssessmentV1 = projected): RunDetailV1 {
       trackedFinalDiff: { state: "unavailable", reason: "not_captured", supportingEventIds: [], supportingArtifactIds: [] },
       untrackedFiles: { state: "unavailable", reason: "not_captured", supportingEventIds: [], supportingArtifactIds: [] },
       elapsedRecorderTimeMs: { state: "available", value: 540_000, provenance: "recorder", supportingEventIds: [], supportingArtifactIds: [] },
-      observedTokenUsage: { state: "unavailable", reason: "not_captured", supportingEventIds: [], supportingArtifactIds: [] },
+      observedTokenUsage: { state: "unavailable", reason: "not_captured", supportingEventIds: [], supportingArtifactIds: [], omittedSupportingEventIds: 0 },
       likelyTests: {
         state: "detected",
         availability: "available",

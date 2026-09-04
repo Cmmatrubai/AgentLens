@@ -66,7 +66,7 @@ function run(
       trackedFinalDiff: { state: "unavailable", reason: "not_yet_available", supportingEventIds: [], supportingArtifactIds: [] },
       untrackedFiles: { state: "unavailable", reason: "not_yet_available", supportingEventIds: [], supportingArtifactIds: [] },
       elapsedRecorderTimeMs: { state: "unavailable", reason: "not_yet_available", supportingEventIds: [], supportingArtifactIds: [] },
-      observedTokenUsage: { state: "unavailable", reason: "not_yet_available", supportingEventIds: [], supportingArtifactIds: [] },
+      observedTokenUsage: { state: "unavailable", reason: "not_yet_available", supportingEventIds: [], supportingArtifactIds: [], omittedSupportingEventIds: 0 },
       likelyTests: {
         state: "none_detected",
         availability: "available",

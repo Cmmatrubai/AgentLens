@@ -822,7 +822,8 @@ function projectObservedTokenUsage(summary: RunSummary["observedTokenUsage"]) {
       },
       origin: { type: "event" as const, provenance: "observed" as const },
       supportingEventIds: [...summary.supportingEventIds],
-      supportingArtifactIds: [...summary.supportingArtifactIds]
+      supportingArtifactIds: [...summary.supportingArtifactIds],
+      omittedSupportingEventIds: summary.omittedSupportingEventIds
     };
   }
   return {
@@ -830,7 +831,8 @@ function projectObservedTokenUsage(summary: RunSummary["observedTokenUsage"]) {
     reason: summary.reason,
     origin: null,
     supportingEventIds: [...summary.supportingEventIds],
-    supportingArtifactIds: [...summary.supportingArtifactIds]
+    supportingArtifactIds: [...summary.supportingArtifactIds],
+    omittedSupportingEventIds: summary.omittedSupportingEventIds
   };
 }
 

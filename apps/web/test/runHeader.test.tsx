@@ -24,7 +24,7 @@ function run(overrides: Partial<RunDetailV1> = {}): RunDetailV1 {
       trackedFinalDiff: { state: "unavailable", reason: "not_captured", supportingEventIds: [], supportingArtifactIds: [] },
       untrackedFiles: { state: "unavailable", reason: "not_captured", supportingEventIds: [], supportingArtifactIds: [] },
       elapsedRecorderTimeMs: { state: "available", value: 1_250, provenance: "recorder", supportingEventIds: [], supportingArtifactIds: [] },
-      observedTokenUsage: { state: "unavailable", reason: "not_captured", supportingEventIds: [], supportingArtifactIds: [] },
+      observedTokenUsage: { state: "unavailable", reason: "not_captured", supportingEventIds: [], supportingArtifactIds: [], omittedSupportingEventIds: 0 },
       likelyTests: {
         state: "detected", availability: "available", provenance: "derived",
         supportingEventIds: [], supportingArtifactIds: [], omittedTerminalCommands: 0,
@@ -96,7 +96,8 @@ describe("RunHeader frozen facts", () => {
           },
           origin: { type: "event", provenance: "observed" },
           supportingEventIds: ["usage-event"],
-          supportingArtifactIds: []
+          supportingArtifactIds: [],
+          omittedSupportingEventIds: 0
         }
       }
     })} />);
@@ -129,7 +130,8 @@ describe("RunHeader frozen facts", () => {
           },
           origin: { type: "event", provenance: "observed" },
           supportingEventIds: ["partial-usage-event"],
-          supportingArtifactIds: []
+          supportingArtifactIds: [],
+          omittedSupportingEventIds: 0
         }
       }
     })} />);
@@ -149,7 +151,8 @@ describe("RunHeader frozen facts", () => {
           reason: "redacted_by_policy",
           origin: null,
           supportingEventIds: ["legacy-redacted-usage"],
-          supportingArtifactIds: []
+          supportingArtifactIds: [],
+          omittedSupportingEventIds: 0
         }
       }
     })} />);
@@ -168,7 +171,8 @@ describe("RunHeader frozen facts", () => {
           reason: "capture_policy",
           origin: null,
           supportingEventIds: [],
-          supportingArtifactIds: []
+          supportingArtifactIds: [],
+          omittedSupportingEventIds: 0
         }
       }
     })} />);
@@ -187,7 +191,8 @@ describe("RunHeader frozen facts", () => {
           reason: "not_yet_available",
           origin: null,
           supportingEventIds: [],
-          supportingArtifactIds: []
+          supportingArtifactIds: [],
+          omittedSupportingEventIds: 0
         }
       }
     })} />);
@@ -205,7 +210,8 @@ describe("RunHeader frozen facts", () => {
           reason: "not_captured",
           origin: null,
           supportingEventIds: [],
-          supportingArtifactIds: []
+          supportingArtifactIds: [],
+          omittedSupportingEventIds: 0
         }
       }
     })} />);

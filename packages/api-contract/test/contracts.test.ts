@@ -197,7 +197,8 @@ describe("closed v1 browser schemas", () => {
       },
       origin: { type: "event", provenance: "observed" },
       supportingEventIds: ["usage-event"],
-      supportingArtifactIds: []
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: 0
     } as const;
     expect(observedTokenUsageV1Schema.parse(available)).toEqual(available);
 
@@ -212,13 +213,15 @@ describe("closed v1 browser schemas", () => {
         reason,
         origin: null,
         supportingEventIds: [],
-        supportingArtifactIds: []
+        supportingArtifactIds: [],
+        omittedSupportingEventIds: 0
       })).toEqual({
         state: "unavailable",
         reason,
         origin: null,
         supportingEventIds: [],
-        supportingArtifactIds: []
+        supportingArtifactIds: [],
+        omittedSupportingEventIds: 0
       });
     }
   });
@@ -250,7 +253,19 @@ describe("closed v1 browser schemas", () => {
       },
       origin: { type: "event", provenance: "observed" },
       supportingEventIds: [],
-      supportingArtifactIds: []
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: 0
+    })).toThrow();
+  });
+
+  it("rejects a negative omitted observed-token-usage supporting-ID count", () => {
+    expect(() => observedTokenUsageV1Schema.parse({
+      state: "unavailable",
+      reason: "redacted_by_policy",
+      origin: null,
+      supportingEventIds: [],
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: -1
     })).toThrow();
   });
 

@@ -60,7 +60,8 @@ describe("browser fixture data", () => {
           reasoningOutputTokens: 31,
           cacheWriteInputTokens: 7
         },
-        supportingEventIds: ["fixture-completed-recovery-provider-terminal"]
+        supportingEventIds: ["fixture-completed-recovery-provider-terminal"],
+        omittedSupportingEventIds: 0
       });
       expect(summary.likelyTests).toMatchObject({
         state: "detected",

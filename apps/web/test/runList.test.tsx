@@ -93,7 +93,7 @@ function run(
       trackedFinalDiff: available("artifact", "git_recovered"),
       untrackedFiles: available(3, "git_recovered"),
       elapsedRecorderTimeMs: available(1_250, "recorder"),
-      observedTokenUsage: unavailable("not_captured"),
+      observedTokenUsage: { ...unavailable("not_captured"), omittedSupportingEventIds: 0 },
       likelyTests: {
         state: "detected",
         availability: "available",

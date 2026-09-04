@@ -45,7 +45,16 @@ const summary: RunSummary = {
   trackedFinalDiff: unavailable,
   untrackedFiles: unavailable,
   elapsedRecorderTimeMs: { ...unavailable, value: 450, availability: "available", provenance: "recorder" },
-  observedTokenUsage: unavailable,
+  observedTokenUsage: {
+    state: "unavailable",
+    value: null,
+    availability: "unavailable",
+    provenance: null,
+    reason: "not_captured",
+    supportingEventIds: [],
+    supportingArtifactIds: [],
+    omittedSupportingEventIds: 0
+  },
   likelyTests: {
     state: "detected",
     availability: "available",

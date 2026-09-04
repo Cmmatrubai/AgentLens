@@ -82,7 +82,7 @@ const detailRun: RunDetailV1 = {
     trackedFinalDiff: { state: "available", value: "artifact", provenance: "git_recovered", supportingEventIds: [], supportingArtifactIds: ["artifact-diff"] },
     untrackedFiles: { state: "available", value: 0, provenance: "git_recovered", supportingEventIds: [], supportingArtifactIds: [] },
     elapsedRecorderTimeMs: { state: "available", value: 5_000, provenance: "recorder", supportingEventIds: [], supportingArtifactIds: [] },
-    observedTokenUsage: { state: "unavailable", reason: "not_captured", supportingEventIds: [], supportingArtifactIds: [] },
+    observedTokenUsage: { state: "unavailable", reason: "not_captured", supportingEventIds: [], supportingArtifactIds: [], omittedSupportingEventIds: 0 },
     likelyTests: {
       state: "detected",
       availability: "available",

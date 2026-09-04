@@ -128,6 +128,7 @@ const TOKEN_USAGE_COUNTER_KEYS = [
   ["reasoningOutputTokens", "reasoningOutput"],
   ["cacheWriteInputTokens", "cacheWriteInput"]
 ] as const;
+const MAX_TOKEN_USAGE_SUPPORTING_EVENT_IDS = 1_000;
 
 const LEGACY_TOKEN_USAGE_KEYS = [
   "input_tokens",
@@ -153,6 +154,13 @@ function legacyUsageHasRedactionMarker(event: TraceEventV1): boolean {
   });
 }
 
+function boundedTokenUsageSupportingEventIds(eventIds: readonly string[]) {
+  return {
+    supportingEventIds: eventIds.slice(0, MAX_TOKEN_USAGE_SUPPORTING_EVENT_IDS),
+    omittedSupportingEventIds: Math.max(0, eventIds.length - MAX_TOKEN_USAGE_SUPPORTING_EVENT_IDS)
+  };
+}
+
 function observedTokenUsage(input: RunSummaryInput): ObservedTokenUsageSummary {
   const totals: Record<keyof ObservedTokenUsage, number | null> = {
     inputTokens: null,
@@ -171,7 +179,8 @@ function observedTokenUsage(input: RunSummaryInput): ObservedTokenUsageSummary {
       provenance: null,
       reason: "capture_policy",
       supportingEventIds: [],
-      supportingArtifactIds: []
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: 0
     };
   }
 
@@ -205,7 +214,7 @@ function observedTokenUsage(input: RunSummaryInput): ObservedTokenUsageSummary {
       value: { ...totals },
       availability: "available",
       provenance: "observed",
-      supportingEventIds,
+      ...boundedTokenUsageSupportingEventIds(supportingEventIds),
       supportingArtifactIds: []
     };
   }
@@ -219,7 +228,7 @@ function observedTokenUsage(input: RunSummaryInput): ObservedTokenUsageSummary {
       availability: "unavailable",
       provenance: null,
       reason: "redacted_by_policy",
-      supportingEventIds: redactedEventIds,
+      ...boundedTokenUsageSupportingEventIds(redactedEventIds),
       supportingArtifactIds: []
     };
   }
@@ -230,7 +239,8 @@ function observedTokenUsage(input: RunSummaryInput): ObservedTokenUsageSummary {
     provenance: null,
     reason: input.run.endedAt === null ? "not_yet_available" : "not_captured",
     supportingEventIds: [],
-    supportingArtifactIds: []
+    supportingArtifactIds: [],
+    omittedSupportingEventIds: 0
   };
 }
 

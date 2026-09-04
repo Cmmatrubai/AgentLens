@@ -241,7 +241,8 @@ describe("run summary evidence fields", () => {
       availability: "available",
       provenance: "observed",
       supportingEventIds: ["turn-completed-with-usage"],
-      supportingArtifactIds: []
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: 0
     });
     expect(summary.assessment).toMatchObject({
       state: "explicit",
@@ -308,8 +309,38 @@ describe("run summary evidence fields", () => {
       availability: "available",
       provenance: "observed",
       supportingEventIds: ["usage-earlier", "usage-later"],
-      supportingArtifactIds: []
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: 0
     });
+  });
+
+  it("preserves token totals while bounding observed supporting IDs in canonical chronology", () => {
+    const events = Array.from({ length: 1_001 }, (_, index) => {
+      const sequence = index + 1;
+      return event({
+        id: `usage-${String(sequence).padStart(4, "0")}`,
+        sequence,
+        kind: "turn.completed",
+        normalizedPayload: { usageCounters: { input: 1 } }
+      });
+    }).reverse();
+
+    const usage = summarizeRun(input({ events })).observedTokenUsage;
+
+    expect(usage).toMatchObject({
+      state: "available",
+      value: {
+        inputTokens: 1_001,
+        cachedInputTokens: null,
+        outputTokens: null,
+        reasoningOutputTokens: null,
+        cacheWriteInputTokens: null
+      },
+      omittedSupportingEventIds: 1
+    });
+    expect(usage.supportingEventIds).toHaveLength(1_000);
+    expect(usage.supportingEventIds.at(0)).toBe("usage-0001");
+    expect(usage.supportingEventIds.at(-1)).toBe("usage-1000");
   });
 
   it("leaves never-emitted counters null and ignores invalid or overflow counters", () => {
@@ -340,7 +371,8 @@ describe("run summary evidence fields", () => {
       availability: "available",
       provenance: "observed",
       supportingEventIds: ["usage-partial-and-invalid"],
-      supportingArtifactIds: []
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: 0
     });
   });
 
@@ -356,7 +388,8 @@ describe("run summary evidence fields", () => {
       provenance: null,
       reason: "not_yet_available",
       supportingEventIds: [],
-      supportingArtifactIds: []
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: 0
     });
     expect(summary.untrackedFiles).toEqual({
       value: null,
@@ -387,7 +420,8 @@ describe("run summary evidence fields", () => {
         provenance: null,
         reason: "capture_policy",
         supportingEventIds: [],
-        supportingArtifactIds: []
+        supportingArtifactIds: [],
+        omittedSupportingEventIds: 0
       });
     }
   );
@@ -414,8 +448,36 @@ describe("run summary evidence fields", () => {
       provenance: null,
       reason: "redacted_by_policy",
       supportingEventIds: ["legacy-redacted-usage"],
-      supportingArtifactIds: []
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: 0
     });
+  });
+
+  it("bounds redacted token-usage supporting IDs in canonical chronology", () => {
+    const events = Array.from({ length: 1_001 }, (_, index) => {
+      const sequence = index + 1;
+      return event({
+        id: `redacted-usage-${String(sequence).padStart(4, "0")}`,
+        sequence,
+        kind: "turn.completed",
+        normalizedPayload: {
+          usage: {
+            input_tokens: "[[REDACTED:json-usage:hmac-sha256:0123456789abcdef0123456789abcdef]]"
+          }
+        }
+      });
+    }).reverse();
+
+    const usage = summarizeRun(input({ events })).observedTokenUsage;
+
+    expect(usage).toMatchObject({
+      state: "unavailable",
+      reason: "redacted_by_policy",
+      omittedSupportingEventIds: 1
+    });
+    expect(usage.supportingEventIds).toHaveLength(1_000);
+    expect(usage.supportingEventIds.at(0)).toBe("redacted-usage-0001");
+    expect(usage.supportingEventIds.at(-1)).toBe("redacted-usage-1000");
   });
 
   it("reports a terminal standard run without provider usage as not captured", () => {
@@ -432,7 +494,8 @@ describe("run summary evidence fields", () => {
       provenance: null,
       reason: "not_captured",
       supportingEventIds: [],
-      supportingArtifactIds: []
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: 0
     });
   });
 

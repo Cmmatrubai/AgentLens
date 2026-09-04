@@ -185,6 +185,7 @@ export type TokenUsageUnavailableReason =
 interface ObservedTokenUsageSummaryBase {
   readonly supportingEventIds: readonly string[];
   readonly supportingArtifactIds: readonly string[];
+  readonly omittedSupportingEventIds: number;
 }
 
 export interface AvailableObservedTokenUsageSummary extends ObservedTokenUsageSummaryBase {

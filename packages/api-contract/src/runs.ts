@@ -56,7 +56,8 @@ export const observedTokenUsageV1Schema = z.discriminatedUnion("state", [
       type: z.literal("event"),
       provenance: z.literal("observed")
     }).strict(),
-    ...evidenceIds
+    ...evidenceIds,
+    omittedSupportingEventIds: nonnegativeInteger
   }).strict(),
   z.object({
     state: z.literal("unavailable"),
@@ -67,7 +68,8 @@ export const observedTokenUsageV1Schema = z.discriminatedUnion("state", [
       "not_captured"
     ]),
     origin: z.null(),
-    ...evidenceIds
+    ...evidenceIds,
+    omittedSupportingEventIds: nonnegativeInteger
   }).strict()
 ]);
 
@@ -77,6 +79,7 @@ export const providerCapabilityLimitationV1Schema = z.object({
     "file_reads",
     "tool_output",
     "tool_durations",
+    "token_usage",
     "interruption_signal"
   ]),
   availability: z.enum(["partial", "unavailable", "recorder_only"])
