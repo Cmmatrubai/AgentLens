@@ -1,6 +1,6 @@
 import type { TrajectoryEventV1 } from "@agentlens/api-contract";
 
-import type { TrajectoryLayoutRow } from "./types.js";
+import type { RecorderTiming, TrajectoryLayoutRow } from "./types.js";
 
 function eventKey(event: TrajectoryEventV1): string {
   return `${event.eventId}:${event.sequence}`;
@@ -25,6 +25,26 @@ function compatibleLifecyclePair(start: TrajectoryEventV1, terminal: TrajectoryE
 
 function lifecycleInstanceKey(start: TrajectoryEventV1, terminal: TrajectoryEventV1): string {
   return `lifecycle:${start.lifecycleGroupKey}:${eventKey(start)}:${eventKey(terminal)}`;
+}
+
+function recorderTimingForCompatiblePair(
+  start: TrajectoryEventV1,
+  terminal: TrajectoryEventV1
+): RecorderTiming {
+  const startedAt = Date.parse(start.receivedAt);
+  const terminalAt = Date.parse(terminal.receivedAt);
+  const elapsedMs = terminalAt - startedAt;
+  if (!Number.isFinite(startedAt) || !Number.isFinite(terminalAt) ||
+      !Number.isFinite(elapsedMs) || !Number.isSafeInteger(elapsedMs) || elapsedMs < 0) {
+    return { state: "unavailable", reason: "invalid_recorder_time" };
+  }
+  return {
+    state: "available",
+    elapsedMs,
+    basis: "recorder_received_at",
+    provenance: "derived",
+    supportingEventIds: [start.eventId, terminal.eventId]
+  };
 }
 
 export function findTrajectoryRowIndex(
@@ -68,12 +88,18 @@ export function projectTrajectory(input: Readonly<{
         type: "lifecycle_group",
         key: groupKey,
         events: [current, terminal],
-        expanded: input.expandedGroupKeys.has(groupKey)
+        expanded: input.expandedGroupKeys.has(groupKey),
+        recorderTiming: recorderTimingForCompatiblePair(current, terminal)
       });
       index += 2;
       continue;
     }
-    rows.push({ type: "event", key: eventKey(current), event: current });
+    rows.push({
+      type: "event",
+      key: eventKey(current),
+      event: current,
+      recorderTiming: { state: "unavailable", reason: "missing_pair" }
+    });
     index += 1;
   }
   return rows;

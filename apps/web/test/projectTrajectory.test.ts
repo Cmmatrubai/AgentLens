@@ -232,22 +232,145 @@ describe("projectTrajectory", () => {
     });
 
     const instanceKey = `lifecycle:${groupA}:start-a:1:terminal-a:2`;
+    const recorderTiming = {
+      state: "available" as const,
+      elapsedMs: 1_000,
+      basis: "recorder_received_at" as const,
+      provenance: "derived" as const,
+      supportingEventIds: ["start-a", "terminal-a"] as const
+    };
     const compact = projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set() });
     const expanded = projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set([instanceKey]) });
     const collapsedAgain = projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set() });
     const expandedAgain = projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set([instanceKey]) });
 
     expect(compact).toEqual([
-      { type: "lifecycle_group", key: instanceKey, events: [start, terminal], expanded: false }
+      { type: "lifecycle_group", key: instanceKey, events: [start, terminal], expanded: false, recorderTiming }
     ]);
     expect(expanded).toEqual([
-      { type: "lifecycle_group", key: instanceKey, events: [start, terminal], expanded: true }
+      { type: "lifecycle_group", key: instanceKey, events: [start, terminal], expanded: true, recorderTiming }
     ]);
     expect(collapsedAgain).toEqual(compact);
     expect(expandedAgain).toEqual(expanded);
     expect(expanded[0]?.type).toBe("lifecycle_group");
     if (expanded[0]?.type !== "lifecycle_group") throw new Error("Expected one expanded lifecycle group.");
     expect(expanded[0].events.map(({ eventId }) => eventId)).toEqual(["start-a", "terminal-a"]);
+  });
+
+  it("derives recorder-observed elapsed time from a compatible loaded lifecycle pair", () => {
+    const start = event("timed-start", 1, {
+      lifecycleGroupKey: groupA,
+      receivedAt: "2026-08-31T12:00:00.000Z"
+    });
+    const terminal = event("timed-terminal", 2, {
+      kind: "turn.completed",
+      status: { state: "known", value: "completed" },
+      lifecycleGroupKey: groupA,
+      lifecycle: { domain: "turn", phase: "completed" },
+      receivedAt: "2026-08-31T12:00:02.500Z"
+    });
+
+    const rows = projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set() });
+
+    expect(rows).toEqual([expect.objectContaining({
+      type: "lifecycle_group",
+      recorderTiming: {
+        state: "available",
+        elapsedMs: 2_500,
+        basis: "recorder_received_at",
+        provenance: "derived",
+        supportingEventIds: ["timed-start", "timed-terminal"]
+      }
+    })]);
+  });
+
+  it.each([
+    ["zero", "2026-08-31T12:00:00.000Z", "2026-08-31T12:00:00.000Z", {
+      state: "available", elapsedMs: 0, basis: "recorder_received_at", provenance: "derived", supportingEventIds: ["timing-start", "timing-terminal"]
+    }],
+    ["negative", "2026-08-31T12:00:02.000Z", "2026-08-31T12:00:01.000Z", {
+      state: "unavailable", reason: "invalid_recorder_time"
+    }],
+    ["invalid", "not-a-recorder-timestamp", "2026-08-31T12:00:01.000Z", {
+      state: "unavailable", reason: "invalid_recorder_time"
+    }]
+  ] as const)("marks %s recorder timing without altering the compatible lifecycle pair", (_caseName, startedAt, terminalAt, recorderTiming) => {
+    const start = event("timing-start", 1, { lifecycleGroupKey: groupA, receivedAt: startedAt });
+    const terminal = event("timing-terminal", 2, {
+      kind: "turn.completed",
+      status: { state: "known", value: "completed" },
+      lifecycleGroupKey: groupA,
+      lifecycle: { domain: "turn", phase: "completed" },
+      receivedAt: terminalAt
+    });
+
+    expect(projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set() }))
+      .toEqual([expect.objectContaining({ type: "lifecycle_group", recorderTiming })]);
+  });
+
+  it("makes recorder timing available only after the terminal event joins the loaded page set", () => {
+    const start = event("page-start", 1, {
+      lifecycleGroupKey: groupA,
+      receivedAt: "2026-08-31T12:00:00.000Z"
+    });
+    const terminal = event("page-terminal", 2, {
+      kind: "turn.completed",
+      status: { state: "known", value: "completed" },
+      lifecycleGroupKey: groupA,
+      lifecycle: { domain: "turn", phase: "completed" },
+      receivedAt: "2026-08-31T12:00:04.000Z"
+    });
+
+    const firstPageRows = projectTrajectory({ events: [start], expandedGroupKeys: new Set() });
+    const mergedSecondPageRows = projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set() });
+
+    expect(firstPageRows).toEqual([expect.objectContaining({
+      type: "event",
+      recorderTiming: { state: "unavailable", reason: "missing_pair" }
+    })]);
+    expect(mergedSecondPageRows).toEqual([expect.objectContaining({
+      type: "lifecycle_group",
+      recorderTiming: expect.objectContaining({
+        state: "available",
+        elapsedMs: 4_000,
+        supportingEventIds: ["page-start", "page-terminal"]
+      })
+    })]);
+  });
+
+  it.each([
+    ["a missing terminal", [
+      event("missing-start", 1, { lifecycleGroupKey: groupA })
+    ]],
+    ["different lifecycle keys", [
+      event("key-start", 1, { lifecycleGroupKey: groupA }),
+      event("key-terminal", 2, {
+        kind: "turn.completed", status: { state: "known", value: "completed" }, lifecycleGroupKey: `grp_${"b".repeat(64)}`,
+        lifecycle: { domain: "turn", phase: "completed" }
+      })
+    ]],
+    ["different lifecycle domains", [
+      event("domain-start", 1, { lifecycleGroupKey: groupA }),
+      event("domain-terminal", 2, {
+        kind: "thread.completed", status: { state: "known", value: "completed" }, lifecycleGroupKey: groupA,
+        lifecycle: { domain: "thread", phase: "completed" }
+      })
+    ]],
+    ["different presentation classes", [
+      event("class-start", 1, { lifecycleGroupKey: groupA }),
+      event("class-terminal", 2, {
+        kind: "tool.completed", status: { state: "known", value: "completed" }, presentationClass: "tool", lifecycleGroupKey: groupA,
+        lifecycle: { domain: "turn", phase: "completed" }
+      })
+    ]]
+  ] as const)("keeps %s unavailable rather than inferring recorder timing", (_caseName, events) => {
+    const rows = projectTrajectory({ events, expandedGroupKeys: new Set() });
+
+    expect(rows).toHaveLength(events.length);
+    for (const row of rows) {
+      expect(row.type).toBe("event");
+      expect(row.recorderTiming).toEqual({ state: "unavailable", reason: "missing_pair" });
+    }
   });
 
   it.each([
@@ -268,13 +391,21 @@ describe("projectTrajectory", () => {
       lifecycleGroupKey: groupA,
       lifecycle: { domain: presentationClass === "command" ? "item" : "tool", phase: "completed" }
     });
+    const recorderTiming = {
+      state: "available" as const,
+      elapsedMs: 1_000,
+      basis: "recorder_received_at" as const,
+      provenance: "derived" as const,
+      supportingEventIds: [`${presentationClass}-start`, `${presentationClass}-terminal`] as const
+    };
 
     expect(projectTrajectory({ events: [start, terminal], expandedGroupKeys: new Set() }))
       .toEqual([{
         type: "lifecycle_group",
         key: `lifecycle:${groupA}:${presentationClass}-start:1:${presentationClass}-terminal:2`,
         events: [start, terminal],
-        expanded: false
+        expanded: false,
+        recorderTiming
       }]);
   });
 
@@ -342,14 +473,28 @@ describe("projectTrajectory", () => {
     });
     const firstKey = `lifecycle:${groupA}:start-1:1:terminal-1:2`;
     const secondKey = `lifecycle:${groupA}:start-2:4:terminal-2:5`;
+    const firstTiming = {
+      state: "available" as const,
+      elapsedMs: 1_000,
+      basis: "recorder_received_at" as const,
+      provenance: "derived" as const,
+      supportingEventIds: ["start-1", "terminal-1"] as const
+    };
+    const secondTiming = {
+      state: "available" as const,
+      elapsedMs: 1_000,
+      basis: "recorder_received_at" as const,
+      provenance: "derived" as const,
+      supportingEventIds: ["start-2", "terminal-2"] as const
+    };
 
     expect(projectTrajectory({
       events: [firstStart, firstTerminal, separator, secondStart, secondTerminal],
       expandedGroupKeys: new Set([firstKey])
     })).toEqual([
-      { type: "lifecycle_group", key: firstKey, events: [firstStart, firstTerminal], expanded: true },
-      { type: "event", key: "message:3", event: separator },
-      { type: "lifecycle_group", key: secondKey, events: [secondStart, secondTerminal], expanded: false }
+      { type: "lifecycle_group", key: firstKey, events: [firstStart, firstTerminal], expanded: true, recorderTiming: firstTiming },
+      { type: "event", key: "message:3", event: separator, recorderTiming: { state: "unavailable", reason: "missing_pair" } },
+      { type: "lifecycle_group", key: secondKey, events: [secondStart, secondTerminal], expanded: false, recorderTiming: secondTiming }
     ]);
   });
 

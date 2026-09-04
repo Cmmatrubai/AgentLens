@@ -275,6 +275,44 @@ describe("production accessibility", () => {
     expect(row.style.getPropertyValue("--selection-duration")).toBe("0ms");
   });
 
+  it("keeps derived recorder timing distinct from provider timing in an accessible lifecycle row", () => {
+    const lifecycleGroupKey = `grp_${"d".repeat(64)}`;
+    render(
+      <Trajectory
+        events={[
+          event({
+            eventId: "timed-start",
+            sequence: 1,
+            receivedAt: "2026-09-01T12:00:00.000Z",
+            presentationClass: "lifecycle",
+            lifecycleGroupKey,
+            lifecycle: { domain: "tool", phase: "started" },
+            status: { state: "known", value: "in_progress" }
+          }),
+          event({
+            eventId: "timed-finish",
+            sequence: 2,
+            receivedAt: "2026-09-01T12:00:02.000Z",
+            presentationClass: "lifecycle",
+            lifecycleGroupKey,
+            lifecycle: { domain: "tool", phase: "completed" }
+          })
+        ]}
+        selectedEventId="timed-finish"
+        expandedGroupKeys={new Set()}
+        onSelect={vi.fn()}
+        onExpandGroup={vi.fn()}
+        onEscapeDeepEvidence={vi.fn()}
+        onRelationshipJump={vi.fn()}
+      />
+    );
+
+    const row = screen.getByRole("option", { selected: true });
+    expect(row).toHaveAccessibleName(/Recorder-observed elapsed · derived from receipt timestamps/);
+    expect(row).not.toHaveAccessibleName(/Provider duration/);
+    expect(screen.getByText("Provider time unavailable · not captured")).toBeVisible();
+  });
+
   it("keeps the real 800px inspector semantic and outside the execution listbox", async () => {
     vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
       matches: query === "(max-width: 800px)",

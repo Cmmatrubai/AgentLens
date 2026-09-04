@@ -66,6 +66,10 @@ export function RunHeader({ run, onAssessmentSaved }: Readonly<{
         <div><dt>Test-bearing commands</dt><dd>{likelyTestsText(run)}</dd></div>
         <div><dt>Assessment</dt><dd><AssessmentSummary assessment={run.summary.assessment} /></dd></div>
       </dl>
+      <div className="run-detail-header__evidence-boundary">
+        <p>Provider file-read telemetry unavailable. Shell commands may incidentally show possible access; AgentLens does not infer complete reads.</p>
+        <p>Provider tool duration unavailable. Completed lifecycle pairs show recorder-observed elapsed time when both events are loaded.</p>
+      </div>
       {onAssessmentSaved !== undefined && (
         <AssessmentEditor
           runId={run.runId}

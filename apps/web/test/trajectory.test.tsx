@@ -355,6 +355,40 @@ describe("virtualized execution trajectory", () => {
     expect(document.querySelectorAll('[role="option"][tabindex="0"]')).toHaveLength(1);
   });
 
+  it("labels derived recorder elapsed time separately from unavailable provider time", () => {
+    const groupKey = `grp_${"t".repeat(64)}`;
+    const fixture = events(2).map((item, index) => ({
+      ...item,
+      eventId: index === 0 ? "timed-start" : "timed-terminal",
+      kind: index === 0 ? "turn.started" : "turn.completed",
+      status: { state: "known" as const, value: index === 0 ? "in_progress" as const : "completed" as const },
+      presentationClass: "lifecycle" as const,
+      lifecycleGroupKey: groupKey,
+      lifecycle: { domain: "turn" as const, phase: index === 0 ? "started" as const : "completed" as const },
+      sourceOccurredAt: { state: "unavailable" as const, reason: "not_captured" as const }
+    }));
+
+    render(
+      <Trajectory
+        events={fixture}
+        selectedEventId="timed-terminal"
+        expandedGroupKeys={new Set()}
+        onSelect={vi.fn()}
+        onExpandGroup={vi.fn()}
+        onEscapeDeepEvidence={vi.fn()}
+        onRelationshipJump={vi.fn()}
+      />
+    );
+
+    const row = screen.getByRole("option", { selected: true });
+    expect(screen.getByText("Recorder-observed elapsed · derived from receipt timestamps")).toBeVisible();
+    expect(row).toHaveTextContent(/1,?000 ms/);
+    expect(screen.getByText("Provider time unavailable · not captured")).toBeVisible();
+    expect(row).toHaveAccessibleName(/Recorder-observed elapsed · derived from receipt timestamps/);
+    expect(row).not.toHaveAccessibleName(/Provider duration/);
+    expect(screen.queryByText(/^Provider duration$/)).not.toBeInTheDocument();
+  });
+
   it("presents the controlled selected lifecycle member as the current row action", async () => {
     const groupKey = `grp_${"f".repeat(64)}`;
     const fixture = events(2).map((item, index) => ({

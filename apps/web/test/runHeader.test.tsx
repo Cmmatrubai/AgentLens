@@ -59,6 +59,13 @@ describe("RunHeader frozen facts", () => {
     expect(screen.getByText("Contradiction: provider process contradiction")).toBeVisible();
   });
 
+  it("states the file-read and provider-duration evidence boundaries without inference", () => {
+    render(<RunHeader run={run()} />);
+
+    expect(screen.getByText("Provider file-read telemetry unavailable. Shell commands may incidentally show possible access; AgentLens does not infer complete reads.")).toBeVisible();
+    expect(screen.getByText("Provider tool duration unavailable. Completed lifecycle pairs show recorder-observed elapsed time when both events are loaded.")).toBeVisible();
+  });
+
   it("states projected, unavailable, ongoing, and unsupported facts without invention", () => {
     const base = run();
     render(<RunHeader run={run({

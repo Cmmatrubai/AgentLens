@@ -5,7 +5,7 @@ import type { KeyboardEvent, Ref } from "react";
 
 import { useMotionPolicy } from "../motion/motionPolicy.js";
 import { uniqueRelationships } from "./relationships.js";
-import type { TrajectoryLayoutRow } from "./types.js";
+import type { RecorderTiming, TrajectoryLayoutRow } from "./types.js";
 
 const provenanceLabels = {
   observed: "Observed evidence",
@@ -37,6 +37,16 @@ function timeLabel(event: TrajectoryEventV1) {
       <span>{event.sourceOccurredAt.state === "available"
         ? <>Provider time <time dateTime={event.sourceOccurredAt.value}>{event.sourceOccurredAt.value}</time></>
         : "Provider time unavailable · not captured"}</span>
+    </div>
+  );
+}
+
+function recorderTimingLabel(timing: RecorderTiming) {
+  if (timing.state === "unavailable") return null;
+  return (
+    <div className="trajectory-row__times">
+      <span>Recorder-observed elapsed · derived from receipt timestamps</span>
+      <span>{timing.elapsedMs.toLocaleString()} ms</span>
     </div>
   );
 }
@@ -73,6 +83,9 @@ export function TrajectoryRow(props: Readonly<{
   const activeEvent = selectedMember ?? primary;
   const selected = selectedMember !== undefined;
   const presentation = status(activeEvent);
+  const timingAccessibleText = props.row.recorderTiming.state === "available"
+    ? ` Recorder-observed elapsed · derived from receipt timestamps · ${props.row.recorderTiming.elapsedMs.toLocaleString()} ms.`
+    : "";
   const motionPolicy = useMotionPolicy();
   const relationships = selected ? uniqueRelationships(activeEvent.relationships) : [];
   const actions: Array<Readonly<{
@@ -126,7 +139,7 @@ export function TrajectoryRow(props: Readonly<{
       role="option"
       aria-selected={selected}
       aria-expanded={props.row.type === "lifecycle_group" ? props.row.expanded : undefined}
-      aria-label={`${activeEvent.safeSummary}. ${provenanceLabels[activeEvent.provenance]}. ${presentation.label}.${actionLabel}`}
+      aria-label={`${activeEvent.safeSummary}. ${provenanceLabels[activeEvent.provenance]}. ${presentation.label}.${timingAccessibleText}${actionLabel}`}
       aria-keyshortcuts={actions.length > 1 ? "ArrowLeft ArrowRight Enter Space" : "Enter Space"}
       className={`trajectory-row trajectory-row--${activeEvent.provenance}${selected ? " trajectory-row--selected" : ""}`}
       data-event-id={activeEvent.eventId}
@@ -199,6 +212,7 @@ export function TrajectoryRow(props: Readonly<{
             ))}
           </motion.div>
         ) : <EventPresentation event={activeEvent} />}
+        {recorderTimingLabel(props.row.recorderTiming)}
         {props.row.type === "lifecycle_group" && (
           <div className="trajectory-row__group">
             <span>{props.row.events.length} immutable lifecycle events</span>
