@@ -75,20 +75,17 @@ const attachedLongMavenOptions = [
   "--builder="
 ] as const;
 
-const shellFamilyExecutables = new Set([
-  "ash",
-  "bash",
-  "csh",
-  "dash",
-  "fish",
-  "ksh",
-  "mksh",
-  "pdksh",
-  "sh",
-  "tcsh",
-  "yash",
-  "zsh"
+const shellExecutablesWithoutShellSuffix = new Set([
+  "cmd",
+  "command",
+  "es",
+  "ion",
+  "nu",
+  "oil",
+  "rc"
 ]);
+
+const executableSuffixes = [".exe", ".bat", ".cmd", ".com"] as const;
 
 const recognizers: readonly ((argv: readonly string[]) => RecognizedTestCommand | null)[] = [
   recognizePytest,
@@ -184,20 +181,29 @@ function packageManagerRuns(argv: readonly string[], runner: "jest" | "vitest"):
     (argv[0] === "npm" && argv[1] === "exec" && argv[2] === runner);
 }
 
-function executableName(executable: string): string {
-  const basename = executable.slice(executable.lastIndexOf("/") + 1);
+function normalizedExecutableBasename(executable: string): string {
+  const normalizedPath = executable.replaceAll("\\", "/");
+  let basename = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1).toLowerCase();
+  for (const suffix of executableSuffixes) {
+    if (basename.endsWith(suffix)) {
+      basename = basename.slice(0, -suffix.length);
+      break;
+    }
+  }
   return basename;
 }
 
-function isShellFamilyExecutable(executable: string | undefined): boolean {
-  return executable !== undefined && shellFamilyExecutables.has(executableName(executable));
+function isShellLaunchExecutable(executable: string | undefined): boolean {
+  if (executable === undefined) return false;
+  const basename = normalizedExecutableBasename(executable);
+  return basename.endsWith("sh") || basename.endsWith("shell") || shellExecutablesWithoutShellSuffix.has(basename);
 }
 
 function hasShellLaunchToken(argv: readonly string[]): boolean {
   // Unrecognized segments cannot safely distinguish executable position from
   // dispatcher arguments, so reject a shell token anywhere in the segment.
   // Recognized test commands are intentionally excluded before this check.
-  return argv.some(isShellFamilyExecutable);
+  return argv.some(isShellLaunchExecutable);
 }
 
 function recognizeNpm(argv: readonly string[]): RecognizedTestCommand | null {

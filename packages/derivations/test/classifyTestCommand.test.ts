@@ -142,6 +142,20 @@ describe("classifyTestCommand", () => {
     expect(classify(command)).toBeNull();
   });
 
+  it.each([
+    "sh -c \"pnpm test && busybox hush -c 'pnpm test'\"",
+    "sh -c \"pnpm test && /usr/bin/rbash -c 'pnpm test'\"",
+    "sh -c \"pnpm test && /bin/posh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && /bin/oksh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && /bin/loksh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && customsh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && /opt/tools/customshell.exe -c 'pnpm test'\"",
+    "sh -c \"pnpm test && nu -c 'pnpm test'\"",
+    "sh -c \"pnpm test && cmd.exe /c 'pnpm test'\""
+  ])("rejects shell-like executable basenames in unrecognized compound segments: %s", (command) => {
+    expect(classify(command)).toBeNull();
+  });
+
   it("does not mistake harmless shell names in direct command arguments for a nested shell", () => {
     expect(classify("sh -c \"pnpm vitest -t zsh && pnpm test\"")).toEqual({
       family: "vitest",
