@@ -6,6 +6,7 @@ test("one-use bootstrap opens the evidence ledger, filters it, and expires on re
   requestLifecycle
 }) => {
   await openBootstrapped(page, productionUi);
+  await expect(page.locator(".run-ledger__item").first()).toBeVisible();
   await page.getByLabel("Run status").selectOption("completed");
   const checkpoint = requestLifecycle.checkpoint();
   await page.getByRole("button", { name: "Apply filters" }).click();
@@ -36,6 +37,21 @@ test("the frozen layouts retain evidence without page overflow", async ({ page, 
     await expect(page.getByText("Human review", { exact: true }).first()).toBeVisible();
     await expect(page.getByText(/Final Git evidence:/).first()).toBeVisible();
     await expect(page.getByText(/Reviewer:/).first()).toBeVisible();
+    if (viewport.width === 520) {
+      const criticalCellGeometry = await page.locator(".run-ledger__item").first().locator([
+        ".run-row__identity",
+        ".run-row__status",
+        ".run-row__evidence div",
+        ".run-row__timing"
+      ].join(", ")).evaluateAll((cells) => cells.map((cell) => {
+        const { x, width } = cell.getBoundingClientRect();
+        return { width, x };
+      }));
+      for (const cell of criticalCellGeometry.slice(1)) {
+        expect(cell.x).toBeCloseTo(criticalCellGeometry[0].x, 3);
+        expect(cell.width).toBeCloseTo(criticalCellGeometry[0].width, 3);
+      }
+    }
     await expectNoHorizontalOverflow(page);
   }
 });

@@ -103,8 +103,7 @@ body,
 
 @media (max-width: 520px) {
   .run-filters,
-  .run-detail-header dl,
-  .run-row__destination {
+  .run-detail-header dl {
     grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -11,6 +11,10 @@ test("the desktop ledger is flat, dense, and evidence-complete", async ({ page, 
     }).length
   );
   expect(visibleRows).toBeGreaterThanOrEqual(6);
+  const standardRowHeight = await page.getByRole("link", {
+    name: "fixture trajectory 10 evidence — inspect run evidence"
+  }).locator("xpath=ancestor::li").evaluate((row) => row.getBoundingClientRect().height);
+  expect(standardRowHeight).toBeLessThanOrEqual(104);
   await expect(page.getByText("Likely tests").first()).toBeVisible();
   await expect(page.getByText("Human review").first()).toBeVisible();
   await expect(page.getByText("Git").first()).toBeVisible();
