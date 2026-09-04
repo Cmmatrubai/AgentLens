@@ -88,6 +88,36 @@ describe("AgentLens argument parsing", () => {
     expect(() => parseAgentLensArgs(["future-command"])).toThrow(/doctor/i);
   });
 
+  it("parses the local UI command with closed public options", () => {
+    expect(parseAgentLensArgs(["ui"])).toEqual({
+      name: "ui",
+      dataRoot: expect.any(String),
+      noOpen: false
+    });
+    expect(parseAgentLensArgs([
+      "ui", "--data-root", "/tmp/agentlens-ui", "--no-open"
+    ])).toEqual({
+      name: "ui",
+      dataRoot: "/tmp/agentlens-ui",
+      noOpen: true
+    });
+  });
+
+  it.each([
+    [["ui", "--port", "9000"], /unknown.*ui/i],
+    [["ui", "--host", "localhost"], /unknown.*ui/i],
+    [["ui", "--data-root"], /requires a value/i],
+    [["ui", "--data-root", "/tmp/one", "--data-root", "/tmp/two"], /duplicate/i],
+    [["ui", "--no-open", "--no-open"], /duplicate/i],
+    [["ui", "positional"], /unknown.*ui|positional/i]
+  ] as const)("refuses an invalid UI invocation %#", (argv, message) => {
+    expect(() => parseAgentLensArgs(argv)).toThrow(message);
+  });
+
+  it("includes ui in the public usage error", () => {
+    expect(() => parseAgentLensArgs(["future-command"])).toThrow(/ui/i);
+  });
+
   it.each(["unreviewed", "success", "partial", "failure"] as const)(
     "parses the %s assessment verdict",
     (verdict) => {

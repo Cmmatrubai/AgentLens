@@ -6,5 +6,12 @@ export default defineWorkspace([
       environment: "node",
       include: ["{packages,apps}/*/test/**/*.test.ts"]
     }
+  },
+  {
+    test: {
+      environment: "jsdom",
+      include: ["apps/web/test/**/*.test.tsx"],
+      setupFiles: ["apps/web/test/setup.ts"]
+    }
   }
 ]);

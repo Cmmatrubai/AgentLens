@@ -1,0 +1,27 @@
+:root {
+  color-scheme: dark;
+  --canvas: #090b0d;
+  --shell: #0d1013;
+  --panel: #12161a;
+  --panel-raised: #171c21;
+  --border: #293038;
+  --border-soft: #1e252b;
+  --text: #eef2f3;
+  --text-muted: #9aa5ad;
+  --text-dim: #76828b;
+  --cyan: #70cbd0;
+  --amber: #e4bd73;
+  --coral: #ef8b7f;
+  --indigo: #a6adff;
+  --focus: #d7fbff;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --radius: 8px;
+  font-family: "Geist Sans", system-ui, sans-serif;
+  background: var(--canvas);
+  color: var(--text);
+}

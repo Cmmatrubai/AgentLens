@@ -21,7 +21,6 @@ import { openDatabase, RunRepository } from "@agentlens/storage";
 import type { AssessCommand } from "../src/args.js";
 import { runAssessCommand } from "../src/commands/assess.js";
 import { main } from "../src/main.js";
-import * as readOnlyDataRoot from "../src/readOnlyDataRoot.js";
 
 interface RawStatement {
   get(...params: unknown[]): unknown;
@@ -365,17 +364,13 @@ afterEach(async () => {
 });
 
 describe.sequential("assess command", () => {
-  it("observes data-root lookup for a runtime-valid direct command", async () => {
+  it("delegates a runtime-valid direct command without creating a missing data root", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentlens-cli-assess-direct-valid-"));
     roots.push(root);
     const dataRoot = join(root, "missing-data");
-    const locateSpy = vi.spyOn(readOnlyDataRoot, "locateReadOnlyDataRoot");
-
     const error = await directCall(validDirectCommand(dataRoot, "missing-run"))
       .then(() => null, (cause: unknown) => cause);
 
-    expect(locateSpy).toHaveBeenCalledOnce();
-    expect(locateSpy).toHaveBeenCalledWith(dataRoot);
     expect(await snapshot(dataRoot)).toBeNull();
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toMatch(/existing AgentLens data root/i);
@@ -388,11 +383,8 @@ describe.sequential("assess command", () => {
       roots.push(root);
       const dataRoot = join(root, "missing-data");
       const command = build(validDirectCommand(dataRoot, "missing-run"));
-      const locateSpy = vi.spyOn(readOnlyDataRoot, "locateReadOnlyDataRoot");
-
       const error = await directCall(command).then(() => null, (cause: unknown) => cause);
 
-      expect(locateSpy).not.toHaveBeenCalled();
       expect(await snapshot(dataRoot)).toBeNull();
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toMatch(expectedError);
@@ -406,11 +398,8 @@ describe.sequential("assess command", () => {
       downgradeToMigration003(context.databasePath);
       const before = await snapshot(context.dataRoot);
       const command = build(validDirectCommand(context.dataRoot, context.runId));
-      const locateSpy = vi.spyOn(readOnlyDataRoot, "locateReadOnlyDataRoot");
-
       const error = await directCall(command).then(() => null, (cause: unknown) => cause);
 
-      expect(locateSpy).not.toHaveBeenCalled();
       expect(await snapshot(context.dataRoot)).toEqual(before);
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toMatch(expectedError);

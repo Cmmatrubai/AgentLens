@@ -2,7 +2,7 @@ import { lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import Database from "better-sqlite3";
-import { registerConnection, releaseConnection } from "./databaseInternal.js";
+import { connectionFor, registerConnection, releaseConnection } from "./databaseInternal.js";
 
 const MIGRATIONS = [
   {
@@ -51,6 +51,19 @@ export interface DatabaseForeignKeyViolation {
 
 export type ReadOnlyDatabaseErrorReason = "wal_present" | "immutable_unavailable";
 
+export type ServerReadMode = "immutable" | "active_wal";
+
+export interface ServerReadDatabase {
+  readonly database: AgentLensDatabase;
+  readonly mode: ServerReadMode;
+}
+
+export type ServerReadDatabaseErrorReason =
+  | "active_sidecar_missing"
+  | "active_sidecar_invalid"
+  | "active_sidecar_changed"
+  | "active_wal_unavailable";
+
 export class ReadOnlyDatabaseError extends Error {
   readonly reason: ReadOnlyDatabaseErrorReason;
 
@@ -59,6 +72,126 @@ export class ReadOnlyDatabaseError extends Error {
       cause === undefined ? undefined : { cause });
     this.name = "ReadOnlyDatabaseError";
     this.reason = reason;
+  }
+}
+
+export class ServerReadDatabaseError extends Error {
+  readonly reason: ServerReadDatabaseErrorReason;
+
+  constructor(reason: ServerReadDatabaseErrorReason, cause?: unknown) {
+    super(`AgentLens server read database open failed: ${reason}.`,
+      cause === undefined ? undefined : { cause });
+    this.name = "ServerReadDatabaseError";
+    this.reason = reason;
+  }
+}
+
+interface ActiveFileIdentity {
+  readonly path: string;
+  readonly uid: bigint;
+  readonly gid: bigint;
+  readonly mode: bigint;
+  readonly device: bigint;
+  readonly inode: bigint;
+  readonly size: bigint;
+  readonly mtimeNs: bigint;
+  readonly ctimeNs: bigint;
+}
+
+function missingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+function activeWalPresent(path: string): boolean {
+  try {
+    lstatSync(`${path}-wal`);
+    return true;
+  } catch (error) {
+    if (missingPathError(error)) return false;
+    throw new ServerReadDatabaseError("active_sidecar_invalid", error);
+  }
+}
+
+function readActiveFileIdentity(path: string): ActiveFileIdentity {
+  let stat;
+  try {
+    stat = lstatSync(path, { bigint: true });
+  } catch (error) {
+    if (missingPathError(error)) {
+      throw new ServerReadDatabaseError("active_sidecar_missing", error);
+    }
+    throw new ServerReadDatabaseError("active_sidecar_invalid", error);
+  }
+
+  const effectiveUserIdValue = process.geteuid?.() ?? process.getuid?.();
+  if (effectiveUserIdValue === undefined) {
+    throw new ServerReadDatabaseError("active_sidecar_invalid");
+  }
+  const effectiveUserId = BigInt(effectiveUserIdValue);
+  if (!stat.isFile() || stat.uid !== effectiveUserId || (stat.mode & 0o077n) !== 0n) {
+    throw new ServerReadDatabaseError("active_sidecar_invalid");
+  }
+
+  return Object.freeze({
+    path,
+    uid: stat.uid,
+    gid: stat.gid,
+    mode: stat.mode,
+    device: stat.dev,
+    inode: stat.ino,
+    size: stat.size,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs
+  });
+}
+
+function activeIdentityChanged(
+  before: ActiveFileIdentity,
+  after: ActiveFileIdentity,
+  allowShmCoordination: boolean
+): boolean {
+  return before.path !== after.path ||
+    before.uid !== after.uid ||
+    before.gid !== after.gid ||
+    before.mode !== after.mode ||
+    before.device !== after.device ||
+    before.inode !== after.inode ||
+    before.size !== after.size ||
+    (!allowShmCoordination && (
+      before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs
+    ));
+}
+
+type ActiveFileIdentities = readonly [
+  ActiveFileIdentity,
+  ActiveFileIdentity,
+  ActiveFileIdentity
+];
+
+function readActiveIdentities(path: string): ActiveFileIdentities {
+  return Object.freeze([
+    readActiveFileIdentity(path),
+    readActiveFileIdentity(`${path}-wal`),
+    readActiveFileIdentity(`${path}-shm`)
+  ]);
+}
+
+function validateActiveIdentitiesAfterOpen(
+  before: ActiveFileIdentities
+): void {
+  let after: ActiveFileIdentities;
+  try {
+    after = readActiveIdentities(before[0].path);
+  } catch (error) {
+    if (error instanceof ServerReadDatabaseError &&
+      error.reason === "active_sidecar_missing") throw error;
+    throw new ServerReadDatabaseError("active_sidecar_changed", error);
+  }
+  if (activeIdentityChanged(before[0], after[0], false) ||
+    activeIdentityChanged(before[1], after[1], false) ||
+    activeIdentityChanged(before[2], after[2], true)) {
+    throw new ServerReadDatabaseError("active_sidecar_changed");
   }
 }
 
@@ -221,4 +354,91 @@ export function openDatabaseReadOnly(path: string): AgentLensDatabase {
   });
   registerConnection(database, connection);
   return database;
+}
+
+export function openDatabaseForServerRead(path: string): ServerReadDatabase {
+  if (!activeWalPresent(path)) {
+    return Object.freeze({
+      database: openDatabaseReadOnly(path),
+      mode: "immutable" as const
+    });
+  }
+
+  const before = readActiveIdentities(path);
+  let connection: Database.Database;
+  try {
+    connection = constructDatabase(path, {
+      readonly: true,
+      fileMustExist: true
+    });
+  } catch (error) {
+    try {
+      validateActiveIdentitiesAfterOpen(before);
+    } catch (validationError) {
+      throw validationError;
+    }
+    throw new ServerReadDatabaseError("active_wal_unavailable", error);
+  }
+  try {
+    connection.pragma("foreign_keys = ON");
+    connection.pragma("query_only = ON");
+    connection.pragma("busy_timeout = 5000");
+    connection.pragma("schema_version", { simple: true });
+  } catch (error) {
+    connection.close();
+    try {
+      validateActiveIdentitiesAfterOpen(before);
+    } catch (validationError) {
+      throw validationError;
+    }
+    throw new ServerReadDatabaseError("active_wal_unavailable", error);
+  }
+
+  try {
+    validateActiveIdentitiesAfterOpen(before);
+  } catch (error) {
+    connection.close();
+    throw error;
+  }
+
+  let closed = false;
+  const database: AgentLensDatabase = Object.freeze({
+    inspect: () => {
+      if (closed) throw new Error("AgentLens database is closed.");
+      return inspectConnection(connection);
+    },
+    close: () => {
+      if (closed) return;
+      closed = true;
+      releaseConnection(database)?.close();
+    }
+  });
+  registerConnection(database, connection);
+  return Object.freeze({ database, mode: "active_wal" });
+}
+
+export async function withServerReadSnapshot<T>(
+  database: AgentLensDatabase,
+  operation: () => Promise<T> | T
+): Promise<T> {
+  const connection = connectionFor(database);
+  connection.exec("BEGIN");
+  let operationError: unknown;
+  let result: T | undefined;
+  try {
+    // BEGIN is deferred. This read pins the snapshot before application code
+    // can yield or a later repository statement observes a different commit.
+    connection.prepare("SELECT rootpage FROM sqlite_schema ORDER BY name LIMIT 1").get();
+    result = await operation();
+  } catch (error) {
+    operationError = error;
+  }
+
+  try {
+    if (connection.inTransaction) connection.exec("ROLLBACK");
+  } catch (rollbackError) {
+    if (operationError === undefined) throw rollbackError;
+  }
+  if (operationError !== undefined) throw operationError;
+  return result as T;
 }

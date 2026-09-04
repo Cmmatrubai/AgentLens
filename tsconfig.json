@@ -1,10 +1,14 @@
 {
   "files": [],
   "references": [
+    { "path": "./packages/api-contract" },
     { "path": "./packages/core" },
     { "path": "./packages/derivations" },
     { "path": "./packages/storage" },
     { "path": "./packages/codex" },
+    { "path": "./packages/application" },
+    { "path": "./apps/server" },
+    { "path": "./apps/web" },
     { "path": "./apps/cli" }
   ]
 }

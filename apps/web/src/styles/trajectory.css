@@ -1,0 +1,380 @@
+.run-detail-page {
+  min-width: 0;
+}
+
+.run-detail-page__back {
+  display: inline-block;
+  margin-bottom: var(--space-4);
+  color: var(--text-muted);
+}
+
+.run-detail-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(420px, 0.8fr);
+  gap: var(--space-6);
+  padding-bottom: var(--space-6);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.run-detail-header h1 {
+  margin: 2px 0 var(--space-2);
+  overflow-wrap: anywhere;
+  font-size: clamp(24px, 3vw, 36px);
+  font-weight: 500;
+  letter-spacing: -0.04em;
+}
+
+.run-detail-header__identity {
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-family: "Geist Mono Variable", monospace;
+}
+
+.run-detail-header__signals {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.run-detail-header dl,
+.trajectory-inspector dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.run-detail-header dl div,
+.trajectory-inspector dl div {
+  min-width: 0;
+}
+
+.run-detail-header dt,
+.trajectory-inspector dt {
+  color: var(--text-dim);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.run-detail-header dd,
+.trajectory-inspector dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.trajectory-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(340px, 1.5fr) auto;
+  align-items: end;
+  gap: var(--space-4);
+  padding: var(--space-6) 0 var(--space-4);
+}
+
+.trajectory-toolbar h2,
+.trajectory-inspector h2 {
+  margin: 2px 0 4px;
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.trajectory-toolbar__legend,
+.trajectory-toolbar__jumps,
+.trajectory-toolbar__paging {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.trajectory-toolbar button,
+.trajectory-row button {
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.trajectory-toolbar button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.run-workspace {
+  display: grid;
+  grid-template-columns: minmax(620px, 1fr) minmax(340px, 380px);
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.trajectory-shell {
+  position: relative;
+  min-width: 0;
+}
+
+.trajectory-new-events {
+  position: absolute;
+  z-index: 4;
+  top: var(--space-3);
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.trajectory-new-events button {
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--cyan);
+  border-radius: 999px;
+  color: var(--text);
+  background: var(--panel-raised);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 30%);
+  cursor: pointer;
+}
+
+.trajectory-viewport {
+  position: relative;
+  height: min(68vh, 760px);
+  min-height: 520px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--shell);
+  contain: strict;
+}
+
+.trajectory-stage {
+  position: relative;
+  width: 100%;
+}
+
+.trajectory-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding: 0 var(--space-3) var(--space-2);
+}
+
+.trajectory-inline-evidence-anchor {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  right: var(--space-3);
+  left: var(--space-3);
+  display: flow-root;
+}
+
+.trajectory-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: 124px 22px minmax(0, 1fr);
+  min-height: 132px;
+  align-items: stretch;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.trajectory-row:focus-visible {
+  outline: 2px dashed var(--focus);
+  outline-offset: -4px;
+  box-shadow: inset 0 0 0 2px var(--focus);
+}
+
+.trajectory-row__gutter {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: var(--space-3) var(--space-2);
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.trajectory-row__shape {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border: 1px solid currentcolor;
+  transform: rotate(45deg);
+}
+
+.trajectory-row--derived .trajectory-row__shape { background: currentcolor; }
+.trajectory-row--git_recovered .trajectory-row__shape { transform: none; }
+.trajectory-row--recorder .trajectory-row__shape { border-radius: 50% 50% 0; }
+.trajectory-row--human .trajectory-row__shape { border-radius: 50%; transform: none; }
+
+.trajectory-row__spine-node {
+  position: relative;
+  width: 9px;
+  height: 9px;
+  align-self: center;
+  justify-self: center;
+  border: 2px solid var(--text-muted);
+  border-radius: 50%;
+  background: var(--shell);
+}
+
+.trajectory-row__spine-node::before,
+.trajectory-row__spine-node::after {
+  position: absolute;
+  left: 2px;
+  width: 1px;
+  height: 66px;
+  background: var(--border);
+  content: "";
+}
+
+.trajectory-row__spine-node::before { bottom: 7px; }
+.trajectory-row__spine-node::after { top: 7px; }
+
+.trajectory-row__card {
+  min-width: 0;
+  margin: var(--space-2) 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-soft);
+  border-left: 3px solid var(--text-dim);
+  border-radius: 6px;
+  background: var(--panel);
+  transition:
+    border-color var(--selection-duration, 150ms) ease,
+    background-color var(--selection-duration, 150ms) ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trajectory-row__card,
+  .trajectory-inline-inspector,
+  .trajectory-inspector,
+  .deep-evidence-panel,
+  .git-diff__file-body {
+    scroll-behavior: auto;
+    transition-duration: 0ms !important;
+  }
+}
+
+.trajectory-row--selected .trajectory-row__card {
+  border-color: var(--cyan);
+  background: var(--panel-raised);
+}
+
+.trajectory-row__card header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.trajectory-row__kind,
+.trajectory-row__status,
+.trajectory-row__times {
+  font-family: "Geist Mono Variable", monospace;
+  font-size: 11px;
+}
+
+.trajectory-row__kind { color: var(--cyan); }
+.trajectory-row__status { color: var(--text-muted); }
+.trajectory-row__card p { overflow-wrap: anywhere; }
+
+.trajectory-row__times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  color: var(--text-dim);
+}
+
+.trajectory-row__members {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.trajectory-row__member {
+  padding: var(--space-3);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--shell);
+}
+
+.trajectory-row__member--selected { border-color: var(--cyan); }
+
+.trajectory-row__member-provenance {
+  display: block;
+  margin-bottom: var(--space-2);
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.trajectory-row__group,
+.trajectory-row__relationships {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.trajectory-row__action {
+  padding: 4px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.trajectory-row__unsupported,
+.trajectory-inspector__boundary {
+  color: var(--amber);
+  font-size: 12px;
+}
+
+.relationship-overlay {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.relationship-overlay__connector {
+  stroke: var(--amber);
+  stroke-dasharray: 5 4;
+  stroke-width: 1;
+}
+
+.trajectory-inspector {
+  position: sticky;
+  top: 72px;
+  align-self: start;
+  min-width: 0;
+  max-height: calc(100vh - 96px);
+  padding: var(--space-4);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.trajectory-inspector strong { overflow-wrap: anywhere; }
+.trajectory-inspector dl { margin-top: var(--space-4); }
+
+.trajectory-empty,
+.trajectory-selection-error {
+  padding: var(--space-6);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  background: var(--panel);
+}
+
+@media (max-width: 1100px) {
+  .run-detail-header { grid-template-columns: minmax(0, 1fr); }
+  .trajectory-toolbar { grid-template-columns: minmax(0, 1fr); align-items: start; }
+  .run-workspace { grid-template-columns: minmax(0, 1fr) minmax(340px, 340px); }
+  .trajectory-row { grid-template-columns: 100px 18px minmax(0, 1fr); }
+}
