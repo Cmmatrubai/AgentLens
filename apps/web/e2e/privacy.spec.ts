@@ -1,8 +1,18 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { Page, Response } from "@playwright/test";
+import type { Page, Request } from "@playwright/test";
 import { expect, navigateToRun, openBootstrapped, test } from "./fixtures.js";
+import {
+  captureResponse,
+  drainResponseCaptures,
+  type CapturedResponse,
+  type ResponseCapture
+} from "./responseCapture.js";
+import {
+  type RequestLifecycleLedger,
+  type RequestMatch
+} from "./requestLifecycle.js";
 
 const rawSentinels = [
   "OMITTED_PROMPT_SENTINEL_RELEASE",
@@ -21,13 +31,6 @@ const rawSentinels = [
 const expectedStandardMarkers = [
   "[[REDACTED:auth-bearer:hmac-sha256:c40257ce4c2ffc291e2b3506f3852709]]"
 ] as const;
-
-interface CapturedResponse {
-  readonly body: Buffer;
-  readonly headers: Buffer;
-  readonly pathname: string;
-  readonly status: number;
-}
 
 const deniedExplicitPaths = [
   "/api/v1/runs/fixture-metadata-only/events/fixture-metadata-only-message/content",
@@ -58,32 +61,20 @@ async function readRootBytes(root: string): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-function captureResponse(response: Response): Promise<CapturedResponse> {
-  return Promise.all([
-    response.body().catch(() => Buffer.alloc(0)),
-    response.headersArray()
-  ]).then(([body, headers]) => ({
-    body,
-    headers: Buffer.from(headers.map(({ name, value }) => `${name}: ${value}\r\n`).join(""), "latin1"),
-    pathname: new URL(response.url()).pathname,
-    status: response.status()
-  }));
-}
-
-async function drainResponseCaptures(pending: readonly Promise<CapturedResponse>[]): Promise<CapturedResponse[]> {
-  const captured: CapturedResponse[] = [];
-  let offset = 0;
-  while (offset < pending.length) {
-    const batch = pending.slice(offset);
-    offset = pending.length;
-    captured.push(...await Promise.all(batch));
-  }
-  return captured;
-}
-
-async function returnToLedger(page: Page): Promise<void> {
+async function returnToLedger(
+  page: Page,
+  lifecycle: RequestLifecycleLedger<Request>,
+  origin: string
+): Promise<void> {
+  const checkpoint = lifecycle.checkpoint();
   await page.getByRole("link", { name: "Run ledger" }).click();
   await expect(page.getByRole("heading", { name: "Run ledger" })).toBeVisible();
+  await lifecycle.waitForTerminal(checkpoint, {
+    method: "GET",
+    origin,
+    pathname: "/api/v1/runs",
+    search: "?limit=50"
+  });
 }
 
 test.use({
@@ -96,8 +87,13 @@ test.use({
   }
 });
 
-test("ordinary HTTP and durable bytes contain no release privacy sentinels or browser secrets", async ({ page, productionUi, releaseFixture }) => {
-  const pendingCaptures: Promise<CapturedResponse>[] = [];
+test("ordinary HTTP and durable bytes contain no release privacy sentinels or browser secrets", async ({
+  page,
+  productionUi,
+  releaseFixture,
+  requestLifecycle
+}) => {
+  const pendingCaptures = new Map<Request, Promise<ResponseCapture>>();
   let authorizationHeader: Promise<string> | undefined;
   page.on("request", (request) => {
     const requested = new URL(request.url());
@@ -110,32 +106,99 @@ test("ordinary HTTP and durable bytes contain no release privacy sentinels or br
       return value;
     });
   });
-  page.on("response", (response) => {
-    if (new URL(response.url()).origin !== productionUi.origin) return;
-    pendingCaptures.push(captureResponse(response));
+  await page.route("**/*", async (route) => {
+    const requested = new URL(route.request().url());
+    if (requested.origin !== productionUi.origin) {
+      await route.continue();
+      return;
+    }
+    const upstream = await route.fetch({ maxRedirects: 0 });
+    const capture = captureResponse({
+      body: () => upstream.body(),
+      headersArray: async () => upstream.headersArray(),
+      request: () => ({ method: () => route.request().method() }),
+      status: () => upstream.status(),
+      url: () => upstream.url()
+    });
+    pendingCaptures.set(route.request(), capture);
+    const result = await capture;
+    if (!result.ok) throw result.error;
+    await route.fulfill({ response: upstream, body: result.captured.body });
   });
+  const drainAfter = async (
+    checkpoint: number,
+    matches: readonly RequestMatch<Request>[]
+  ): Promise<CapturedResponse[]> => {
+    const records = await Promise.all(matches.map((match) =>
+      requestLifecycle.waitForTerminal(checkpoint, { origin: productionUi.origin, ...match })
+    ));
+    const captures = records.map((record) => {
+      const capture = pendingCaptures.get(record.request);
+      if (capture === undefined) {
+        throw new Error(`Privacy capture missing for request #${record.id}.`);
+      }
+      return capture;
+    });
+    return drainResponseCaptures(captures);
+  };
 
+  const bootstrapCheckpoint = requestLifecycle.checkpoint();
   await openBootstrapped(page, productionUi);
+  await drainAfter(bootstrapCheckpoint, [{ method: "GET", pathname: "/api/v1/runs", search: "?limit=50" }]);
+  const completedRunCheckpoint = requestLifecycle.checkpoint();
   await navigateToRun(page, "fixture-completed-recovery");
+  await drainAfter(completedRunCheckpoint, [
+    { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery", search: "" },
+    { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery/events", search: "?limit=100" }
+  ]);
+  const commandCheckpoint = requestLifecycle.checkpoint();
   await page.getByRole("button", { name: "Jump to first failure" }).click();
   await page.getByRole("button", { name: "Load command evidence" }).click();
   await expect(page.getByRole("heading", { name: "Redacted command", exact: true })).toBeVisible();
   await page.getByRole("tab", { name: "Redacted provider payload" }).click();
   await expect(page.getByRole("tabpanel", { name: "Redacted provider payload" })).toBeVisible();
+  await drainAfter(commandCheckpoint, [
+    { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed", search: "" },
+    { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed/content", search: "" },
+    { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed/native", search: "" }
+  ]);
 
-  await returnToLedger(page);
+  await returnToLedger(page, requestLifecycle, productionUi.origin);
+  const metadataRunCheckpoint = requestLifecycle.checkpoint();
   await navigateToRun(page, "fixture-metadata-only");
+  await drainAfter(metadataRunCheckpoint, [
+    { method: "GET", pathname: "/api/v1/runs/fixture-metadata-only", search: "" },
+    { method: "GET", pathname: "/api/v1/runs/fixture-metadata-only/events", search: "?limit=100" }
+  ]);
+  const metadataDetailCheckpoint = requestLifecycle.checkpoint();
   await page.locator('[role="option"][data-event-id="fixture-metadata-only-message"]').click();
   await expect(page.locator(".event-inspector").getByText("fixture-metadata-only-message", { exact: true })).toBeVisible();
+  await drainAfter(metadataDetailCheckpoint, [{
+    method: "GET",
+    pathname: "/api/v1/runs/fixture-metadata-only/events/fixture-metadata-only-message",
+    search: ""
+  }]);
 
-  await returnToLedger(page);
+  await returnToLedger(page, requestLifecycle, productionUi.origin);
+  const strictRunCheckpoint = requestLifecycle.checkpoint();
   await navigateToRun(page, "fixture-strict-omitted");
+  await drainAfter(strictRunCheckpoint, [
+    { method: "GET", pathname: "/api/v1/runs/fixture-strict-omitted", search: "" },
+    { method: "GET", pathname: "/api/v1/runs/fixture-strict-omitted/events", search: "?limit=100" }
+  ]);
+  const strictDetailCheckpoint = requestLifecycle.checkpoint();
   await page.locator('[role="option"][data-event-id="fixture-strict-omitted-message"]').click();
   await expect(page.locator(".event-inspector").getByText("fixture-strict-omitted-message", { exact: true })).toBeVisible();
+  await drainAfter(strictDetailCheckpoint, [{
+    method: "GET",
+    pathname: "/api/v1/runs/fixture-strict-omitted/events/fixture-strict-omitted-message",
+    search: ""
+  }]);
 
   if (authorizationHeader === undefined) {
     throw new Error("The privacy journey did not observe browser API authorization.");
   }
+  const deniedCheckpoint = requestLifecycle.checkpoint();
   const denied = await page.evaluate(async ({ authorization, paths }) => await Promise.all(paths.map(async (pathname) => {
     const response = await fetch(pathname, { headers: { Authorization: authorization } });
     return { pathname, status: response.status, body: await response.json() as unknown };
@@ -148,6 +211,11 @@ test("ordinary HTTP and durable bytes contain no release privacy sentinels or br
     status: 404,
     body: contentUnavailableEnvelope
   })));
+  await drainAfter(deniedCheckpoint, deniedExplicitPaths.map((pathname) => ({
+    method: "GET",
+    pathname,
+    search: ""
+  })));
 
   const requiredPaths = [
     "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed",
@@ -158,10 +226,10 @@ test("ordinary HTTP and durable bytes contain no release privacy sentinels or br
     "/api/v1/runs/fixture-strict-omitted/events/fixture-strict-omitted-message",
     ...deniedExplicitPaths.slice(2)
   ] as const;
-  await expect.poll(async () => (await drainResponseCaptures(pendingCaptures))
+  const captured = await drainResponseCaptures([...pendingCaptures.values()]);
+  expect(captured
     .filter(({ pathname }) => requiredPaths.includes(pathname as typeof requiredPaths[number]))
     .map(({ pathname }) => pathname)).toEqual(expect.arrayContaining([...requiredPaths]));
-  const captured = await drainResponseCaptures(pendingCaptures);
   for (const pathname of deniedExplicitPaths) {
     const matches = captured.filter((response) => response.pathname === pathname);
     expect(matches).toHaveLength(1);

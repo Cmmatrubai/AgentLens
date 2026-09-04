@@ -1,4 +1,4 @@
-import type { Page, Response } from "@playwright/test";
+import type { Page, Request } from "@playwright/test";
 import {
   trajectoryPageV1Schema,
   type TrajectoryPageV1
@@ -12,8 +12,8 @@ interface VisibleAnchor {
 }
 
 interface CapturedTrajectoryPage {
-  readonly page: Promise<TrajectoryPageV1>;
-  readonly response: Response;
+  readonly page: TrajectoryPageV1;
+  readonly request: Request;
 }
 
 function expectedEventId(sequence: number): string {
@@ -23,27 +23,32 @@ function expectedEventId(sequence: number): string {
   return "fixture-trajectory-1000-reconciled";
 }
 
-function isTrajectoryPageResponse(response: Response): boolean {
-  return new URL(response.url()).pathname === "/api/v1/runs/fixture-trajectory-1000/events";
-}
-
-function captureTrajectoryPages(page: Page): CapturedTrajectoryPage[] {
+async function captureTrajectoryPages(page: Page): Promise<CapturedTrajectoryPage[]> {
   const captured: CapturedTrajectoryPage[] = [];
-  page.on("response", (response) => {
-    if (!isTrajectoryPageResponse(response)) return;
+  await page.route("**/api/v1/runs/fixture-trajectory-1000/events**", async (route) => {
+    if (new URL(route.request().url()).pathname !== "/api/v1/runs/fixture-trajectory-1000/events") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = await response.body();
+    if (response.status() !== 200) {
+      throw new Error(`Trajectory capture expected status 200, received ${response.status()}.`);
+    }
     captured.push({
-      response,
-      page: response.body().then((body) => trajectoryPageV1Schema.parse(JSON.parse(body.toString("utf8"))))
+      page: trajectoryPageV1Schema.parse(JSON.parse(body.toString("utf8"))),
+      request: route.request()
     });
+    await route.fulfill({ response, body });
   });
   return captured;
 }
 
 async function capturedResponsePage(
   captured: readonly CapturedTrajectoryPage[],
-  response: Response
+  request: Request
 ): Promise<TrajectoryPageV1> {
-  const match = captured.find((entry) => entry.response === response);
+  const match = captured.find((entry) => entry.request === request);
   if (match === undefined) throw new Error("The trajectory response body was not registered synchronously.");
   return match.page;
 }
@@ -62,16 +67,22 @@ async function visibleAnchor(page: Page, eventId: string): Promise<VisibleAnchor
   }, eventId);
 }
 
-test("a 1000-event run proves exact pages, stable anchors, bounded virtualization, and keyboard identity", async ({ page, productionUi }) => {
-  const captured = captureTrajectoryPages(page);
+test("a 1000-event run proves exact pages, stable anchors, bounded virtualization, and keyboard identity", async ({
+  page,
+  productionUi,
+  requestLifecycle
+}) => {
+  const captured = await captureTrajectoryPages(page);
   await openBootstrapped(page, productionUi);
-  const initialResponse = page.waitForResponse((response) => {
-    if (!isTrajectoryPageResponse(response)) return false;
-    const url = new URL(response.url());
-    return url.searchParams.get("limit") === "100" && !url.searchParams.has("cursor");
-  });
+  const initialCheckpoint = requestLifecycle.checkpoint();
   await navigateToRun(page, "fixture-trajectory-1000");
-  const pages: TrajectoryPageV1[] = [await capturedResponsePage(captured, await initialResponse)];
+  const initialRequest = await requestLifecycle.waitForTerminal(initialCheckpoint, {
+    method: "GET",
+    origin: productionUi.origin,
+    pathname: "/api/v1/runs/fixture-trajectory-1000/events",
+    search: "?limit=100"
+  });
+  const pages: TrajectoryPageV1[] = [await capturedResponsePage(captured, initialRequest.request)];
   const requestedCursors: string[] = [];
   await expect(page.getByRole("heading", { name: "Execution trajectory" })).toBeVisible();
   const loadLater = page.getByRole("button", { name: "Load later" });
@@ -99,14 +110,16 @@ test("a 1000-event run proves exact pages, stable anchors, bounded virtualizatio
       throw new Error("Every non-terminal fixture page must expose a later cursor.");
     }
     const requestCursor = previous.window.laterCursor;
-    const responsePromise = page.waitForResponse((response) => {
-      if (!isTrajectoryPageResponse(response)) return false;
-      return new URL(response.url()).searchParams.get("cursor") === requestCursor;
-    });
+    const checkpoint = requestLifecycle.checkpoint();
     await loadLater.click();
-    const response = await responsePromise;
-    requestedCursors.push(new URL(response.url()).searchParams.get("cursor")!);
-    pages.push(await capturedResponsePage(captured, response));
+    const completedRequest = await requestLifecycle.waitForTerminal(checkpoint, {
+      method: "GET",
+      origin: productionUi.origin,
+      pathname: "/api/v1/runs/fixture-trajectory-1000/events",
+      predicate: (record) => new URL(record.url).searchParams.get("cursor") === requestCursor
+    });
+    requestedCursors.push(new URL(completedRequest.url).searchParams.get("cursor")!);
+    pages.push(await capturedResponsePage(captured, completedRequest.request));
     await expect(page.getByText(`${((pageIndex + 1) * 100).toLocaleString()} immutable events loaded`))
       .toBeVisible();
     await expect.poll(async () => {

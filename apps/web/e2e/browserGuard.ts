@@ -1,5 +1,7 @@
 export interface SuccessfulRequestObservation {
   readonly method: string;
+  readonly pollGeneration?: number | null;
+  readonly requestId: number;
   readonly resourceType: string;
   readonly sequence: number;
   readonly url: string;
@@ -21,19 +23,30 @@ export function classifyFailedRequests(
   successful: readonly SuccessfulRequestObservation[],
   failed: readonly FailedRequestObservation[]
 ): string[] {
-  let duplicateCancellationConsumed = false;
-  return failed.flatMap((failure) => {
+  return failed.map((failure) => {
     const identity = canonicalRequestIdentity(failure);
-    const matchingPriorSuccess = successful.some((candidate) =>
+    const matchingPriorSuccesses = successful.filter((candidate) =>
       candidate.resourceType === "fetch" &&
+      candidate.requestId !== failure.requestId &&
       candidate.sequence < failure.sequence &&
       canonicalRequestIdentity(candidate) === identity
     );
-    const expectedCancellation = !duplicateCancellationConsumed &&
-      failure.resourceType === "fetch" &&
-      failure.errorText === "net::ERR_ABORTED" &&
-      matchingPriorSuccess;
-    if (expectedCancellation) duplicateCancellationConsumed = true;
-    return expectedCancellation ? [] : [`failed request: ${identity} ${failure.errorText}`];
+    const matchingLaterSuccesses = successful.filter((candidate) =>
+      candidate.resourceType === "fetch" &&
+      candidate.requestId !== failure.requestId &&
+      candidate.sequence > failure.sequence &&
+      canonicalRequestIdentity(candidate) === identity
+    );
+    const prior = matchingPriorSuccesses.map(({ requestId, sequence }) =>
+      `${requestId}@${sequence}`).join(",") || "none";
+    const later = matchingLaterSuccesses.length === 0
+      ? ""
+      : `; later distinct completions ${matchingLaterSuccesses.map(({ requestId, sequence }) =>
+          `${requestId}@${sequence}`).join(",")}`;
+    const poll = failure.pollGeneration === undefined || failure.pollGeneration === null
+      ? ""
+      : ` poll=${failure.pollGeneration}`;
+    return `failed request: ${identity} ${failure.errorText} ` +
+      `(request ${failure.requestId}@${failure.sequence}${poll}; prior distinct completions ${prior}${later})`;
   });
 }

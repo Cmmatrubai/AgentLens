@@ -11,6 +11,7 @@ import { openDatabase } from "../../../packages/storage/src/index.js";
 const execFile = promisify(execFileCallback);
 const workspaceRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const roots: string[] = [];
+let preparedPackagingCheckout: Promise<string> | undefined;
 
 interface ProcessExit {
   readonly code: number | null;
@@ -84,6 +85,17 @@ async function prepareFreshCheckout(checkout: string): Promise<void> {
     cwd: checkout,
     maxBuffer: 10 * 1024 * 1024
   });
+}
+
+async function sharedFreshCheckout(): Promise<string> {
+  preparedPackagingCheckout ??= (async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentlens-ui-fresh-checkout-"));
+    roots.push(root);
+    const checkout = join(root, "checkout");
+    await prepareFreshCheckout(checkout);
+    return checkout;
+  })();
+  return preparedPackagingCheckout;
 }
 
 async function processGroupPids(processGroupId: number): Promise<number[]> {
@@ -241,8 +253,8 @@ async function startUi(
     knownPids: new Set([processGroupId]),
     processGroupId
   };
-  hooks.onProcessGroup?.(processGroupId);
   try {
+    hooks.onProcessGroup?.(processGroupId);
     const bootstrapUrl = await new Promise<string>((resolve, reject) => {
       let stdout = "";
       const timeout = setTimeout(() => reject(new Error("Timed out waiting for packaged UI startup.")), 20_000);
@@ -341,8 +353,17 @@ async function verifyWithCleanup(
     await verification();
   } catch (error) {
     failure = error;
-  } finally {
+  }
+  try {
     await assertStopped(ui, expectedExit);
+  } catch (cleanup) {
+    if (failure !== undefined) {
+      throw new AggregateError([
+        new Error(safeLifecycleError(failure)),
+        new Error(safeLifecycleError(cleanup))
+      ], "Packaged UI verification failed and cleanup verification also failed.");
+    }
+    throw cleanup;
   }
   return failure;
 }
@@ -350,7 +371,8 @@ async function verifyWithCleanup(
 async function exerciseSuccessAndFailure(
   start: (hooks?: StartUiHooks) => Promise<UiProcess>,
   expectedExit: ProcessExit,
-  mode: "source" | "compiled"
+  mode: "source" | "compiled",
+  exerciseThrowingHook = false
 ): Promise<void> {
   const success = await start();
   expect(success.recordedPids).toContain(success.serverPid);
@@ -365,6 +387,36 @@ async function exerciseSuccessAndFailure(
     throw new Error("Synthetic post-start verification failure");
   });
   expect(failure).toMatchObject({ message: "Synthetic post-start verification failure" });
+
+  if (exerciseThrowingHook) {
+    let throwingHookGroupId: number | undefined;
+    let throwingHookFailure: unknown;
+    try {
+      await start({
+        onProcessGroup: (observed) => {
+          throwingHookGroupId = observed;
+          throw new Error("Synthetic process-group hook failure");
+        }
+      });
+    } catch (error) {
+      throwingHookFailure = error;
+    }
+    if (throwingHookGroupId === undefined) {
+      throw new Error("The throwing-hook cleanup probe did not observe the process group.");
+    }
+    try {
+      expect(throwingHookFailure).toMatchObject({ message: "Synthetic process-group hook failure" });
+      expect(await processGroupPids(throwingHookGroupId)).toEqual([]);
+      expect(pidIsAbsent(throwingHookGroupId)).toBe(true);
+    } finally {
+      signalProcessGroup(throwingHookGroupId, "SIGKILL");
+      await waitForCondition(async () =>
+        (await processGroupPids(throwingHookGroupId)).length === 0 ? true : false,
+      "the throwing-hook RED-probe process group to disappear");
+      await waitForCondition(() => pidIsAbsent(throwingHookGroupId) ? true : false,
+        "the throwing-hook RED-probe wrapper PID to disappear");
+    }
+  }
 
   let processGroupId: number | undefined;
   let origin: string | undefined;
@@ -414,6 +466,64 @@ afterAll(async () => {
 });
 
 describe("production UI packaging", () => {
+  it("preserves verification and cleanup failures while force-cleaning the real group", async () => {
+    const child = spawn(process.execPath, ["-e", [
+      "process.on('SIGTERM', () => {});",
+      "process.stdout.write('ready\\n');",
+      "setInterval(() => {}, 1000);"
+    ].join("")], {
+      detached: true,
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    if (child.pid === undefined) throw new Error("The dual-failure cleanup probe did not expose a PID.");
+    const processGroupId = child.pid;
+    let stdout = "";
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => { stdout += chunk; });
+    try {
+      await waitForCondition(() => stdout === "ready\n" ? true : false,
+        "the dual-failure cleanup probe readiness", 2_000);
+      const target: ShutdownTarget = {
+        child,
+        knownPids: new Set([processGroupId]),
+        processGroupId
+      };
+      const ui: UiProcess = {
+        bootstrapUrl: "http://127.0.0.1:1/bootstrap/[synthetic]",
+        child,
+        origin: "http://127.0.0.1:1",
+        processGroupId,
+        recordedPids: [processGroupId],
+        serverPid: processGroupId,
+        async close() {
+          await shutdownProcessGroup(target);
+          throw new Error("Synthetic cleanup verification failure");
+        }
+      };
+      let combined: unknown;
+      try {
+        await verifyWithCleanup(ui, { code: null, signal: "SIGKILL" }, async () => {
+          throw new Error("Synthetic product verification failure");
+        });
+      } catch (error) {
+        combined = error;
+      }
+      expect(combined).toBeInstanceOf(AggregateError);
+      expect((combined as AggregateError).errors.map(safeLifecycleError)).toEqual([
+        "Synthetic product verification failure",
+        "Synthetic cleanup verification failure"
+      ]);
+      expect(await processGroupPids(processGroupId)).toEqual([]);
+      expect(pidIsAbsent(processGroupId)).toBe(true);
+    } finally {
+      signalProcessGroup(processGroupId, "SIGKILL");
+      await waitForCondition(async () =>
+        (await processGroupPids(processGroupId)).length === 0 ? true : false,
+      "the dual-failure cleanup probe group to disappear");
+    }
+  }, 15_000);
+
   it("escalates a resistant isolated process group and verifies disappearance", async () => {
     const child = spawn(process.execPath, ["-e", [
       "process.on('SIGTERM', () => {});",
@@ -455,27 +565,26 @@ describe("production UI packaging", () => {
   }, 15_000);
 
   it.each([
-    ["pnpm agentlens ui", "source", "pnpm", ["agentlens", "ui"], { code: 143, signal: null }],
-    ["compiled node ui", "compiled", process.execPath, ["apps/cli/dist/main.js", "ui"], { code: 143, signal: null }]
-  ] as const)("serves hashed assets and the run API through %s with process-group cleanup", async (_label, mode, executable, prefix, expectedExit) => {
+    ["pnpm agentlens ui", "source", "pnpm", ["agentlens", "ui"], { code: 143, signal: null }, false],
+    ["compiled node ui", "compiled", process.execPath, ["apps/cli/dist/main.js", "ui"], { code: 143, signal: null }, true]
+  ] as const)("serves hashed assets and the run API through %s with process-group cleanup", async (_label, mode, executable, prefix, expectedExit, exerciseThrowingHook) => {
     const root = await mkdtemp(join(tmpdir(), "agentlens-ui-package-"));
     roots.push(root);
-    const checkout = join(root, "checkout");
-    await prepareFreshCheckout(checkout);
+    const checkout = await sharedFreshCheckout();
     const dataRoot = join(root, "data");
     await createEmptyDataRoot(dataRoot);
     await exerciseSuccessAndFailure(
       (hooks) => startUi(executable, [...prefix, "--data-root", dataRoot, "--no-open"], checkout, hooks),
       expectedExit,
-      mode
+      mode,
+      exerciseThrowingHook
     );
   }, 120_000);
 
   it("runs a genuinely fresh offline install from built assets after all source modules are removed", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentlens-ui-offline-"));
     roots.push(root);
-    const checkout = join(root, "checkout");
-    await prepareFreshCheckout(checkout);
+    const checkout = await sharedFreshCheckout();
     for (const relativePath of [
       "apps/cli/src",
       "apps/server/src",

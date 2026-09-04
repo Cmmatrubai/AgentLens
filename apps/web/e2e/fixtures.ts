@@ -19,6 +19,10 @@ import {
   type FailedRequestObservation,
   type SuccessfulRequestObservation
 } from "./browserGuard.js";
+import {
+  installE2ERequestCorrelation,
+  RequestLifecycleLedger
+} from "./requestLifecycle.js";
 
 const workspaceRoot = fileURLToPath(new URL("../../..", import.meta.url));
 const baseTime = Date.UTC(2026, 7, 31, 17, 0, 0);
@@ -285,6 +289,7 @@ export const test = base.extend<{
   browserGuard: void;
   releaseFixture: ReleaseFixture;
   productionUi: ProductionUi;
+  requestLifecycle: RequestLifecycleLedger<Request>;
 }>({
   allowedSameOriginFailures: [{ responses: [] }, { option: true }],
   releaseFixture: async ({}, use) => {
@@ -295,58 +300,41 @@ export const test = base.extend<{
     const ui = await startProductionUi(releaseFixture.dataRoot);
     try { await use(ui); } finally { expect(await ui.close()).toBe(143); }
   },
-  browserGuard: [async ({ page, productionUi, allowedSameOriginFailures }, use) => {
+  requestLifecycle: async ({ page, productionUi }, use) => {
+    const ledger = new RequestLifecycleLedger<Request>(productionUi.origin);
+    await page.exposeBinding(
+      "__agentLensE2EReportRequestLifecycle",
+      (_source, observation: unknown) => { ledger.pageSettled(observation); }
+    );
+    await page.addInitScript(installE2ERequestCorrelation);
+    const started = (request: Request): void => { ledger.started(request); };
+    const finished = (request: Request): void => { ledger.finished(request); };
+    const failed = (request: Request): void => { ledger.failed(request); };
+    page.on("request", started);
+    page.on("requestfinished", finished);
+    page.on("requestfailed", failed);
+    try {
+      await use(ledger);
+    } finally {
+      page.off("request", started);
+      page.off("requestfinished", finished);
+      page.off("requestfailed", failed);
+    }
+  },
+  browserGuard: [async ({ page, productionUi, allowedSameOriginFailures, requestLifecycle }, use) => {
     const failures: string[] = [];
     const consoleFailures: string[] = [];
-    const failedRequests: FailedRequestObservation[] = [];
-    const successfulRequests: SuccessfulRequestObservation[] = [];
-    let requestLifecycleSequence = 0;
-    const activeRequests = new Set<Request>();
     const remainingAllowed = [...allowedSameOriginFailures.responses];
     const observedAllowedStatuses = new Map<number, number>();
-    const safeActiveIdentity = (request: Request): string => {
-      const requested = new URL(request.url());
-      const pathname = requested.pathname.startsWith("/bootstrap/")
-        ? "/bootstrap/[consumed]"
-        : requested.pathname;
-      return `${request.resourceType()} ${request.method()} ${requested.origin}${pathname}${requested.search}`;
-    };
     page.on("console", (message) => {
       if (message.type() === "warning" || message.type() === "error") {
         consoleFailures.push(`console ${message.type()}: ${message.text()}`);
       }
     });
-    page.on("request", (request) => {
-      const requested = new URL(request.url());
-      if (requested.origin === productionUi.origin) activeRequests.add(request);
-      if ((requested.protocol === "http:" || requested.protocol === "https:") &&
-          requested.origin !== productionUi.origin) {
-        failures.push(`external request: ${request.method()} ${requested.origin}${requested.pathname}`);
-      }
-    });
-    page.on("requestfinished", (request) => { activeRequests.delete(request); });
-    page.on("requestfailed", (request) => {
-      activeRequests.delete(request);
-      failedRequests.push({
-        errorText: request.failure()?.errorText ?? "unknown",
-        method: request.method(),
-        resourceType: request.resourceType(),
-        sequence: requestLifecycleSequence++,
-        url: request.url()
-      });
-    });
     page.on("response", (response) => {
       const requested = new URL(response.url());
       if (requested.origin !== productionUi.origin) return;
-      if (response.status() < 400) {
-        successfulRequests.push({
-          method: response.request().method(),
-          resourceType: response.request().resourceType(),
-          sequence: requestLifecycleSequence++,
-          url: response.url()
-        });
-        return;
-      }
+      if (response.status() < 400) return;
       const candidate = {
         method: response.request().method(),
         pathname: requested.pathname,
@@ -368,11 +356,45 @@ export const test = base.extend<{
       await use();
     } finally {
       try {
-        await expect.poll(() => [...activeRequests].map(safeActiveIdentity).sort(),
+        await expect.poll(() => requestLifecycle.describeActive(productionUi.origin).slice().sort(),
           "All same-origin requests must settle before browser teardown.").toEqual([]);
       } catch {
-        failures.push(`unsettled same-origin requests: ${[...activeRequests].map(safeActiveIdentity).sort().join(", ")}`);
+        failures.push(`unsettled same-origin requests: ${requestLifecycle.describeActive(productionUi.origin).slice().sort().join(", ")}`);
       }
+      const records = requestLifecycle.snapshot();
+      failures.push(...requestLifecycle.violations());
+      for (const record of records) {
+        const requested = new URL(record.url);
+        if ((requested.protocol === "http:" || requested.protocol === "https:") &&
+            requested.origin !== productionUi.origin) {
+          failures.push(`external request: ${record.method} ${requested.origin}${requested.pathname}`);
+        }
+      }
+      const successfulRequests = records.flatMap((record): SuccessfulRequestObservation[] =>
+        record.terminal.state === "finished" && new URL(record.url).origin === productionUi.origin
+          ? [{
+              method: record.method,
+              pollGeneration: record.pollGeneration,
+              requestId: record.id,
+              resourceType: record.resourceType,
+              sequence: record.terminalSequence!,
+              url: record.url
+            }]
+          : []
+      );
+      const failedRequests = records.flatMap((record): FailedRequestObservation[] =>
+        record.terminal.state === "failed"
+          ? [{
+              errorText: record.terminal.errorText,
+              method: record.method,
+              pollGeneration: record.pollGeneration,
+              requestId: record.id,
+              resourceType: record.resourceType,
+              sequence: record.terminalSequence!,
+              url: record.url
+            }]
+          : []
+      );
       failures.push(...classifyFailedRequests(successfulRequests, failedRequests));
       let automatic404s = observedAllowedStatuses.get(404) ?? 0;
       let automatic503s = observedAllowedStatuses.get(503) ?? 0;
@@ -392,6 +414,9 @@ export const test = base.extend<{
       if (remainingAllowed.length > 0) {
         failures.push(`missing allowed responses: ${remainingAllowed.map((allowed) =>
           `${allowed.status} ${allowed.method} ${allowed.pathname}`).join(", ")}`);
+      }
+      if (failures.length > 0) {
+        failures.push(`request ledger: ${requestLifecycle.describe(productionUi.origin).join(" | ")}`);
       }
       expect(failures, "Browser journeys must not emit warnings, external traffic, or failed requests.").toEqual([]);
     }
