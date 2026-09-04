@@ -63,7 +63,7 @@ export function RunHeader({ run, onAssessmentSaved }: Readonly<{
         ) : (
           <div><dt>Token usage</dt><dd>{tokenUsageUnavailableText(run)}</dd></div>
         )}
-        <div><dt>Likely tests</dt><dd>{likelyTestsText(run)}</dd></div>
+        <div><dt>Test-bearing commands</dt><dd>{likelyTestsText(run)}</dd></div>
         <div><dt>Assessment</dt><dd><AssessmentSummary assessment={run.summary.assessment} /></dd></div>
       </dl>
       {onAssessmentSaved !== undefined && (

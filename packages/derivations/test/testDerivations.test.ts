@@ -8,12 +8,15 @@ import {
 const classification = {
   family: "pytest",
   confidence: "high",
-  derivationVersion: "test-command/1"
+  commandShape: "direct",
+  outcomeAttribution: "source_exit",
+  derivationVersion: "test-command/2"
 } as const;
 
 function drafts(
   eventStatus: "completed" | "failed",
-  exitCode: number | null
+  exitCode: number | null,
+  testClassification = classification
 ) {
   return buildTestDerivationDrafts({
     runId: "run-001",
@@ -21,7 +24,7 @@ function drafts(
     sourceProvider: "codex-exec",
     eventStatus,
     exitCode,
-    classification
+    classification: testClassification
   });
 }
 
@@ -55,11 +58,13 @@ describe("deterministic test derivations", () => {
       normalizedPayload: {
         family: "pytest",
         confidence: "high",
-        derivationId: "test-command/1"
+        commandShape: "direct",
+        outcomeAttribution: "source_exit",
+        derivationId: "test-command/2"
       },
       derivation: {
         name: "test-command",
-        version: "1",
+        version: "2",
         sourceEventIds: ["source-command-001"],
         confidence: "high",
         identity: expect.stringMatching(/^agentlens-derivation-sha256:[0-9a-f]{64}$/)
@@ -79,11 +84,13 @@ describe("deterministic test derivations", () => {
         confidence: "high",
         outcome: "passed",
         exitCode: 0,
-        derivationId: "test-command/1"
+        commandShape: "direct",
+        outcomeAttribution: "source_exit",
+        derivationId: "test-command/2"
       },
       derivation: {
         name: "test-command",
-        version: "1",
+        version: "2",
         sourceEventIds: ["source-command-001"],
         confidence: "high",
         identity: expect.stringMatching(/^agentlens-derivation-sha256:[0-9a-f]{64}$/)
@@ -136,7 +143,9 @@ describe("deterministic test derivations", () => {
       confidence: "high",
       outcome: expectedOutcome,
       ...(exitCode === null ? {} : { exitCode }),
-      derivationId: "test-command/1"
+      commandShape: "direct",
+      outcomeAttribution: "source_exit",
+      derivationId: "test-command/2"
     });
   });
 
@@ -150,8 +159,32 @@ describe("deterministic test derivations", () => {
         family: "pytest",
         confidence: "high",
         outcome: "failed",
-        derivationId: "test-command/1"
+        commandShape: "direct",
+        outcomeAttribution: "source_exit",
+        derivationId: "test-command/2"
       }
+    });
+    expect(result.normalizedPayload).not.toHaveProperty("exitCode");
+  });
+
+  it("keeps a compound shell's individual test result unknown despite its aggregate exit", () => {
+    const [command, result] = drafts("completed", 0, {
+      ...classification,
+      commandShape: "compound",
+      outcomeAttribution: "unavailable"
+    });
+
+    expect(command.normalizedPayload).toMatchObject({
+      commandShape: "compound",
+      outcomeAttribution: "unavailable",
+      derivationId: "test-command/2"
+    });
+    expect(result.status).toBe("unknown");
+    expect(result.normalizedPayload).toMatchObject({
+      outcome: "unknown",
+      commandShape: "compound",
+      outcomeAttribution: "unavailable",
+      derivationId: "test-command/2"
     });
     expect(result.normalizedPayload).not.toHaveProperty("exitCode");
   });

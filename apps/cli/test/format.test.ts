@@ -125,7 +125,7 @@ describe("runs formatting", () => {
 
   it("uses qualified failed-then-passed and projected-reviewer wording", () => {
     const text = runsText([projected]);
-    expect(text).toContain("Likely tests: latest passed, previous failures 1");
+    expect(text).toContain("Test-bearing commands: latest passed, previous failures 1");
     expect(text).not.toMatch(/\btests passed\b/i);
     expect(text).toContain("Reviewer: unreviewed (projected)");
     expect(runsJson([projected]).runs[0]).toMatchObject({

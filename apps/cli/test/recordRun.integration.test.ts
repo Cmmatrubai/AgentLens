@@ -205,7 +205,9 @@ function appendOnlyTestCommand(
     classification: {
       family: "pnpm",
       confidence: "high",
-      derivationVersion: "test-command/1"
+      commandShape: "direct",
+      outcomeAttribution: "source_exit",
+      derivationVersion: "test-command/2"
     }
   })[0];
   return repository.appendDerivedEvent({

@@ -234,7 +234,7 @@ export interface AppendDerivedEventInput {
   readonly normalizedPayload: unknown;
   readonly derivation: {
     readonly name: "test-command";
-    readonly version: "1";
+    readonly version: "1" | "2";
     readonly identity: string;
     readonly confidence: "high" | "medium";
   };
@@ -2163,7 +2163,7 @@ export class RunRepository {
             'recorder.interruption', 'recorder.process_exit'
           ))
           OR (events.provenance = 'derived' AND events.kind IN ('test.command', 'test.result')
-            AND events.derivation_name = 'test-command' AND events.derivation_version = '1')
+            AND events.derivation_name = 'test-command' AND events.derivation_version IN ('1', '2'))
         )
       `, batch, "events.run_id, events.sequence, events.id");
       for (const event of this.eventsFromRows(rows)) {
@@ -2610,7 +2610,7 @@ export class RunRepository {
     }
     if (
       input.derivation.name !== "test-command" ||
-      input.derivation.version !== "1" ||
+      (input.derivation.version !== "1" && input.derivation.version !== "2") ||
       input.derivation.identity !== input.identity
     ) {
       throw new Error("Derived event identity metadata is inconsistent.");

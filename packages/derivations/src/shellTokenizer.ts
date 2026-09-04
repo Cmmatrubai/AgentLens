@@ -3,7 +3,82 @@ export interface SimpleCommand {
   readonly argv: readonly string[];
 }
 
+export interface ShellEnvelope {
+  readonly segments: readonly string[];
+  readonly compound: boolean;
+}
+
 const assignment = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+const supportedShells = new Set([
+  "sh",
+  "bash",
+  "zsh",
+  "/bin/sh",
+  "/bin/bash",
+  "/bin/zsh"
+]);
+
+const supportedShellOptions = new Set(["-c", "-lc", "-cl"]);
+
+export function tokenizeShellEnvelope(input: string): ShellEnvelope | null {
+  const outer = tokenizeWords(input);
+  if (
+    outer === null ||
+    outer.length !== 3 ||
+    !supportedShells.has(outer[0]!) ||
+    !supportedShellOptions.has(outer[1]!)
+  ) return null;
+
+  return splitShellBody(outer[2]!);
+}
+
+function splitShellBody(input: string): ShellEnvelope | null {
+  const segments: string[] = [];
+  let segment = "";
+  let state: "unquoted" | "single" | "double" = "unquoted";
+
+  const finishSegment = (): boolean => {
+    const trimmed = segment.trim();
+    if (trimmed.length === 0) return false;
+    segments.push(trimmed);
+    segment = "";
+    return true;
+  };
+
+  for (let index = 0; index < input.length; index += 1) {
+    const character = input[index]!;
+    if (character === "\\") {
+      const escaped = input[++index];
+      if (escaped === undefined || escaped === "\n" || escaped === "\r") return null;
+      segment += character + escaped;
+      continue;
+    }
+    if (character === "\n" || character === "\r" || character === "$" || character === "`") {
+      return null;
+    }
+    if (character === "'" && state !== "double") {
+      state = state === "single" ? "unquoted" : "single";
+      segment += character;
+      continue;
+    }
+    if (character === "\"" && state !== "single") {
+      state = state === "double" ? "unquoted" : "double";
+      segment += character;
+      continue;
+    }
+    if (";|<>()".includes(character)) return null;
+    if (character === "&") {
+      if (state !== "unquoted" || input[index + 1] !== "&" || !finishSegment()) return null;
+      index += 1;
+      continue;
+    }
+    segment += character;
+  }
+
+  if (state !== "unquoted" || !finishSegment()) return null;
+  return { segments, compound: segments.length > 1 };
+}
 
 export function tokenizeSimpleCommand(input: string): SimpleCommand | null {
   const words = tokenizeWords(input);

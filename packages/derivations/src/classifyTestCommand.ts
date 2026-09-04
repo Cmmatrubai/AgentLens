@@ -1,7 +1,11 @@
-import { tokenizeSimpleCommand } from "./shellTokenizer.js";
+import { tokenizeShellEnvelope, tokenizeSimpleCommand } from "./shellTokenizer.js";
 import type { ObservedCommand, TestCommandClassification } from "./types.js";
 
 type Family = TestCommandClassification["family"];
+type RecognizedTestCommand = Readonly<{
+  family: Family;
+  confidence: TestCommandClassification["confidence"];
+}>;
 
 const noOperandMavenOptions = new Set([
   "-q",
@@ -71,7 +75,7 @@ const attachedLongMavenOptions = [
   "--builder="
 ] as const;
 
-const recognizers: readonly ((argv: readonly string[]) => TestCommandClassification | null)[] = [
+const recognizers: readonly ((argv: readonly string[]) => RecognizedTestCommand | null)[] = [
   recognizePytest,
   recognizeJest,
   recognizeVitest,
@@ -88,52 +92,99 @@ export function classifyTestCommand(
   input: ObservedCommand
 ): TestCommandClassification | null {
   const parsed = tokenizeSimpleCommand(input.command);
-  if (parsed === null) return null;
-  for (const recognize of recognizers) {
-    const classification = recognize(parsed.argv);
-    if (classification !== null) return classification;
+  if (parsed !== null) {
+    const recognized = recognize(parsed.argv);
+    if (recognized !== null) return completeClassification(recognized, "direct");
+  }
+
+  const envelope = tokenizeShellEnvelope(input.command);
+  if (envelope === null) return null;
+  let firstRecognized: RecognizedTestCommand | null = null;
+  for (const segment of envelope.segments) {
+    const segmentCommand = tokenizeSimpleCommand(segment);
+    if (segmentCommand === null || isShellCommand(segmentCommand.executable)) return null;
+    const recognized = recognize(segmentCommand.argv);
+    if (firstRecognized === null && recognized !== null) firstRecognized = recognized;
+  }
+  if (firstRecognized === null) return null;
+  return completeClassification(
+    firstRecognized,
+    envelope.compound ? "compound" : "shell_wrapped"
+  );
+}
+
+function recognize(
+  argv: readonly string[]
+): RecognizedTestCommand | null {
+  for (const recognizer of recognizers) {
+    const recognized = recognizer(argv);
+    if (recognized !== null) return recognized;
   }
   return null;
+}
+
+function completeClassification(
+  recognized: RecognizedTestCommand,
+  commandShape: TestCommandClassification["commandShape"]
+): TestCommandClassification {
+  return {
+    ...recognized,
+    commandShape,
+    outcomeAttribution: commandShape === "compound" ? "unavailable" : "source_exit",
+    derivationVersion: "test-command/2"
+  };
 }
 
 function classification(
   family: Family,
   confidence: TestCommandClassification["confidence"]
-): TestCommandClassification {
-  return { family, confidence, derivationVersion: "test-command/1" };
+): RecognizedTestCommand {
+  return { family, confidence };
 }
 
-function recognizePytest(argv: readonly string[]): TestCommandClassification | null {
+function recognizePytest(argv: readonly string[]): RecognizedTestCommand | null {
   if (argv[0] === "pytest" || ((argv[0] === "python" || argv[0] === "python3") && argv[1] === "-m" && argv[2] === "pytest")) {
     return classification("pytest", "high");
   }
   return null;
 }
 
-function recognizeJest(argv: readonly string[]): TestCommandClassification | null {
-  return argv[0] === "jest" || (argv[0] === "npx" && argv[1] === "jest")
+function recognizeJest(argv: readonly string[]): RecognizedTestCommand | null {
+  return argv[0] === "jest" || (argv[0] === "npx" && argv[1] === "jest") ||
+    packageManagerRuns(argv, "jest")
     ? classification("jest", "high")
     : null;
 }
 
-function recognizeVitest(argv: readonly string[]): TestCommandClassification | null {
-  return argv[0] === "vitest" || (argv[0] === "npx" && argv[1] === "vitest")
+function recognizeVitest(argv: readonly string[]): RecognizedTestCommand | null {
+  return argv[0] === "vitest" || (argv[0] === "npx" && argv[1] === "vitest") ||
+    packageManagerRuns(argv, "vitest")
     ? classification("vitest", "high")
     : null;
 }
 
-function recognizeNpm(argv: readonly string[]): TestCommandClassification | null {
+function packageManagerRuns(argv: readonly string[], runner: "jest" | "vitest"): boolean {
+  return (argv[0] === "pnpm" && (argv[1] === runner || (argv[1] === "exec" && argv[2] === runner))) ||
+    (argv[0] === "npm" && argv[1] === "exec" && argv[2] === runner);
+}
+
+function isShellCommand(executable: string): boolean {
+  return executable === "sh" || executable === "bash" || executable === "zsh" ||
+    executable === "/bin/sh" || executable === "/bin/bash" || executable === "/bin/zsh";
+}
+
+function recognizeNpm(argv: readonly string[]): RecognizedTestCommand | null {
   return recognizePackageManager(argv, "npm");
 }
 
-function recognizePnpm(argv: readonly string[]): TestCommandClassification | null {
+function recognizePnpm(argv: readonly string[]): RecognizedTestCommand | null {
   return recognizePackageManager(argv, "pnpm");
 }
 
 function recognizePackageManager(
   argv: readonly string[],
   family: "npm" | "pnpm"
-): TestCommandClassification | null {
+): RecognizedTestCommand | null {
   if (argv[0] !== family) return null;
   if (argv[1] === "test" || (argv[1] === "run" && argv[2] === "test")) {
     return classification(family, "high");
@@ -148,21 +199,21 @@ function isTestScript(value: string | undefined): boolean {
   return value === "test" || (value?.startsWith("test:") ?? false);
 }
 
-function recognizeYarn(argv: readonly string[]): TestCommandClassification | null {
+function recognizeYarn(argv: readonly string[]): RecognizedTestCommand | null {
   return argv[0] === "yarn" && (argv[1] === "test" || (argv[1] === "run" && argv[2] === "test"))
     ? classification("yarn", "high")
     : null;
 }
 
-function recognizeCargo(argv: readonly string[]): TestCommandClassification | null {
+function recognizeCargo(argv: readonly string[]): RecognizedTestCommand | null {
   return argv[0] === "cargo" && argv[1] === "test" ? classification("cargo", "high") : null;
 }
 
-function recognizeGo(argv: readonly string[]): TestCommandClassification | null {
+function recognizeGo(argv: readonly string[]): RecognizedTestCommand | null {
   return argv[0] === "go" && argv[1] === "test" ? classification("go", "high") : null;
 }
 
-function recognizeMaven(argv: readonly string[]): TestCommandClassification | null {
+function recognizeMaven(argv: readonly string[]): RecognizedTestCommand | null {
   if (argv[0] !== "mvn") return null;
 
   for (let index = 1; index < argv.length; index += 1) {
@@ -189,7 +240,7 @@ function isAttachedMavenValue(token: string): boolean {
   );
 }
 
-function recognizeGradle(argv: readonly string[]): TestCommandClassification | null {
+function recognizeGradle(argv: readonly string[]): RecognizedTestCommand | null {
   return (argv[0] === "gradle" || argv[0] === "./gradlew") && argv[1] === "test"
     ? classification("gradle", "high")
     : null;

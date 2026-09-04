@@ -231,7 +231,7 @@ describe("human assessment provenance and form", () => {
     render(<RunHeader run={run(explicit(verdict, completion))} />);
 
     expect(screen.getByText(`Reviewer: ${verdict} · human evidence`)).toBeVisible();
-    expect(screen.getByText("Latest likely test: passed · 0 previous failures")).toBeVisible();
+    expect(screen.getByText("Test-bearing commands: latest passed, previous failures 0")).toBeVisible();
     expect(screen.getByText("2026-08-31T18:10:00.000Z")).toHaveAttribute(
       "datetime",
       "2026-08-31T18:10:00.000Z"

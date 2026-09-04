@@ -20,7 +20,7 @@ export interface ObservedCommand {
   readonly eventStatus: EventStatus;
 }
 
-export interface TestCommandClassification {
+export interface TestCommandClassificationV1 {
   readonly family:
     | "pytest"
     | "jest"
@@ -36,6 +36,22 @@ export interface TestCommandClassification {
   readonly derivationVersion: "test-command/1";
 }
 
+export type TestCommandShape = "direct" | "shell_wrapped" | "compound";
+
+export type TestOutcomeAttribution = "source_exit" | "unavailable";
+
+export interface TestCommandClassification {
+  readonly family: TestCommandClassificationV1["family"];
+  readonly confidence: TestCommandClassificationV1["confidence"];
+  readonly commandShape: TestCommandShape;
+  readonly outcomeAttribution: TestOutcomeAttribution;
+  readonly derivationVersion: "test-command/2";
+}
+
+export type PersistedTestCommandClassification =
+  | TestCommandClassificationV1
+  | TestCommandClassification;
+
 export type TestDerivedKind = "test.command" | "test.result";
 
 export type TestResultOutcome = "passed" | "failed" | "unknown";
@@ -44,7 +60,7 @@ export interface DerivationIdentityInput {
   readonly runId: string;
   readonly sourceEventId: string;
   readonly name: "test-command";
-  readonly version: "1";
+  readonly version: "1" | "2";
   readonly derivedKind: TestDerivedKind;
 }
 
@@ -59,7 +75,7 @@ export interface BuildTestDerivationDraftsInput {
 
 export interface TestDerivationMetadata {
   readonly name: "test-command";
-  readonly version: "1";
+  readonly version: "2";
   readonly sourceEventIds: readonly [string];
   readonly confidence: "high" | "medium";
   readonly identity: string;
@@ -83,7 +99,9 @@ export interface TestCommandDerivationDraft extends TestDerivationDraftBase {
   readonly normalizedPayload: Readonly<{
     family: TestCommandClassification["family"];
     confidence: TestCommandClassification["confidence"];
-    derivationId: "test-command/1";
+    commandShape: TestCommandShape;
+    outcomeAttribution: TestOutcomeAttribution;
+    derivationId: "test-command/2";
   }>;
 }
 
@@ -94,7 +112,9 @@ export interface TestResultDerivationDraft extends TestDerivationDraftBase {
     confidence: TestCommandClassification["confidence"];
     outcome: TestResultOutcome;
     exitCode?: number;
-    derivationId: "test-command/1";
+    commandShape: TestCommandShape;
+    outcomeAttribution: TestOutcomeAttribution;
+    derivationId: "test-command/2";
   }>;
 }
 
@@ -251,18 +271,36 @@ export interface LikelyTestAttempts {
   readonly previousFailures: number;
 }
 
-export interface LikelyTestsDetectedSummary extends LikelyTestsSummaryBase {
+export interface TestCommandDetail {
+  readonly sourceEventId: string;
+  readonly commandShape: TestCommandShape;
+  readonly outcomeAttribution: TestOutcomeAttribution;
+}
+
+interface LikelyTestsDetectedSummaryBase extends LikelyTestsSummaryBase {
   readonly state: "detected";
   readonly availability: "available";
   readonly provenance: "derived";
   readonly attempts: LikelyTestAttempts;
   readonly sourceEventIds: readonly string[];
   readonly derivedEventIds: readonly string[];
-  readonly derivationId: "test-command/1";
   readonly durability: "complete" | "incomplete";
   readonly missingExpected: number;
   readonly coverage: "complete" | "partial";
 }
+
+export interface LikelyTestsDetectedSummaryV1 extends LikelyTestsDetectedSummaryBase {
+  readonly derivationId: "test-command/1";
+}
+
+export interface LikelyTestsDetectedSummaryV2 extends LikelyTestsDetectedSummaryBase {
+  readonly derivationId: "test-command/2";
+  readonly testCommandDetails: readonly TestCommandDetail[];
+}
+
+export type LikelyTestsDetectedSummary =
+  | LikelyTestsDetectedSummaryV1
+  | LikelyTestsDetectedSummaryV2;
 
 export type LikelyTestsSummary =
   | NoLikelyTestsDetectedSummary

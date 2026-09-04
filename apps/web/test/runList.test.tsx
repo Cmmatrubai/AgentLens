@@ -319,13 +319,13 @@ describe("production run ledger", () => {
     ]) expect(screen.getByText(label, { selector: ".status-badge__label" })).toBeVisible();
     expect(screen.getByText("Unsupported status: future_status")).toBeVisible();
     expect(screen.getByText("Compatibility warning")).toBeVisible();
-    expect(screen.getAllByText("Latest likely test: passed · 1 previous failure").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Test-bearing commands: latest passed, previous failures 1").length).toBeGreaterThan(0);
     expect(screen.getByText("Reviewer: partial")).toBeVisible();
     expect(screen.getAllByText("Not reviewed · projected state · no human evidence").length)
       .toBeGreaterThan(0);
     expect(screen.getAllByText("Final Git evidence: tracked diff available · 3 untracked entries").length)
       .toBeGreaterThan(0);
-    expect(screen.getByText("Likely tests: unavailable due to capture policy")).toBeVisible();
+    expect(screen.getByText("Test-bearing commands: unavailable due to capture policy")).toBeVisible();
     expect(screen.getByText("Final Git evidence: not captured")).toBeVisible();
     expect(screen.getByText("HEAD changed")).toBeVisible();
     expect(screen.getByText("Branch changed")).toBeVisible();
@@ -488,7 +488,7 @@ describe("production run ledger", () => {
     expect(link).toHaveAttribute("href", "/runs/semantic-run");
     expect(link.closest("li")).not.toBeNull();
     expect(screen.getByText("Lifecycle")).toBeVisible();
-    expect(screen.getByText("Likely tests")).toBeVisible();
+    expect(screen.getByText("Test-bearing commands")).toBeVisible();
     expect(screen.getByText("Human review")).toBeVisible();
     expect(screen.getByText("Git")).toBeVisible();
 

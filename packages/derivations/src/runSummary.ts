@@ -20,14 +20,17 @@ import type {
   RunSummaryInput,
   SummaryEvidence,
   TestCommandClassification,
+  TestCommandClassificationV1,
   TestDerivationDraft,
   TestDerivedKind,
   TestResultOutcome
 } from "./types.js";
 
 const DERIVATION_NAME = "test-command";
-const DERIVATION_VERSION = "1";
-const DERIVATION_ID = "test-command/1";
+const DERIVATION_V1_VERSION = "1";
+const DERIVATION_V2_VERSION = "2";
+const DERIVATION_V1_ID = "test-command/1";
+const DERIVATION_V2_ID = "test-command/2";
 const IDENTITY_PREFIX = "agentlens-derivation-sha256:";
 const TEST_FAMILIES = new Set<TestCommandClassification["family"]>([
   "pytest",
@@ -310,13 +313,14 @@ function assessment(input: RunSummaryInput["currentAssessment"]): HumanAssessmen
 function expectedDerivedIdentity(
   runId: string,
   sourceEventId: string,
+  version: "1" | "2",
   derivedKind: TestDerivedKind
 ): Readonly<{ identity: string; eventId: string }> {
   const identity = derivationIdentity({
     runId,
     sourceEventId,
     name: DERIVATION_NAME,
-    version: DERIVATION_VERSION,
+    version,
     derivedKind
   });
   return {
@@ -336,24 +340,26 @@ function hasExactSourceRelationship(event: TraceEventV1, sourceEventId: string):
 function structurallyMatchingDerivedEvent(
   events: readonly TraceEventV1[],
   source: TraceEventV1,
+  version: "1" | "2",
   kind: TestDerivedKind
 ): TraceEventV1 | undefined {
-  const expected = expectedDerivedIdentity(source.runId, source.id, kind);
+  const expected = expectedDerivedIdentity(source.runId, source.id, version, kind);
   return events.find((event) =>
     event.id === expected.eventId &&
     event.runId === source.runId &&
     event.kind === kind &&
     event.provenance === "derived" &&
     event.derivation?.name === DERIVATION_NAME &&
-    event.derivation.version === DERIVATION_VERSION &&
+    event.derivation.version === version &&
     event.derivation.identity === expected.identity &&
     hasExactSourceRelationship(event, source.id)
   );
 }
 
 function classificationFromDerivedEvent(
-  event: TraceEventV1 | undefined
-): TestCommandClassification | undefined {
+  event: TraceEventV1 | undefined,
+  version: "1" | "2"
+): TestCommandClassificationV1 | TestCommandClassification | undefined {
   if (!event) return undefined;
   try {
     const payload = asObject(event.normalizedPayload);
@@ -363,13 +369,30 @@ function classificationFromDerivedEvent(
       typeof family !== "string" ||
       !TEST_FAMILIES.has(family as TestCommandClassification["family"]) ||
       (confidence !== "high" && confidence !== "medium") ||
-      payload?.derivationId !== DERIVATION_ID ||
       event.derivation?.confidence !== confidence
+    ) return undefined;
+    if (version === "1") {
+      if (payload?.derivationId !== DERIVATION_V1_ID) return undefined;
+      return {
+        family: family as TestCommandClassification["family"],
+        confidence,
+        derivationVersion: DERIVATION_V1_ID
+      };
+    }
+    const commandShape = payload?.commandShape;
+    const outcomeAttribution = payload?.outcomeAttribution;
+    if (
+      payload?.derivationId !== DERIVATION_V2_ID ||
+      (commandShape !== "direct" && commandShape !== "shell_wrapped" && commandShape !== "compound") ||
+      (outcomeAttribution !== "source_exit" && outcomeAttribution !== "unavailable") ||
+      (commandShape === "compound") !== (outcomeAttribution === "unavailable")
     ) return undefined;
     return {
       family: family as TestCommandClassification["family"],
       confidence,
-      derivationVersion: DERIVATION_ID
+      commandShape,
+      outcomeAttribution,
+      derivationVersion: DERIVATION_V2_ID
     };
   } catch {
     return undefined;
@@ -377,20 +400,26 @@ function classificationFromDerivedEvent(
 }
 
 function sameClassification(
-  left: TestCommandClassification,
-  right: TestCommandClassification
+  left: TestCommandClassificationV1 | TestCommandClassification,
+  right: TestCommandClassificationV1 | TestCommandClassification
 ): boolean {
   return left.family === right.family &&
     left.confidence === right.confidence &&
-    left.derivationVersion === right.derivationVersion;
+    left.derivationVersion === right.derivationVersion &&
+    (left.derivationVersion === DERIVATION_V1_ID || (
+      right.derivationVersion === DERIVATION_V2_ID &&
+      left.commandShape === right.commandShape &&
+      left.outcomeAttribution === right.outcomeAttribution
+    ));
 }
 
 function durableClassification(
   commandEvent: TraceEventV1 | undefined,
-  resultEvent: TraceEventV1 | undefined
-): TestCommandClassification | undefined {
-  const command = classificationFromDerivedEvent(commandEvent);
-  const result = classificationFromDerivedEvent(resultEvent);
+  resultEvent: TraceEventV1 | undefined,
+  version: "1" | "2"
+): TestCommandClassificationV1 | TestCommandClassification | undefined {
+  const command = classificationFromDerivedEvent(commandEvent, version);
+  const result = classificationFromDerivedEvent(resultEvent, version);
   if (command && result && !sameClassification(command, result)) return undefined;
   return command ?? result;
 }
@@ -423,6 +452,47 @@ function hasExpectedSemantics(
     hasExactFlatPayload(event.normalizedPayload, expected.normalizedPayload);
 }
 
+function legacySourceOutcome(event: TraceEventV1): TestResultOutcome {
+  const exitCode = numericExitCode(event);
+  if (exitCode === 0) return "passed";
+  if (exitCode !== null || event.status === "failed") return "failed";
+  return "unknown";
+}
+
+function legacyResultStatus(outcome: TestResultOutcome): TraceEventV1["status"] {
+  return outcome === "passed" ? "completed" : outcome === "failed" ? "failed" : "unknown";
+}
+
+function hasExpectedLegacySemantics(
+  event: TraceEventV1 | undefined,
+  source: TraceEventV1,
+  sourceProvider: RunSummaryInput["run"]["provider"],
+  kind: TestDerivedKind,
+  classification: TestCommandClassificationV1
+): event is TraceEventV1 {
+  const outcome = legacySourceOutcome(source);
+  const payload = kind === "test.command"
+    ? {
+        family: classification.family,
+        confidence: classification.confidence,
+        derivationId: DERIVATION_V1_ID
+      }
+    : {
+        family: classification.family,
+        confidence: classification.confidence,
+        outcome,
+        ...(numericExitCode(source) === null ? {} : { exitCode: numericExitCode(source)! }),
+        derivationId: DERIVATION_V1_ID
+      };
+  const status = kind === "test.command" ? source.status : legacyResultStatus(outcome);
+  return event !== undefined &&
+    hasExactFlatPayload(event.source, { provider: sourceProvider }) &&
+    event.nativePayload === undefined &&
+    event.status === status &&
+    event.derivation?.confidence === classification.confidence &&
+    hasExactFlatPayload(event.normalizedPayload, payload);
+}
+
 function numericExitCode(event: TraceEventV1): number | null {
   try {
     const value = asObject(event.normalizedPayload)?.exitCode;
@@ -433,10 +503,7 @@ function numericExitCode(event: TraceEventV1): number | null {
 }
 
 function sourceOutcome(event: TraceEventV1): TestResultOutcome {
-  const exitCode = numericExitCode(event);
-  if (exitCode === 0) return "passed";
-  if (exitCode !== null || event.status === "failed") return "failed";
-  return "unknown";
+  return legacySourceOutcome(event);
 }
 
 function durableOutcome(event: TraceEventV1 | undefined): TestResultOutcome | undefined {
@@ -458,22 +525,52 @@ function likelyTests(input: RunSummaryInput): LikelyTestsSummary {
     outcome: TestResultOutcome;
     derivedIds: readonly string[];
     missingExpected: number;
+    derivationId: "test-command/1" | "test-command/2";
+    testCommandDetail?: Readonly<{
+      sourceEventId: string;
+      commandShape: TestCommandClassification["commandShape"];
+      outcomeAttribution: TestCommandClassification["outcomeAttribution"];
+    }>;
   }> = [];
   let omittedTerminalCommands = 0;
   let unavailableTerminalCommands = 0;
 
   for (const source of sources) {
-    const commandCandidate = structurallyMatchingDerivedEvent(
+    const v1CommandCandidate = structurallyMatchingDerivedEvent(
       input.events,
       source,
+      DERIVATION_V1_VERSION,
       "test.command"
     );
-    const resultCandidate = structurallyMatchingDerivedEvent(
+    const v1ResultCandidate = structurallyMatchingDerivedEvent(
       input.events,
       source,
+      DERIVATION_V1_VERSION,
       "test.result"
     );
-    let classification: TestCommandClassification | null | undefined;
+    const v2CommandCandidate = structurallyMatchingDerivedEvent(
+      input.events,
+      source,
+      DERIVATION_V2_VERSION,
+      "test.command"
+    );
+    const v2ResultCandidate = structurallyMatchingDerivedEvent(
+      input.events,
+      source,
+      DERIVATION_V2_VERSION,
+      "test.result"
+    );
+    const durableV1 = durableClassification(
+      v1CommandCandidate,
+      v1ResultCandidate,
+      DERIVATION_V1_VERSION
+    );
+    const durableV2 = durableClassification(
+      v2CommandCandidate,
+      v2ResultCandidate,
+      DERIVATION_V2_VERSION
+    );
+    let readTimeClassification: TestCommandClassification | null | undefined;
 
     if (input.run.capturePolicy === "standard") {
       try {
@@ -482,7 +579,7 @@ function likelyTests(input: RunSummaryInput): LikelyTestsSummary {
           omittedTerminalCommands += 1;
           unavailableTerminalCommands += 1;
         } else if (evidence?.state === "available") {
-          classification = classifyTestCommand({
+          readTimeClassification = classifyTestCommand({
             command: evidence.redactedCommand,
             exitCode: numericExitCode(source),
             eventStatus: source.status
@@ -498,27 +595,43 @@ function likelyTests(input: RunSummaryInput): LikelyTestsSummary {
       unavailableTerminalCommands += 1;
     }
 
-    if (classification === null) continue;
-    const expectedClassification = classification ??
-      durableClassification(commandCandidate, resultCandidate);
+    if (readTimeClassification === null) continue;
+    const expectedClassification = durableV2 !== undefined
+      ? (readTimeClassification ?? durableV2)
+      : durableV1 ?? readTimeClassification;
     if (!expectedClassification) continue;
 
-    const expectedDrafts = buildTestDerivationDrafts({
-      runId: source.runId,
-      sourceEventId: source.id,
-      sourceProvider: input.run.provider,
-      eventStatus: source.status,
-      exitCode: numericExitCode(source),
-      classification: expectedClassification
-    });
-    const commandEvent = hasExpectedSemantics(commandCandidate, expectedDrafts[0])
-      ? commandCandidate
+    const selectedV2 = expectedClassification.derivationVersion === DERIVATION_V2_ID;
+    const expectedDrafts = selectedV2
+      ? buildTestDerivationDrafts({
+          runId: source.runId,
+          sourceEventId: source.id,
+          sourceProvider: input.run.provider,
+          eventStatus: source.status,
+          exitCode: numericExitCode(source),
+          classification: expectedClassification
+        })
       : undefined;
-    const resultEvent = hasExpectedSemantics(resultCandidate, expectedDrafts[1])
-      ? resultCandidate
-      : undefined;
+    const commandEvent = selectedV2
+      ? (hasExpectedSemantics(v2CommandCandidate, expectedDrafts![0]) ? v2CommandCandidate : undefined)
+      : (hasExpectedLegacySemantics(
+          v1CommandCandidate,
+          source,
+          input.run.provider,
+          "test.command",
+          expectedClassification
+        ) ? v1CommandCandidate : undefined);
+    const resultEvent = selectedV2
+      ? (hasExpectedSemantics(v2ResultCandidate, expectedDrafts![1]) ? v2ResultCandidate : undefined)
+      : (hasExpectedLegacySemantics(
+          v1ResultCandidate,
+          source,
+          input.run.provider,
+          "test.result",
+          expectedClassification
+        ) ? v1ResultCandidate : undefined);
     if (
-      classification === undefined &&
+      readTimeClassification === undefined &&
       commandEvent === undefined &&
       resultEvent === undefined
     ) continue;
@@ -526,14 +639,25 @@ function likelyTests(input: RunSummaryInput): LikelyTestsSummary {
     const derivedIds = [commandEvent?.id, resultEvent?.id]
       .filter((id): id is string => id !== undefined);
     const outcome = durableOutcome(resultEvent) ??
-      (input.run.capturePolicy === "standard" && classification
-        ? sourceOutcome(source)
-        : source.status === "failed" ? "failed" : "unknown");
+      (expectedClassification.derivationVersion === DERIVATION_V2_ID &&
+      expectedClassification.outcomeAttribution === "unavailable"
+        ? "unknown"
+        : input.run.capturePolicy === "standard" && readTimeClassification !== undefined
+          ? sourceOutcome(source)
+          : source.status === "failed" ? "failed" : "unknown");
     attempts.push({
       sourceId: source.id,
       outcome,
       derivedIds,
-      missingExpected: 2 - derivedIds.length
+      missingExpected: 2 - derivedIds.length,
+      derivationId: expectedClassification.derivationVersion,
+      ...(expectedClassification.derivationVersion === DERIVATION_V2_ID ? {
+        testCommandDetail: {
+          sourceEventId: source.id,
+          commandShape: expectedClassification.commandShape,
+          outcomeAttribution: expectedClassification.outcomeAttribution
+        }
+      } : {})
     });
   }
 
@@ -576,21 +700,33 @@ function likelyTests(input: RunSummaryInput): LikelyTestsSummary {
     (total, attempt) => total + attempt.missingExpected,
     0
   );
-  const result: LikelyTestsDetectedSummary = {
-    state: "detected",
-    availability: "available",
-    provenance: "derived",
+  const testCommandDetails = attempts.flatMap(({ testCommandDetail }) =>
+    testCommandDetail === undefined ? [] : [testCommandDetail]
+  );
+  const resultBase = {
+    state: "detected" as const,
+    availability: "available" as const,
+    provenance: "derived" as const,
     supportingEventIds: [...terminalIds, ...derivedEventIds],
     supportingArtifactIds: [],
     omittedTerminalCommands,
     attempts: attemptSummary,
     sourceEventIds,
     derivedEventIds,
-    derivationId: DERIVATION_ID,
-    durability: missingExpected === 0 ? "complete" : "incomplete",
+    durability: missingExpected === 0 ? "complete" as const : "incomplete" as const,
     missingExpected,
-    coverage: unavailableTerminalCommands === 0 ? "complete" : "partial"
+    coverage: unavailableTerminalCommands === 0 ? "complete" as const : "partial" as const
   };
+  const result: LikelyTestsDetectedSummary = testCommandDetails.length > 0
+    ? {
+        ...resultBase,
+        derivationId: DERIVATION_V2_ID,
+        testCommandDetails
+      }
+    : {
+        ...resultBase,
+        derivationId: DERIVATION_V1_ID
+      };
   return result;
 }
 

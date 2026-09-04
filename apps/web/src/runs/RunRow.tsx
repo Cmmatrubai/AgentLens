@@ -95,7 +95,7 @@ export function RunRow({ run }: Readonly<{ run: RunListItemV1 }>) {
               <dd>{commandsText(run)}</dd>
             </div>
             <div>
-              <dt>Likely tests</dt>
+              <dt>Test-bearing commands</dt>
               <dd>{likelyTestsText(run)}</dd>
             </div>
             <div>

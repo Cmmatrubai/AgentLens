@@ -68,11 +68,16 @@ function provenanceLabel(event: Pick<TraceEventV1, "kind" | "provenance">): stri
 
 function likelyTestsText(likelyTests: RunSummary["likelyTests"]): string {
   if (likelyTests.state === "detected") {
-    return `Likely tests: latest ${likelyTests.attempts.latest}, previous failures ${likelyTests.attempts.previousFailures}`;
+    const attributionUnavailable = likelyTests.derivationId === "test-command/2" && likelyTests.testCommandDetails.some(
+      (detail) => detail.outcomeAttribution === "unavailable"
+    );
+    return `Test-bearing commands: latest ${likelyTests.attempts.latest}, previous failures ${likelyTests.attempts.previousFailures}${
+      attributionUnavailable ? " · individual test outcome unavailable" : ""
+    }`;
   }
   return likelyTests.state === "none_detected"
-    ? "Likely tests: none detected"
-    : "Likely tests: unavailable due to capture policy";
+    ? "Test-bearing commands: none detected"
+    : "Test-bearing commands: unavailable due to capture policy";
 }
 
 function assessmentText(assessment: RunSummary["assessment"]): string {

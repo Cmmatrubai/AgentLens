@@ -604,6 +604,49 @@ describe("browser-safe projectors", () => {
         omittedSupportingEventIds: 0
       });
     }
+
+    expect(projectRunSummaryV1({
+      ...summary,
+      likelyTests: {
+        state: "detected",
+        availability: "available",
+        provenance: "derived",
+        supportingEventIds: ["compound-source"],
+        supportingArtifactIds: [],
+        omittedTerminalCommands: 0,
+        attempts: { total: 1, passed: 0, failed: 0, unknown: 1, latest: "unknown", previousFailures: 0 },
+        sourceEventIds: ["compound-source"],
+        derivedEventIds: ["compound-derived"],
+        derivationId: "test-command/2",
+        testCommandDetails: [{
+          sourceEventId: "compound-source",
+          commandShape: "compound",
+          outcomeAttribution: "unavailable"
+        }],
+        durability: "complete",
+        missingExpected: 0,
+        coverage: "complete"
+      }
+    }, "codex-exec").likelyTests).toEqual({
+      state: "detected",
+      availability: "available",
+      provenance: "derived",
+      supportingEventIds: ["compound-source"],
+      supportingArtifactIds: [],
+      omittedTerminalCommands: 0,
+      attempts: { total: 1, passed: 0, failed: 0, unknown: 1, latest: "unknown", previousFailures: 0 },
+      sourceEventIds: ["compound-source"],
+      derivedEventIds: ["compound-derived"],
+      derivationId: "test-command/2",
+      testCommandDetails: [{
+        sourceEventId: "compound-source",
+        commandShape: "compound",
+        outcomeAttribution: "unavailable"
+      }],
+      durability: "complete",
+      missingExpected: 0,
+      coverage: "complete"
+    });
     expect(JSON.stringify(projected)).not.toContain("SENTINEL_MUST_NOT_CROSS_HTTP");
 
     const run: RunListRecord = {

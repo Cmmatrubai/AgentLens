@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildTestDerivationDrafts,
+  derivationIdentity,
   summarizeRun,
   type RunSummaryInput
 } from "../src/index.js";
@@ -93,7 +94,9 @@ function durableTestEvents(
     classification: {
       family: "pnpm",
       confidence: "high",
-      derivationVersion: "test-command/1"
+      commandShape: "direct",
+      outcomeAttribution: "source_exit",
+      derivationVersion: "test-command/2"
     }
   });
   return drafts.map((draft, index) => ({
@@ -102,6 +105,58 @@ function durableTestEvents(
     receivedAt: new Date(STARTED_AT + (100 + source.sequence * 2 + index) * 1_000)
       .toISOString()
   })) as unknown as readonly [TraceEventV1, TraceEventV1];
+}
+
+function legacyDurableTestEvents(
+  source: TraceEventV1,
+  exitCode: number | null
+): readonly [TraceEventV1, TraceEventV1] {
+  const outcome = exitCode === 0 ? "passed" : exitCode !== null || source.status === "failed" ? "failed" : "unknown";
+  const resultStatus = outcome === "passed" ? "completed" : outcome === "failed" ? "failed" : "unknown";
+  const draft = (derivedKind: "test.command" | "test.result", normalizedPayload: Record<string, unknown>, status: TraceEventV1["status"]): TraceEventV1 => {
+    const identity = derivationIdentity({
+      runId: source.runId,
+      sourceEventId: source.id,
+      name: "test-command",
+      version: "1",
+      derivedKind
+    });
+    return {
+      id: `drv_${identity.slice("agentlens-derivation-sha256:".length)}`,
+      runId: source.runId,
+      sequence: 100 + source.sequence * 2 + (derivedKind === "test.command" ? 0 : 1),
+      receivedAt: new Date(STARTED_AT + (100 + source.sequence * 2) * 1_000).toISOString(),
+      kind: derivedKind,
+      status,
+      provenance: "derived",
+      source: { provider: source.source.provider },
+      relationships: [{ type: "derived_from", eventId: source.id }],
+      summary: "Legacy test derivation",
+      normalizedPayload,
+      derivation: {
+        name: "test-command",
+        version: "1",
+        sourceEventIds: [source.id],
+        confidence: "high",
+        identity
+      }
+    };
+  };
+
+  return [
+    draft("test.command", {
+      family: "pnpm",
+      confidence: "high",
+      derivationId: "test-command/1"
+    }, source.status),
+    draft("test.result", {
+      family: "pnpm",
+      confidence: "high",
+      outcome,
+      ...(exitCode === null ? {} : { exitCode }),
+      derivationId: "test-command/1"
+    }, resultStatus)
+  ];
 }
 
 function input(
@@ -632,12 +687,92 @@ describe("likely-test summaries", () => {
         },
         sourceEventIds: [source.id],
         derivedEventIds: [durable[0].id, durable[1].id],
-        derivationId: "test-command/1",
+        derivationId: "test-command/2",
         durability: "complete",
         missingExpected: 0,
         coverage: "complete",
         omittedTerminalCommands: 0
       });
+  });
+
+  it("keeps persisted v1 evidence readable without requiring v2 payload fields", () => {
+    const source = command({
+      id: "legacy-test-source",
+      sequence: 1,
+      command: "pnpm test",
+      exitCode: 0
+    });
+    const legacy = legacyDurableTestEvents(source, 0);
+
+    expect(summarizeRun(input({ events: [source, ...legacy] })).likelyTests).toMatchObject({
+      state: "detected",
+      derivationId: "test-command/1",
+      sourceEventIds: [source.id],
+      derivedEventIds: [legacy[0].id, legacy[1].id],
+      attempts: { total: 1, passed: 1, failed: 0, unknown: 0, latest: "passed" },
+      durability: "complete",
+      missingExpected: 0
+    });
+  });
+
+  it("selects persisted v2 evidence over v1 for one source event without double counting", () => {
+    const source = command({
+      id: "versioned-test-source",
+      sequence: 1,
+      command: "pnpm test",
+      exitCode: 0
+    });
+    const legacy = legacyDurableTestEvents(source, 0);
+    const current = durableTestEvents(source, 0);
+
+    expect(summarizeRun(input({ events: [source, ...legacy, ...current] })).likelyTests).toMatchObject({
+      state: "detected",
+      derivationId: "test-command/2",
+      sourceEventIds: [source.id],
+      derivedEventIds: [current[0].id, current[1].id],
+      attempts: { total: 1, passed: 1, failed: 0, unknown: 0, latest: "passed" },
+      durability: "complete",
+      missingExpected: 0
+    });
+  });
+
+  it("derives v2 at read time for a classifiable standard source without appending evidence", () => {
+    const source = command({
+      id: "read-time-v2-source",
+      sequence: 1,
+      command: "pnpm test",
+      exitCode: 0
+    });
+    const events = [source] as const;
+    const summary = summarizeRun(input({ events }));
+
+    expect(summary.likelyTests).toMatchObject({
+      state: "detected",
+      derivationId: "test-command/2",
+      sourceEventIds: [source.id],
+      derivedEventIds: [],
+      attempts: { total: 1, passed: 1, failed: 0, unknown: 0, latest: "passed" },
+      durability: "incomplete",
+      missingExpected: 2
+    });
+    expect(events).toEqual([source]);
+  });
+
+  it("does not attribute a compound shell's aggregate exit to its individual test result", () => {
+    const source = command({
+      id: "compound-test-source",
+      sequence: 1,
+      command: "/bin/zsh -lc \"pnpm vitest --run a.test.ts && pnpm typecheck\"",
+      exitCode: 0
+    });
+
+    expect(summarizeRun(input({ events: [source] })).likelyTests).toMatchObject({
+      state: "detected",
+      derivationId: "test-command/2",
+      attempts: { total: 1, passed: 0, failed: 0, unknown: 1, latest: "unknown" },
+      durability: "incomplete",
+      missingExpected: 2
+    });
   });
 
   it.each([
@@ -695,7 +830,7 @@ describe("likely-test summaries", () => {
       missingExpected: 0,
       coverage: "complete",
       omittedTerminalCommands: 0,
-      derivationId: "test-command/1"
+      derivationId: "test-command/2"
     });
     expect(JSON.stringify(likelyTests)).not.toMatch(/tests passed/i);
   });

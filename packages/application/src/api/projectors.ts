@@ -800,6 +800,13 @@ function projectLikelyTests(summary: RunSummary["likelyTests"]) {
         sourceEventIds: [...summary.sourceEventIds],
         derivedEventIds: [...summary.derivedEventIds],
         derivationId: summary.derivationId,
+        ...(summary.derivationId === "test-command/2" ? {
+          testCommandDetails: summary.testCommandDetails.map((detail) => ({
+            sourceEventId: detail.sourceEventId,
+            commandShape: detail.commandShape,
+            outcomeAttribution: detail.outcomeAttribution
+          }))
+        } : {}),
         durability: summary.durability,
         missingExpected: summary.missingExpected,
         coverage: summary.coverage

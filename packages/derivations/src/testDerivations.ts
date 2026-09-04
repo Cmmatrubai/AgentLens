@@ -11,8 +11,8 @@ import type {
 } from "./types.js";
 
 const DERIVATION_NAME = "test-command";
-const DERIVATION_VERSION = "1";
-const DERIVATION_ID = "test-command/1";
+const DERIVATION_VERSION = "2";
+const DERIVATION_ID = "test-command/2";
 const IDENTITY_PREFIX = "agentlens-derivation-sha256:";
 
 export function derivationIdentity(input: DerivationIdentityInput): string {
@@ -64,6 +64,9 @@ function derivationFor(
 function outcomeFor(
   input: BuildTestDerivationDraftsInput
 ): Readonly<{ status: "completed" | "failed" | "unknown"; outcome: TestResultOutcome }> {
+  if (input.classification.outcomeAttribution === "unavailable") {
+    return { status: "unknown", outcome: "unknown" };
+  }
   if (input.exitCode === 0) return { status: "completed", outcome: "passed" };
   if (input.exitCode !== null || input.eventStatus === "failed") {
     return { status: "failed", outcome: "failed" };
@@ -90,6 +93,8 @@ export function buildTestDerivationDrafts(
     normalizedPayload: {
       family: input.classification.family,
       confidence: input.classification.confidence,
+      commandShape: input.classification.commandShape,
+      outcomeAttribution: input.classification.outcomeAttribution,
       derivationId: DERIVATION_ID
     },
     derivation: derivationFor(input, commandIdentity)
@@ -107,7 +112,11 @@ export function buildTestDerivationDrafts(
       family: input.classification.family,
       confidence: input.classification.confidence,
       outcome: result.outcome,
-      ...(input.exitCode === null ? {} : { exitCode: input.exitCode }),
+      ...(input.classification.outcomeAttribution === "source_exit" && input.exitCode !== null
+        ? { exitCode: input.exitCode }
+        : {}),
+      commandShape: input.classification.commandShape,
+      outcomeAttribution: input.classification.outcomeAttribution,
       derivationId: DERIVATION_ID
     },
     derivation: derivationFor(input, resultIdentity)

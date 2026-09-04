@@ -1379,7 +1379,7 @@ describe("runs and inspect", () => {
       relationships: [{ type: "derived_from", eventId: expect.any(String) }],
       derivation: {
         name: "test-command",
-        version: "1",
+        version: "2",
         sourceEventIds: [expect.any(String)],
         confidence: expect.any(String),
         identity: expect.stringMatching(/^agentlens-derivation-sha256:/)
@@ -1396,7 +1396,7 @@ describe("runs and inspect", () => {
     expect(output.text()).toContain("[Git recovered]");
     expect(output.text()).toContain("[Recorder]");
     expect(output.text()).toContain("[Human]");
-    expect(output.text()).toContain("Likely tests: latest passed, previous failures 0");
+    expect(output.text()).toContain("Test-bearing commands: latest passed, previous failures 0");
     expect(output.text()).not.toMatch(/\btests passed\b/i);
     expect(output.text()).toContain("Reviewer: success (explicit)");
   });

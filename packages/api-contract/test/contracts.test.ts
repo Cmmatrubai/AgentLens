@@ -14,6 +14,7 @@ import {
   eventStatusFieldV1Schema,
   evidenceValueV1Schema,
   gitDiffContentV1Schema,
+  likelyTestsV1Schema,
   nativeContentResponseV1Schema,
   normalizedContentV1Schema,
   normalizedContentResponseV1Schema,
@@ -224,6 +225,53 @@ describe("closed v1 browser schemas", () => {
         omittedSupportingEventIds: 0
       });
     }
+  });
+
+  it("keeps v1 test evidence compatible while requiring v2 attribution details", () => {
+    const base = {
+      state: "detected",
+      availability: "available",
+      provenance: "derived",
+      supportingEventIds: ["source-event"],
+      supportingArtifactIds: [],
+      omittedTerminalCommands: 0,
+      attempts: { total: 1, passed: 0, failed: 0, unknown: 1, latest: "unknown", previousFailures: 0 },
+      sourceEventIds: ["source-event"],
+      derivedEventIds: [],
+      durability: "incomplete",
+      missingExpected: 2,
+      coverage: "complete"
+    } as const;
+
+    expect(likelyTestsV1Schema.parse({ ...base, derivationId: "test-command/1" }))
+      .toMatchObject({ derivationId: "test-command/1" });
+    expect(likelyTestsV1Schema.parse({
+      ...base,
+      derivationId: "test-command/2",
+      testCommandDetails: [{
+        sourceEventId: "source-event",
+        commandShape: "compound",
+        outcomeAttribution: "unavailable"
+      }]
+    })).toMatchObject({
+      derivationId: "test-command/2",
+      testCommandDetails: [{ outcomeAttribution: "unavailable" }]
+    });
+    expect(() => likelyTestsV1Schema.parse({ ...base, derivationId: "test-command/2" })).toThrow();
+    expect(() => likelyTestsV1Schema.parse({
+      ...base,
+      derivationId: "test-command/1",
+      testCommandDetails: []
+    })).toThrow();
+    expect(() => likelyTestsV1Schema.parse({
+      ...base,
+      derivationId: "test-command/2",
+      testCommandDetails: [{
+        sourceEventId: "source-event",
+        commandShape: "compound",
+        outcomeAttribution: "source_exit"
+      }]
+    })).toThrow();
   });
 
   it("rejects an unknown observed-token-usage reason", () => {

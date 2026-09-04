@@ -85,13 +85,45 @@ export const providerCapabilityLimitationV1Schema = z.object({
   availability: z.enum(["partial", "unavailable", "recorder_only"])
 }).strict();
 
-export const likelyTestsV1Schema = z.discriminatedUnion("state", [
+const likelyTestsBase = {
+  availability: z.literal("available"),
+  provenance: z.literal("derived"),
+  ...evidenceIds,
+  omittedTerminalCommands: nonnegativeInteger
+};
+
+const likelyTestsDetectedBase = {
+  state: z.literal("detected"),
+  ...likelyTestsBase,
+  attempts: z.object({
+    total: nonnegativeInteger,
+    passed: nonnegativeInteger,
+    failed: nonnegativeInteger,
+    unknown: nonnegativeInteger,
+    latest: z.enum(["passed", "failed", "unknown"]),
+    previousFailures: nonnegativeInteger
+  }).strict(),
+  sourceEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
+  derivedEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
+  durability: z.enum(["complete", "incomplete"]),
+  missingExpected: nonnegativeInteger,
+  coverage: z.enum(["complete", "partial"])
+};
+
+const testCommandDetailsV2Schema = z.array(z.object({
+  sourceEventId: browserAddressableEventIdV1Schema,
+  commandShape: z.enum(["direct", "shell_wrapped", "compound"]),
+  outcomeAttribution: z.enum(["source_exit", "unavailable"])
+}).strict().refine(
+  ({ commandShape, outcomeAttribution }) =>
+    (commandShape === "compound") === (outcomeAttribution === "unavailable"),
+  "Compound command attribution must remain unavailable."
+)).max(1_000);
+
+export const likelyTestsV1Schema = z.union([
   z.object({
     state: z.literal("none_detected"),
-    availability: z.literal("available"),
-    provenance: z.literal("derived"),
-    ...evidenceIds,
-    omittedTerminalCommands: nonnegativeInteger
+    ...likelyTestsBase
   }).strict(),
   z.object({
     state: z.literal("unavailable_due_to_capture_policy"),
@@ -101,25 +133,13 @@ export const likelyTestsV1Schema = z.discriminatedUnion("state", [
     omittedTerminalCommands: nonnegativeInteger
   }).strict(),
   z.object({
-    state: z.literal("detected"),
-    availability: z.literal("available"),
-    provenance: z.literal("derived"),
-    ...evidenceIds,
-    omittedTerminalCommands: nonnegativeInteger,
-    attempts: z.object({
-      total: nonnegativeInteger,
-      passed: nonnegativeInteger,
-      failed: nonnegativeInteger,
-      unknown: nonnegativeInteger,
-      latest: z.enum(["passed", "failed", "unknown"]),
-      previousFailures: nonnegativeInteger
-    }).strict(),
-    sourceEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
-    derivedEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
+    ...likelyTestsDetectedBase,
     derivationId: z.literal("test-command/1"),
-    durability: z.enum(["complete", "incomplete"]),
-    missingExpected: nonnegativeInteger,
-    coverage: z.enum(["complete", "partial"])
+  }).strict(),
+  z.object({
+    ...likelyTestsDetectedBase,
+    derivationId: z.literal("test-command/2"),
+    testCommandDetails: testCommandDetailsV2Schema
   }).strict()
 ]);
 

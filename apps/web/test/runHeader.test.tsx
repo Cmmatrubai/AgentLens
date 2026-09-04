@@ -48,12 +48,12 @@ function run(overrides: Partial<RunDetailV1> = {}): RunDetailV1 {
 }
 
 describe("RunHeader frozen facts", () => {
-  it("labels recorder timing, likely tests, explicit human assessment, warnings, and contradictions", () => {
+  it("labels recorder timing, test-bearing commands, explicit human assessment, warnings, and contradictions", () => {
     render(<RunHeader run={run()} />);
     expect(screen.getByText("2026-08-31T16:00:00.000Z")).toHaveAttribute("datetime", "2026-08-31T16:00:00.000Z");
     expect(screen.getByText("2026-08-31T16:00:02.000Z")).toHaveAttribute("datetime", "2026-08-31T16:00:02.000Z");
     expect(screen.getByText("1.3 s")).toBeVisible();
-    expect(screen.getByText("Latest likely test: failed · 1 previous failure")).toBeVisible();
+    expect(screen.getByText("Test-bearing commands: latest failed, previous failures 1")).toBeVisible();
     expect(screen.getByText("Reviewer: partial · human evidence")).toBeVisible();
     expect(screen.getByText("Warning: recorder failure")).toBeVisible();
     expect(screen.getByText("Contradiction: provider process contradiction")).toBeVisible();
@@ -76,8 +76,31 @@ describe("RunHeader frozen facts", () => {
     expect(screen.getByText("Unsupported provider: future_provider")).toBeVisible();
     expect(screen.getByText("Not yet ended")).toBeVisible();
     expect(screen.getByText("Unavailable · not yet available")).toBeVisible();
-    expect(screen.getByText("Likely tests: unavailable due to capture policy")).toBeVisible();
+    expect(screen.getByText("Test-bearing commands: unavailable due to capture policy")).toBeVisible();
     expect(screen.getByText("Not reviewed · projected state · no human evidence")).toBeVisible();
+  });
+
+  it("states that a compound command has no attributable individual test outcome", () => {
+    const base = run();
+    render(<RunHeader run={run({
+      summary: {
+        ...base.summary,
+        likelyTests: {
+          state: "detected", availability: "available", provenance: "derived",
+          supportingEventIds: ["compound-source"], supportingArtifactIds: [], omittedTerminalCommands: 0,
+          attempts: { total: 1, passed: 0, failed: 0, unknown: 1, latest: "unknown", previousFailures: 0 },
+          sourceEventIds: ["compound-source"], derivedEventIds: [], derivationId: "test-command/2",
+          testCommandDetails: [{
+            sourceEventId: "compound-source",
+            commandShape: "compound",
+            outcomeAttribution: "unavailable"
+          }],
+          durability: "incomplete", missingExpected: 2, coverage: "complete"
+        }
+      }
+    })} />);
+
+    expect(screen.getByText("Test-bearing commands: latest unknown, previous failures 0 · individual test outcome unavailable")).toBeVisible();
   });
 
   it("renders every available usage counter separately without a total", () => {

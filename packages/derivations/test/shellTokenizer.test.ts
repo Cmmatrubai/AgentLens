@@ -1,6 +1,30 @@
 import { describe, expect, it } from "vitest";
 
-import { tokenizeSimpleCommand } from "../src/shellTokenizer.js";
+import { tokenizeShellEnvelope, tokenizeSimpleCommand } from "../src/shellTokenizer.js";
+
+describe("tokenizeShellEnvelope", () => {
+  it.each([
+    ["sh -c 'pnpm vitest'", ["pnpm vitest"], false],
+    ["bash -lc \"pnpm vitest -t 'focused test'\"", ["pnpm vitest -t 'focused test'"], false],
+    ["/bin/zsh -cl 'pnpm test && pnpm vitest'", ["pnpm test", "pnpm vitest"], true]
+  ])("accepts bounded shell envelopes: %s", (command, segments, compound) => {
+    expect(tokenizeShellEnvelope(command)).toEqual({ segments, compound });
+  });
+
+  it.each([
+    "sh -c 'pnpm test; echo done'",
+    "sh -c 'pnpm test || pnpm vitest'",
+    "sh -c 'pnpm test | tee results'",
+    "sh -c 'pnpm test > results'",
+    "sh -c 'pnpm test $(echo nope)'",
+    "sh -c 'pnpm test &&'",
+    "sh -c ''",
+    "fish -c 'pnpm test'",
+    "sh -c 'pnpm test' trailing"
+  ])("rejects unbounded shell envelopes: %s", (command) => {
+    expect(tokenizeShellEnvelope(command)).toBeNull();
+  });
+});
 
 describe("tokenizeSimpleCommand", () => {
   it.each([

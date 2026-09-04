@@ -10,7 +10,7 @@ test("one-use bootstrap opens the evidence ledger, filters it, and expires on re
   const checkpoint = requestLifecycle.checkpoint();
   await page.getByRole("button", { name: "Apply filters" }).click();
   await expect(page).toHaveURL(/status=completed/);
-  await expect(page.getByText("Latest likely test: passed · 1 previous failure")).toBeVisible();
+  await expect(page.getByText("Test-bearing commands: latest passed, previous failures 1")).toBeVisible();
   await requestLifecycle.waitForTerminal(checkpoint, {
     method: "GET",
     origin: productionUi.origin,

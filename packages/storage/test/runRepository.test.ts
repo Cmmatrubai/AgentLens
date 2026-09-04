@@ -238,6 +238,51 @@ function derivedInput(
   };
 }
 
+function versionedDerivedInput(
+  kind: "test.command" | "test.result",
+  version: "1" | "2" | "3"
+): AppendDerivedEventInput {
+  const digest = createHash("sha256");
+  for (const value of [runId, "source-event", "test-command", version, kind]) {
+    const bytes = Buffer.from(value, "utf8");
+    digest.update(`${bytes.byteLength}:`, "utf8");
+    digest.update(bytes);
+  }
+  const identity = `agentlens-derivation-sha256:${digest.digest("hex")}`;
+  const isResult = kind === "test.result";
+  return {
+    identity,
+    sourceEventId: "source-event",
+    eventId: `drv_${identity.slice("agentlens-derivation-sha256:".length)}`,
+    receivedAt: "2026-08-26T20:00:01.000Z",
+    kind,
+    status: "completed",
+    sourceProvider: "codex-exec",
+    summary: "Versioned test derivation",
+    normalizedPayload: version === "2"
+      ? {
+          family: "pytest",
+          confidence: "high",
+          ...(isResult ? { outcome: "passed", exitCode: 0 } : {}),
+          commandShape: "direct",
+          outcomeAttribution: "source_exit",
+          derivationId: "test-command/2"
+        }
+      : {
+          family: "pytest",
+          confidence: "high",
+          ...(isResult ? { outcome: "passed", exitCode: 0 } : {}),
+          derivationId: "test-command/1"
+        },
+    derivation: {
+      name: "test-command",
+      version,
+      identity,
+      confidence: "high"
+    }
+  } as unknown as AppendDerivedEventInput;
+}
+
 function completedAssessmentNote(
   artifactRoot: string,
   content: string,
@@ -2249,6 +2294,26 @@ describe("append-only human assessment storage", () => {
 });
 
 describe("derived event identity storage", () => {
+  it("accepts only v1 and v2 test-command identities while retaining both summary records", () => {
+    const { repository, close } = setup();
+    try {
+      repository.appendEvent(event("source-event", 0, "completed"));
+      const v1 = derivedInput("test.command");
+      const v2 = versionedDerivedInput("test.command", "2");
+
+      expect(repository.appendDerivedEvent(v1).derivation?.version).toBe("1");
+      const persistedV2 = repository.appendDerivedEvent(v2);
+      expect(repository.appendDerivedEvent(v2)).toEqual(persistedV2);
+      expect(repository.getRunSummaryBatch([runId])[0]?.summaryEvents
+        .filter(({ kind }) => kind === "test.command")
+        .map(({ derivation }) => derivation?.version)).toEqual(["1", "2"]);
+      expect(() => repository.appendDerivedEvent(versionedDerivedInput("test.result", "3")))
+        .toThrow(/identity metadata|version/i);
+    } finally {
+      close();
+    }
+  });
+
   it("fills a split-write gap and makes every retry a no-op", () => {
     const { repository, close } = setup();
     try {

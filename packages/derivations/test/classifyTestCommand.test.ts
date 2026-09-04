@@ -18,7 +18,13 @@ const expected = (
     | "maven"
     | "gradle",
   confidence: "high" | "medium"
-) => ({ family, confidence, derivationVersion: "test-command/1" as const });
+) => ({
+  family,
+  confidence,
+  commandShape: "direct" as const,
+  outcomeAttribution: "source_exit" as const,
+  derivationVersion: "test-command/2" as const
+});
 
 describe("classifyTestCommand", () => {
   it.each([
@@ -56,6 +62,59 @@ describe("classifyTestCommand", () => {
     ["pnpm run test:unit", "pnpm"]
   ] as const)("classifies package-manager test scripts: %s", (command, family) => {
     expect(classify(command)).toEqual(expected(family, "medium"));
+  });
+
+  it.each([
+    ["pnpm vitest --run packages/a.test.ts", "vitest"],
+    ["pnpm exec vitest --run packages/a.test.ts", "vitest"],
+    ["npm exec vitest --run packages/a.test.ts", "vitest"],
+    ["pnpm jest --runInBand", "jest"],
+    ["pnpm exec jest --runInBand", "jest"],
+    ["npm exec jest --runInBand", "jest"]
+  ] as const)("classifies direct test-runner entry points: %s", (command, family) => {
+    expect(classify(command)).toEqual(expected(family, "high"));
+  });
+
+  it.each([
+    [
+      "/bin/zsh -lc \"rg pattern && pnpm vitest --run packages/a.test.ts\"",
+      "vitest",
+      "compound",
+      "unavailable"
+    ],
+    [
+      "/bin/zsh -lc \"pnpm vitest --run packages/a.test.ts && pnpm vitest -t 'content-free diagnostic'\"",
+      "vitest",
+      "compound",
+      "unavailable"
+    ],
+    [
+      "/bin/zsh -lc \"pnpm vitest -t 'content-free diagnostic' && pnpm typecheck\"",
+      "vitest",
+      "compound",
+      "unavailable"
+    ],
+    [
+      "/bin/zsh -lc \"pnpm vitest --run a.test.ts && pnpm vitest --run b.test.ts && pnpm typecheck && git diff --check && git status --short\"",
+      "vitest",
+      "compound",
+      "unavailable"
+    ],
+    ["/bin/zsh -lc 'pnpm test'", "pnpm", "shell_wrapped", "source_exit"],
+    [
+      "/bin/zsh -lc \"pnpm vitest --run a.test.ts && pnpm vitest --run b.test.ts && pnpm typecheck && git diff --check\"",
+      "vitest",
+      "compound",
+      "unavailable"
+    ]
+  ] as const)("classifies the sanitized T01-A1 shell envelope: %s", (command, family, commandShape, outcomeAttribution) => {
+    expect(classify(command)).toEqual({
+      family,
+      confidence: "high",
+      commandShape,
+      outcomeAttribution,
+      derivationVersion: "test-command/2"
+    });
   });
 
   it.each([

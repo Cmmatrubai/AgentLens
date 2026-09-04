@@ -12,12 +12,17 @@ export function providerText(run: RunListItemV1): string {
 
 export function likelyTestsText(run: RunListItemV1): string {
   const tests = run.summary.likelyTests;
-  if (tests.state === "none_detected") return "Likely tests: none detected";
+  if (tests.state === "none_detected") return "Test-bearing commands: none detected";
   if (tests.state === "unavailable_due_to_capture_policy") {
-    return "Likely tests: unavailable due to capture policy";
+    return "Test-bearing commands: unavailable due to capture policy";
   }
   const failures = tests.attempts.previousFailures;
-  return `Latest likely test: ${tests.attempts.latest} · ${failures} previous ${failures === 1 ? "failure" : "failures"}`;
+  const attributionUnavailable = tests.derivationId === "test-command/2" && tests.testCommandDetails.some(
+    (detail) => detail.outcomeAttribution === "unavailable"
+  );
+  return `Test-bearing commands: latest ${tests.attempts.latest}, previous failures ${failures}${
+    attributionUnavailable ? " · individual test outcome unavailable" : ""
+  }`;
 }
 
 export function reviewText(run: RunListItemV1, includeProvenance = false): string {
