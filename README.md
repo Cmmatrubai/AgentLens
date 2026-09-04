@@ -39,7 +39,7 @@ A final diff shows **what changed**. AgentLens preserves how the run unfolded—
 
 ## Product direction
 
-*UI concept preview. This mock-data prototype defines the production Task 7 direction; the CLI remains the current interface. The screenshot is not production UI or real product telemetry.*
+*UI concept preview. This mock-data prototype is a design reference only; the image is not production UI or real product telemetry. The implemented loopback UI is a separate, evidence-backed local interface.*
 
 ![AgentLens trajectory concept showing separate observed, derived, Git, recorder, and human evidence](./docs/assets/agentlens-trajectory-concept.jpg)
 
@@ -74,11 +74,13 @@ Implemented in the current source tree:
 - **Codex run capture** for the exact `codex exec --json` path.
 - **Append-only run evidence** in local SQLite plus content-addressed, redacted artifacts.
 - **Three capture policies:** `standard`, `metadata-only`, and `strict`.
+- **Approved usage counters:** under `standard`, preserve only the five approved provider-emitted nonnegative safe-integer counters—input, cached input, output, reasoning output, and cache-write input. `metadata-only` and `strict` continue to omit content.
 - **Git before/after evidence** from a clean repository, including tracked final diff and untracked-file metadata.
 - **Run review commands:** `runs`, `inspect`, structured `--json`, and explicit `--native` inspection.
-- **Conservative likely-test evidence** for supported exact command forms, with source relationships and attempt history.
+- **Conservative test-bearing evidence** for direct and bounded shell forms, with source relationships and attempt history. Supported compounds are detected without assigning the aggregate shell exit status to an individual test.
 - **Explicit human assessment** with `success`, `partial`, `failure`, or `unreviewed` verdicts kept separate from task-completion judgment.
 - **Read-only diagnostics** through `doctor`.
+- **Loopback run UI** through `ui`, with bounded trajectories, an evidence inspector, retryable active-snapshot recovery, and a single final-page auto-fill when a completed run has at most one page remaining.
 - **Lifecycle hardening** for interruption, process-group cleanup, abandoned-run recovery, bounded stream ingestion, and crash-gap derivation repair.
 
 ## Quick start
@@ -134,6 +136,7 @@ pnpm agentlens inspect <run-id> --json
 | `pnpm agentlens inspect RUN_ID [--data-root PATH] [--json] [--native]` | Inspect one run, its chronological evidence, summary, Git facts, and current assessment. |
 | `pnpm agentlens assess RUN_ID --verdict VERDICT [--task-completed yes\|no\|uncertain] [--note TEXT] [--data-root PATH] [--json]` | Append a human assessment and update its current projection. |
 | `pnpm agentlens doctor [--data-root PATH] [--json]` | Diagnose local storage, Codex, process-group, and loopback readiness without repairing state. |
+| `pnpm agentlens ui [--data-root PATH] [--no-open]` | Serve the authenticated local run ledger and evidence inspector on loopback. |
 
 Example human review:
 
@@ -179,6 +182,7 @@ AgentLens is designed as evidence infrastructure, so failure behavior and inform
 - Interruption uses bounded termination with process-group cleanup on POSIX systems; resistant groups escalate from `SIGTERM` to `SIGKILL`.
 - Finalization repairs eligible derivation gaps idempotently and records recoveries for open provider events.
 - `runs` and `inspect` use immutable read-only database access, do not migrate or recover state, and fail closed when a WAL is present.
+- The loopback UI reads bounded local projections. Active snapshots fail closed when a safe read is unavailable, and the client retries only the typed retryable refusal.
 - Git collection refuses configured external filters, requires a clean starting worktree, and labels tracked diff separately from untracked metadata.
 
 ### Privacy
@@ -199,7 +203,7 @@ The current Codex adapter does **not** claim authoritative source timestamps, co
 Other intentional boundaries:
 
 - only `codex exec --json` is accepted by the recorder today;
-- likely-test classification is deliberately conservative and rejects compound/dynamic shell shapes;
+- test-bearing command classification is deliberately conservative: it accepts only direct commands and bounded shell envelopes, keeps supported compound outcomes individually unavailable, and rejects dynamic shell shapes;
 - passing likely-test evidence never creates a human verdict or a task-success claim;
 - independently detached descendants are outside the recorder's owned process-group guarantee;
 - the CLI read path favors fail-closed purity over live-WAL inspection;
@@ -211,7 +215,7 @@ Other intentional boundaries:
 |---|---|---|
 | Codex `exec --json` recorder | **Available** | Current capture adapter; recording starts from a clean Git worktree. |
 | Evidence, Git, derivation, and assessment CLI | **Available** | `runs` and `inspect` remain non-mutating; likely tests are evidence, not grading. |
-| Production local UI | **Task 7 — in progress** | Storage/application groundwork is underway; the CLI remains the current usable interface. |
+| Production local UI | **Available** | Loopback-only run ledger, trajectory, inspector, Git evidence, and assessment presentation; bounded local reads retain explicit availability limits. |
 | AGY / Claude adapters | **Planned** | No AGY or Claude capture adapter is implemented. |
 | Controlled comparisons / Insights | **Roadmap** | Benchmark Cases, comparison workflows, and the Insight Layer are not implemented. |
 
@@ -222,7 +226,7 @@ The production UI direction is documented in the [Task 7 design](./docs/superpow
 The long-term direction is staged so each layer earns the next one with real evidence:
 
 1. **Single-run observability and evaluation — current.** Record Codex runs, preserve provenance, derive conservative test evidence, and support explicit human review.
-2. **Polished local UI and dogfooding — next.** Build the loopback-only run ledger, execution trajectory, evidence inspector, Git review, and assessment workflow; then use it on real AgentLens development runs.
+2. **Local UI and dogfooding — current implementation.** The loopback-only run ledger, execution trajectory, evidence inspector, Git review, and assessment presentation are available for local runs.
 3. **Multi-provider capture.** Add Codex + AGY capture, then Claude, while exposing provider capabilities instead of forcing false feature parity.
 4. **Controlled same-task comparisons.** Compare providers only when task, repository state, capture conditions, and evidence semantics are controlled.
 5. **Benchmark Case and repeated attempts.** Treat one task definition plus repeated runs as a durable case—not as a leaderboard shortcut.
