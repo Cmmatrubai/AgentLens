@@ -209,6 +209,17 @@ function clientForEmptyDetail(runId: string): AgentLensApiClient {
 }
 
 describe("production run ledger", () => {
+  it("renders the compact Flight Console shell without weakening landmarks", async () => {
+    renderApp(clientWithList(vi.fn(async () => page([]))));
+
+    expect(screen.getByLabelText("AgentLens Flight Console")).toBeVisible();
+    expect(screen.getByRole("navigation", { name: "Primary navigation" }))
+      .toHaveTextContent("Runs");
+    expect(screen.getByText("Flight Console")).toBeVisible();
+    expect(screen.getByText("Local only")).toBeVisible();
+    expect(document.querySelectorAll("main")).toHaveLength(1);
+  });
+
   it("renders the maximum contract-valid timestamp without crashing", async () => {
     const item = run("maximum-date", { state: "known", value: "completed" }, {
       startedAt: maximumEcmaScriptTimestamp,
