@@ -10,7 +10,7 @@
   --border: #283139;
   --text: #e7ecef;
   --text-muted: #8b969e;
-  --text-dim: #626e76;
+  --text-dim: #76828b;
   --evidence-observed: #70cbd0;
   --evidence-derived: #d8ae65;
   --evidence-git: #9aa5ff;
@@ -30,7 +30,7 @@
   --trajectory-row-expanded: 132px;
   --tween-fast: 120ms;
   --tween-standard: 180ms;
-  --selection-duration: var(--tween-standard);
+  --selection-duration: 150ms;
   --cyan: var(--evidence-observed);
   --amber: var(--status-warning);
   --coral: var(--status-danger);
