@@ -232,7 +232,8 @@ describe("closed v1 browser schemas", () => {
       reason: "provider_capability",
       origin: null,
       supportingEventIds: [],
-      supportingArtifactIds: []
+      supportingArtifactIds: [],
+      omittedSupportingEventIds: 0
     })).toThrow();
   });
 
