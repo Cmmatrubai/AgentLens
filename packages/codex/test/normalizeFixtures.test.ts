@@ -47,12 +47,12 @@ describe("Codex sanitized lifecycle fixtures", () => {
       source: { eventType: "turn.completed" },
       normalizedPayload: {
         eventType: "turn.completed",
-        usage: {
-          input_tokens: 101,
-          cached_input_tokens: 11,
-          output_tokens: 202,
-          reasoning_output_tokens: 31,
-          cache_write_input_tokens: 7
+        usageCounters: {
+          input: 101,
+          cachedInput: 11,
+          output: 202,
+          reasoningOutput: 31,
+          cacheWriteInput: 7
         }
       }
     });

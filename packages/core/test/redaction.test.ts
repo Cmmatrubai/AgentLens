@@ -241,6 +241,32 @@ describe("JSON redaction", () => {
     expect(JSON.stringify(result.redacted)).toMatch(/hmac-sha256:[0-9a-f]{32}/);
   });
 
+  it("continues to redact numeric and string token-named native fields", () => {
+    const result = redactJson(
+      {
+        usage: {
+          total_tokens: 990000009,
+          access_token: 880000008,
+          refresh_token: "UNAPPROVED_SECRET_VALUE"
+        }
+      },
+      {
+        policy: "standard",
+        key: Buffer.alloc(32, 0x41),
+        contentClass: "native",
+        runId: "run-token-named-native-fields"
+      }
+    );
+
+    expect(result.storage).toBe("content");
+    if (result.storage !== "content") throw new Error("expected redacted JSON content");
+    const serialized = result.redactedBytes.copy().toString("utf8");
+    expect(serialized).not.toContain("990000009");
+    expect(serialized).not.toContain("880000008");
+    expect(serialized).not.toContain("UNAPPROVED_SECRET_VALUE");
+    expect(result.audits).toEqual([{ reason: "json-token", count: 3 }]);
+  });
+
   it("excludes the containing native object when it declares a sensitive path", () => {
     const result = redactJson(
       {

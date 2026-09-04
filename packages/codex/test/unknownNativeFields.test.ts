@@ -303,6 +303,71 @@ describe("Codex evidence-preserving normalization", () => {
     expect(draft?.normalizedPayload).not.toHaveProperty("exitCode");
   });
 
+  it("projects only approved nonnegative safe-integer turn usage counters", () => {
+    const [draft] = normalizeCodexRecord({
+      type: "turn.completed",
+      usage: {
+        input_tokens: 11,
+        cached_input_tokens: 3,
+        output_tokens: 7,
+        reasoning_output_tokens: 2,
+        cache_write_input_tokens: 5,
+        total_tokens: 123456789,
+        access_token: 987654321,
+        refresh_token: "UNAPPROVED_SECRET_VALUE",
+        future_numeric_usage: 42,
+        negative_usage: -1,
+        fractional_usage: 0.5,
+        nan_equivalent_usage: null,
+        unsafe_usage: Number.MAX_SAFE_INTEGER + 1
+      }
+    });
+
+    expect(draft?.normalizedPayload).toMatchObject({
+      usageCounters: {
+        input: 11,
+        cachedInput: 3,
+        output: 7,
+        reasoningOutput: 2,
+        cacheWriteInput: 5
+      }
+    });
+    expect(draft?.normalizedPayload).not.toHaveProperty("usageCounters.total");
+    expect(draft?.normalizedPayload).not.toHaveProperty("usageCounters.access");
+    expect(draft?.nativePayload).toMatchObject({
+      usage: {
+        total_tokens: 123456789,
+        access_token: 987654321,
+        refresh_token: "UNAPPROVED_SECRET_VALUE",
+        future_numeric_usage: 42
+      }
+    });
+  });
+
+  it("omits usage counters when no approved turn usage value is a nonnegative safe integer", () => {
+    const [draft] = normalizeCodexRecord({
+      type: "turn.completed",
+      usage: {
+        input_tokens: -1,
+        cached_input_tokens: 0.5,
+        output_tokens: null,
+        reasoning_output_tokens: Number.MAX_SAFE_INTEGER + 1,
+        cache_write_input_tokens: -2
+      }
+    });
+
+    expect(draft?.normalizedPayload).not.toHaveProperty("usageCounters");
+  });
+
+  it("omits usage counters when the turn usage object has no approved keys", () => {
+    const [draft] = normalizeCodexRecord({
+      type: "turn.completed",
+      usage: { total_tokens: 123456789, future_numeric_usage: 42 }
+    });
+
+    expect(draft?.normalizedPayload).not.toHaveProperty("usageCounters");
+  });
+
   it("re-exports the frozen core Codex capability object as one source of truth", () => {
     expect(codexExecCapabilities).toBe(coreCodexExecCapabilities);
     expect(codexExecCapabilities).toEqual({

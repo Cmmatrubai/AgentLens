@@ -138,6 +138,40 @@ async function installCommandFixture(
   await chmod(executable, 0o700);
 }
 
+const usageCounterFixtureUsage = {
+  input_tokens: 110000001,
+  cached_input_tokens: 330000003,
+  output_tokens: 770000007,
+  reasoning_output_tokens: 220000002,
+  cache_write_input_tokens: 550000005,
+  total_tokens: 990000009,
+  access_token: 880000008,
+  refresh_token: "UNAPPROVED_SECRET_VALUE",
+  future_numeric_usage: 440000004
+};
+
+async function installUsageCounterFixture(root: string): Promise<void> {
+  const records = [
+    { type: "thread.started", thread_id: "fixture-thread" },
+    { type: "turn.started", thread_id: "fixture-thread", turn_id: "fixture-turn" },
+    {
+      type: "turn.completed",
+      thread_id: "fixture-thread",
+      turn_id: "fixture-turn",
+      usage: usageCounterFixtureUsage
+    }
+  ];
+  const source = [
+    "#!/usr/bin/env node",
+    `const records = ${JSON.stringify(records)};`,
+    "for (const record of records) process.stdout.write(JSON.stringify(record) + '\\n');",
+    ""
+  ].join("\n");
+  const executable = join(root, "bin", "codex");
+  await writeFile(executable, source, "utf8");
+  await chmod(executable, 0o700);
+}
+
 function piped(bytes: Buffer = Buffer.alloc(0)): NodeJS.ReadStream {
   return Object.assign(Readable.from([bytes]), { isTTY: false }) as unknown as NodeJS.ReadStream;
 }
@@ -620,6 +654,36 @@ describe("recordRun lifecycle", () => {
       })
     ]));
     expect(run.events.filter(({ kind }) => kind === "recorder.recovery")).toEqual([]);
+  });
+
+  it("persists only approved usage counters in standard capture", async () => {
+    const context = await fixture();
+    await installUsageCounterFixture(context.root);
+    const result = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: context.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--usage-counter-fixture"]
+      },
+      { cwd: context.repo, stdin: piped(), env: context.env, stdout: silentOutput }
+    );
+    const event = detail(context.dataRoot, result.runId).events.find(({ kind, provenance }) =>
+      kind === "turn.completed" && provenance === "observed"
+    );
+
+    expect(event?.normalizedPayload).toMatchObject({
+      usageCounters: {
+        input: 110000001,
+        cachedInput: 330000003,
+        output: 770000007,
+        reasoningOutput: 220000002,
+        cacheWriteInput: 550000005
+      }
+    });
+    expect(event?.normalizedPayload).not.toHaveProperty("usageCounters.total");
+    expect(event?.normalizedPayload).not.toHaveProperty("usageCounters.access");
+    expect(JSON.stringify(event?.nativePayload)).not.toContain("UNAPPROVED_SECRET_VALUE");
   });
 
   it("keeps provider completion and a nonzero process exit as separate contradictory facts", async () => {

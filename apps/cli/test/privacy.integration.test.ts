@@ -79,6 +79,40 @@ async function installPrivacyCommandFixture(root: string, command: string): Prom
   await chmod(executable, 0o700);
 }
 
+const usageCounterFixtureUsage = {
+  input_tokens: 110000001,
+  cached_input_tokens: 330000003,
+  output_tokens: 770000007,
+  reasoning_output_tokens: 220000002,
+  cache_write_input_tokens: 550000005,
+  total_tokens: 990000009,
+  access_token: 880000008,
+  refresh_token: "UNAPPROVED_SECRET_VALUE",
+  future_numeric_usage: 440000004
+};
+
+async function installUsageCounterFixture(root: string): Promise<void> {
+  const records = [
+    { type: "thread.started", thread_id: "fixture-thread" },
+    { type: "turn.started", thread_id: "fixture-thread", turn_id: "fixture-turn" },
+    {
+      type: "turn.completed",
+      thread_id: "fixture-thread",
+      turn_id: "fixture-turn",
+      usage: usageCounterFixtureUsage
+    }
+  ];
+  const source = [
+    "#!/usr/bin/env node",
+    `const records = ${JSON.stringify(records)};`,
+    "for (const record of records) process.stdout.write(JSON.stringify(record) + '\\n');",
+    ""
+  ].join("\n");
+  const executable = join(root, "bin", "codex");
+  await writeFile(executable, source, "utf8");
+  await chmod(executable, 0o700);
+}
+
 async function durableBytes(root: string): Promise<Buffer> {
   const entries = await readdir(root, { recursive: true, withFileTypes: true });
   const files = entries.filter((entry) => entry.isFile());
@@ -104,6 +138,66 @@ afterEach(async () => {
 });
 
 describe("recorder privacy and artifact durability", () => {
+  it("preserves approved usage counters only in standard capture", async () => {
+    const standard = await fixture();
+    await installUsageCounterFixture(standard.root);
+    const standardResult = await recordRun(
+      {
+        name: "record",
+        capture: "standard",
+        dataRoot: standard.dataRoot,
+        childArgs: ["codex", "exec", "--json", "--usage-counter-fixture"]
+      },
+      { cwd: standard.repo, stdin: piped(""), env: standard.env, stdout: silentOutput }
+    );
+    const standardEvent = detail(standard.dataRoot, standardResult.runId).events.find(
+      ({ kind, provenance }) => kind === "turn.completed" && provenance === "observed"
+    );
+
+    expect(standardEvent?.normalizedPayload).toMatchObject({
+      usageCounters: {
+        input: 110000001,
+        cachedInput: 330000003,
+        output: 770000007,
+        reasoningOutput: 220000002,
+        cacheWriteInput: 550000005
+      }
+    });
+    expect(JSON.stringify(standardEvent?.nativePayload)).not.toContain("UNAPPROVED_SECRET_VALUE");
+
+    for (const capture of ["metadata-only", "strict"] as const) {
+      const restrictive = await fixture();
+      await installUsageCounterFixture(restrictive.root);
+      const restrictiveResult = await recordRun(
+        {
+          name: "record",
+          capture,
+          dataRoot: restrictive.dataRoot,
+          childArgs: ["codex", "exec", "--json", "--usage-counter-fixture"]
+        },
+        { cwd: restrictive.repo, stdin: piped(""), env: restrictive.env, stdout: silentOutput }
+      );
+      const event = detail(restrictive.dataRoot, restrictiveResult.runId).events.find(
+        ({ kind, provenance }) => kind === "turn.completed" && provenance === "observed"
+      );
+      const durable = await durableBytes(restrictive.dataRoot);
+
+      expect(event?.normalizedPayload).toEqual({ eventType: "turn.completed" });
+      expect(event?.normalizedPayload).not.toHaveProperty("usageCounters");
+      for (const sentinel of [
+        "110000001",
+        "330000003",
+        "770000007",
+        "220000002",
+        "550000005",
+        "990000009",
+        "880000008",
+        "440000004",
+        "UNAPPROVED_SECRET_VALUE"
+      ]) expect(durable.includes(Buffer.from(sentinel))).toBe(false);
+    }
+  });
+
   it("persists a content-free placeholder for an invalid UTF-8 Git index path", async () => {
     const context = await fixture();
     const rawName = Buffer.concat([

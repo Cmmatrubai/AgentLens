@@ -8,6 +8,25 @@ import { freezeDeep, type CodexRecord } from "./lineDecoder.js";
 
 type JsonObject = Record<string, unknown>;
 
+export interface CodexUsageCountersV1 {
+  readonly input?: number;
+  readonly cachedInput?: number;
+  readonly output?: number;
+  readonly reasoningOutput?: number;
+  readonly cacheWriteInput?: number;
+}
+
+const USAGE_COUNTER_SOURCES: readonly (readonly [
+  source: string,
+  destination: keyof CodexUsageCountersV1
+])[] = [
+  ["input_tokens", "input"],
+  ["cached_input_tokens", "cachedInput"],
+  ["output_tokens", "output"],
+  ["reasoning_output_tokens", "reasoningOutput"],
+  ["cache_write_input_tokens", "cacheWriteInput"]
+];
+
 const ITEM_KINDS: Readonly<Record<string, string>> = {
   agent_message: "message.agent",
   reasoning: "reasoning.summary",
@@ -34,6 +53,23 @@ function asObject(value: unknown): JsonObject | undefined {
     return undefined;
   }
   return value as JsonObject;
+}
+
+function usageCounters(value: unknown): CodexUsageCountersV1 | undefined {
+  const usage = asObject(value);
+  if (!usage) return undefined;
+
+  const counters: {
+    -readonly [Key in keyof CodexUsageCountersV1]?: number;
+  } = {};
+  for (const [source, destination] of USAGE_COUNTER_SOURCES) {
+    const candidate = usage[source];
+    if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0) {
+      counters[destination] = candidate;
+    }
+  }
+
+  return Object.keys(counters).length > 0 ? counters : undefined;
 }
 
 function presentString(
@@ -233,9 +269,8 @@ function eventDraft(record: JsonObject, eventType: string): EventDraftV1 | undef
         summary: "Codex turn started"
       };
     case "turn.completed": {
-      if (Object.prototype.hasOwnProperty.call(record, "usage")) {
-        payload.usage = record.usage;
-      }
+      const counters = usageCounters(record.usage);
+      if (counters) payload.usageCounters = counters;
       return {
         ...base,
         kind: "turn.completed",
