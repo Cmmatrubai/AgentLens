@@ -137,6 +137,7 @@ describe("frozen event evidence contracts", () => {
       fileReads: "unavailable",
       toolOutput: "partial",
       toolDurations: "unavailable",
+      tokenUsage: "native",
       interruptionSignal: "partial"
     });
   });

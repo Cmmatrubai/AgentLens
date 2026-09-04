@@ -1154,14 +1154,22 @@ describe("bounded Task 7 storage reads", () => {
       repository.appendEvent(event("summary-file", 1, "completed", {
         kind: "file.change", source: { provider: "codex-exec", eventType: "item.completed", itemType: "file_change" }
       }));
-      repository.appendEvent(event("summary-usage", 2, "completed", {
+      repository.appendEvent(event("summary-usage-counters", 2, "completed", {
         kind: "turn.completed", source: { provider: "codex-exec", eventType: "turn.completed" },
-        normalizedPayload: { usage: { input_tokens: 4 } }
+        normalizedPayload: { usageCounters: { input: 4 } }
       }));
-      repository.appendEvent(event("summary-diagnostic", 3, "failed", {
+      repository.appendEvent(event("summary-legacy-redacted-usage", 3, "completed", {
+        kind: "turn.completed", source: { provider: "codex-exec", eventType: "turn.completed" },
+        normalizedPayload: {
+          usage: {
+            input_tokens: "[[REDACTED:json-usage:hmac-sha256:0123456789abcdef0123456789abcdef]]"
+          }
+        }
+      }));
+      repository.appendEvent(event("summary-diagnostic", 4, "failed", {
         kind: "error", provenance: "recorder", source: { provider: "codex-exec", correlationId: runId }
       }));
-      repository.appendEvent(event("summary-noise", 4, "completed", { kind: "message" }));
+      repository.appendEvent(event("summary-noise", 5, "completed", { kind: "message" }));
       const testCommand = repository.appendDerivedEvent(derivedInput("test.command"));
       const testResult = repository.appendDerivedEvent(derivedInput("test.result"));
       await repository.updateAssessment({
@@ -1179,7 +1187,7 @@ describe("bounded Task 7 storage reads", () => {
       const [summary] = repository.getRunSummaryBatch([runId]);
       expect(detail).not.toHaveBeenCalled();
       expect(summary?.summaryEvents.map(({ id }) => id)).toEqual([
-        "source-event", "summary-file", "summary-usage", "summary-diagnostic",
+        "source-event", "summary-file", "summary-usage-counters", "summary-legacy-redacted-usage", "summary-diagnostic",
         testCommand.id, testResult.id
       ]);
       expect(summary?.gitEvidence?.runId).toBe(runId);

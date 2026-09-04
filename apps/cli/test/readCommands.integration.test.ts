@@ -557,6 +557,7 @@ describe("runs and inspect", () => {
         fileReads: "unavailable",
         toolOutput: "partial",
         toolDurations: "unavailable",
+        tokenUsage: "native",
         interruptionSignal: "partial"
       }
     });

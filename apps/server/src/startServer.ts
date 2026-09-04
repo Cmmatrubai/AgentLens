@@ -48,6 +48,7 @@ const unavailableProviderCapabilities: AdapterCapabilities = Object.freeze({
   fileReads: "unavailable",
   toolOutput: "unavailable",
   toolDurations: "unavailable",
+  tokenUsage: "unavailable",
   interruptionSignal: "recorder_only"
 });
 

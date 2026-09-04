@@ -809,6 +809,31 @@ function projectLikelyTests(summary: RunSummary["likelyTests"]) {
   }
 }
 
+function projectObservedTokenUsage(summary: RunSummary["observedTokenUsage"]) {
+  if (summary.state === "available") {
+    return {
+      state: "available" as const,
+      value: {
+        inputTokens: summary.value.inputTokens,
+        cachedInputTokens: summary.value.cachedInputTokens,
+        outputTokens: summary.value.outputTokens,
+        reasoningOutputTokens: summary.value.reasoningOutputTokens,
+        cacheWriteInputTokens: summary.value.cacheWriteInputTokens
+      },
+      origin: { type: "event" as const, provenance: "observed" as const },
+      supportingEventIds: [...summary.supportingEventIds],
+      supportingArtifactIds: [...summary.supportingArtifactIds]
+    };
+  }
+  return {
+    state: "unavailable" as const,
+    reason: summary.reason,
+    origin: null,
+    supportingEventIds: [...summary.supportingEventIds],
+    supportingArtifactIds: [...summary.supportingArtifactIds]
+  };
+}
+
 export function projectRunSummaryV1(summary: RunSummary, provider: string): RunSummaryV1 {
   return runSummaryV1Schema.parse({
     terminalCommands: projectSummaryEvidence(summary.terminalCommands, provider, (value) => value, "capture_policy"),
@@ -817,13 +842,7 @@ export function projectRunSummaryV1(summary: RunSummary, provider: string): RunS
     trackedFinalDiff: projectSummaryEvidence(summary.trackedFinalDiff, provider, (value) => value, "not_captured"),
     untrackedFiles: projectSummaryEvidence(summary.untrackedFiles, provider, (value) => value, "not_captured"),
     elapsedRecorderTimeMs: projectSummaryEvidence(summary.elapsedRecorderTimeMs, provider, (value) => value, "not_captured"),
-    observedTokenUsage: projectSummaryEvidence(summary.observedTokenUsage, provider, (value) => ({
-      inputTokens: value.inputTokens,
-      cachedInputTokens: value.cachedInputTokens,
-      outputTokens: value.outputTokens,
-      reasoningOutputTokens: value.reasoningOutputTokens,
-      cacheWriteInputTokens: value.cacheWriteInputTokens
-    }), "provider_capability"),
+    observedTokenUsage: projectObservedTokenUsage(summary.observedTokenUsage),
     likelyTests: projectLikelyTests(summary.likelyTests),
     assessment: projectSummaryAssessment(summary.assessment),
     providerCapabilityLimitations: projectSummaryEvidence(

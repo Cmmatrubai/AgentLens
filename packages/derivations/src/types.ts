@@ -176,12 +176,43 @@ export interface ObservedTokenUsage {
   readonly cacheWriteInputTokens: number | null;
 }
 
+export type TokenUsageUnavailableReason =
+  | "not_yet_available"
+  | "capture_policy"
+  | "redacted_by_policy"
+  | "not_captured";
+
+interface ObservedTokenUsageSummaryBase {
+  readonly supportingEventIds: readonly string[];
+  readonly supportingArtifactIds: readonly string[];
+}
+
+export interface AvailableObservedTokenUsageSummary extends ObservedTokenUsageSummaryBase {
+  readonly state: "available";
+  readonly value: ObservedTokenUsage;
+  readonly availability: "available";
+  readonly provenance: "observed";
+}
+
+export interface UnavailableObservedTokenUsageSummary extends ObservedTokenUsageSummaryBase {
+  readonly state: "unavailable";
+  readonly value: null;
+  readonly availability: "unavailable";
+  readonly provenance: null;
+  readonly reason: TokenUsageUnavailableReason;
+}
+
+export type ObservedTokenUsageSummary =
+  | AvailableObservedTokenUsageSummary
+  | UnavailableObservedTokenUsageSummary;
+
 export type ProviderCapabilityLimitation = Readonly<{
   capability:
     | "source_timestamps"
     | "file_reads"
     | "tool_output"
     | "tool_durations"
+    | "token_usage"
     | "interruption_signal";
   availability: "partial" | "unavailable" | "recorder_only";
 }>;
@@ -258,7 +289,7 @@ export interface RunSummary {
   readonly trackedFinalDiff: SummaryEvidence<"artifact" | "absent">;
   readonly untrackedFiles: SummaryEvidence<number>;
   readonly elapsedRecorderTimeMs: SummaryEvidence<number>;
-  readonly observedTokenUsage: SummaryEvidence<ObservedTokenUsage>;
+  readonly observedTokenUsage: ObservedTokenUsageSummary;
   readonly likelyTests: LikelyTestsSummary;
   readonly assessment: HumanAssessmentSummary;
   readonly providerCapabilityLimitations: SummaryEvidence<readonly ProviderCapabilityLimitation[]>;

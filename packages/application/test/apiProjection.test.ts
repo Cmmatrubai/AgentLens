@@ -511,13 +511,20 @@ describe("browser-safe projectors", () => {
       trackedFinalDiff: available("artifact"),
       untrackedFiles: available(4),
       elapsedRecorderTimeMs: available(500),
-      observedTokenUsage: available({
-        inputTokens: 10,
-        cachedInputTokens: null,
-        outputTokens: 20,
-        reasoningOutputTokens: null,
-        cacheWriteInputTokens: null
-      }),
+      observedTokenUsage: {
+        state: "available",
+        value: {
+          inputTokens: 10,
+          cachedInputTokens: null,
+          outputTokens: 20,
+          reasoningOutputTokens: null,
+          cacheWriteInputTokens: null
+        },
+        availability: "available",
+        provenance: "observed",
+        supportingEventIds: ["exact-summary-event"],
+        supportingArtifactIds: ["exact-summary-artifact"]
+      },
       likelyTests: {
         state: "none_detected",
         availability: "available",
@@ -555,6 +562,44 @@ describe("browser-safe projectors", () => {
       supportingArtifactIds: ["exact-summary-artifact"]
     });
     expect(projected.assessment).toMatchObject({ state: "projected", provenance: null });
+    expect(projected.observedTokenUsage).toEqual({
+      state: "available",
+      value: {
+        inputTokens: 10,
+        cachedInputTokens: null,
+        outputTokens: 20,
+        reasoningOutputTokens: null,
+        cacheWriteInputTokens: null
+      },
+      origin: { type: "event", provenance: "observed" },
+      supportingEventIds: ["exact-summary-event"],
+      supportingArtifactIds: ["exact-summary-artifact"]
+    });
+    for (const reason of [
+      "not_yet_available",
+      "capture_policy",
+      "redacted_by_policy",
+      "not_captured"
+    ] as const) {
+      expect(projectRunSummaryV1({
+        ...summary,
+        observedTokenUsage: {
+          state: "unavailable",
+          value: null,
+          availability: "unavailable",
+          provenance: null,
+          reason,
+          supportingEventIds: [],
+          supportingArtifactIds: []
+        }
+      }, "codex-exec").observedTokenUsage).toEqual({
+        state: "unavailable",
+        reason,
+        origin: null,
+        supportingEventIds: [],
+        supportingArtifactIds: []
+      });
+    }
     expect(JSON.stringify(projected)).not.toContain("SENTINEL_MUST_NOT_CROSS_HTTP");
 
     const run: RunListRecord = {

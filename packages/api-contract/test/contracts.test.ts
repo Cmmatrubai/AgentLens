@@ -18,6 +18,7 @@ import {
   normalizedContentV1Schema,
   normalizedContentResponseV1Schema,
   maximumEcmaScriptTimestamp,
+  observedTokenUsageV1Schema,
   presentationClassV1Schema,
   providerFieldV1Schema,
   runGitStateV1Schema,
@@ -179,6 +180,75 @@ describe("closed v1 browser schemas", () => {
       value: null,
       reason: "capture_policy",
       origin: null,
+      supportingEventIds: [],
+      supportingArtifactIds: []
+    })).toThrow();
+  });
+
+  it("keeps observed token usage as a closed availability union", () => {
+    const available = {
+      state: "available",
+      value: {
+        inputTokens: 10,
+        cachedInputTokens: null,
+        outputTokens: 20,
+        reasoningOutputTokens: null,
+        cacheWriteInputTokens: 3
+      },
+      origin: { type: "event", provenance: "observed" },
+      supportingEventIds: ["usage-event"],
+      supportingArtifactIds: []
+    } as const;
+    expect(observedTokenUsageV1Schema.parse(available)).toEqual(available);
+
+    for (const reason of [
+      "not_yet_available",
+      "capture_policy",
+      "redacted_by_policy",
+      "not_captured"
+    ] as const) {
+      expect(observedTokenUsageV1Schema.parse({
+        state: "unavailable",
+        reason,
+        origin: null,
+        supportingEventIds: [],
+        supportingArtifactIds: []
+      })).toEqual({
+        state: "unavailable",
+        reason,
+        origin: null,
+        supportingEventIds: [],
+        supportingArtifactIds: []
+      });
+    }
+  });
+
+  it("rejects an unknown observed-token-usage reason", () => {
+    expect(() => observedTokenUsageV1Schema.parse({
+      state: "unavailable",
+      reason: "provider_capability",
+      origin: null,
+      supportingEventIds: [],
+      supportingArtifactIds: []
+    })).toThrow();
+  });
+
+  it.each([
+    ["extra counter", { extraTokens: 1 }],
+    ["negative counter", { inputTokens: -1 }],
+    ["non-integer counter", { outputTokens: 1.5 }]
+  ])("rejects %s in available observed token usage", (_name, invalidCounter) => {
+    expect(() => observedTokenUsageV1Schema.parse({
+      state: "available",
+      value: {
+        inputTokens: 1,
+        cachedInputTokens: null,
+        outputTokens: 2,
+        reasoningOutputTokens: null,
+        cacheWriteInputTokens: null,
+        ...invalidCounter
+      },
+      origin: { type: "event", provenance: "observed" },
       supportingEventIds: [],
       supportingArtifactIds: []
     })).toThrow();

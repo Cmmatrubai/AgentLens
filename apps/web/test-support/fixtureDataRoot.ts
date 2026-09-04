@@ -138,6 +138,13 @@ function finishRun(
     exitCode: number | null;
     signal: string | null;
     providerCompleted: boolean;
+    usageCounters?: Readonly<{
+      input?: number;
+      cachedInput?: number;
+      output?: number;
+      reasoningOutput?: number;
+      cacheWriteInput?: number;
+    }>;
   }>
 ): void {
   repository.markRunning(input.runId, {
@@ -170,7 +177,10 @@ function finishRun(
       sequence: input.sequence + 1,
       kind: input.exitCode === 0 ? "turn.completed" : "turn.failed",
       status: input.exitCode === 0 ? "completed" : "failed",
-      summary: input.exitCode === 0 ? "Provider reported completion" : "Provider reported failure"
+      summary: input.exitCode === 0 ? "Provider reported completion" : "Provider reported failure",
+      ...(input.usageCounters === undefined ? {} : {
+        normalizedPayload: { usageCounters: input.usageCounters }
+      })
     }));
   }
   repository.reconcileRun(input.runId, {
@@ -300,7 +310,14 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     sequence,
     exitCode: 0,
     signal: null,
-    providerCompleted: true
+    providerCompleted: true,
+    usageCounters: {
+      input: 101,
+      cachedInput: 11,
+      output: 202,
+      reasoningOutput: 31,
+      cacheWriteInput: 7
+    }
   });
   const statusInitial = await completedArtifact(
     dataRoot, completedId, "git-initial-status", "text/plain", ""

@@ -13,6 +13,10 @@ import { ecmaScriptTimestampV1Schema } from "./time.js";
 
 const boundedId = z.string().min(1).max(256);
 const nonnegativeInteger = z.number().int().nonnegative();
+const evidenceIds = {
+  supportingEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
+  supportingArtifactIds: z.array(boundedId).max(1_000)
+};
 
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
@@ -36,13 +40,36 @@ export const browserAddressableRunIdV1Schema = z.string()
     "Run ID must be canonical UTF-8 without Unicode controls or URL dot segments."
   );
 
-export const observedTokenUsageV1Schema = z.object({
+export const observedTokenUsageCountersV1Schema = z.object({
   inputTokens: nonnegativeInteger.nullable(),
   cachedInputTokens: nonnegativeInteger.nullable(),
   outputTokens: nonnegativeInteger.nullable(),
   reasoningOutputTokens: nonnegativeInteger.nullable(),
   cacheWriteInputTokens: nonnegativeInteger.nullable()
 }).strict();
+
+export const observedTokenUsageV1Schema = z.discriminatedUnion("state", [
+  z.object({
+    state: z.literal("available"),
+    value: observedTokenUsageCountersV1Schema,
+    origin: z.object({
+      type: z.literal("event"),
+      provenance: z.literal("observed")
+    }).strict(),
+    ...evidenceIds
+  }).strict(),
+  z.object({
+    state: z.literal("unavailable"),
+    reason: z.enum([
+      "not_yet_available",
+      "capture_policy",
+      "redacted_by_policy",
+      "not_captured"
+    ]),
+    origin: z.null(),
+    ...evidenceIds
+  }).strict()
+]);
 
 export const providerCapabilityLimitationV1Schema = z.object({
   capability: z.enum([
@@ -54,11 +81,6 @@ export const providerCapabilityLimitationV1Schema = z.object({
   ]),
   availability: z.enum(["partial", "unavailable", "recorder_only"])
 }).strict();
-
-const evidenceIds = {
-  supportingEventIds: z.array(browserAddressableEventIdV1Schema).max(1_000),
-  supportingArtifactIds: z.array(boundedId).max(1_000)
-};
 
 export const likelyTestsV1Schema = z.discriminatedUnion("state", [
   z.object({
@@ -105,7 +127,7 @@ export const runSummaryV1Schema = z.object({
   trackedFinalDiff: evidenceValueV1Schema(z.enum(["artifact", "absent"])),
   untrackedFiles: evidenceValueV1Schema(nonnegativeInteger),
   elapsedRecorderTimeMs: evidenceValueV1Schema(nonnegativeInteger),
-  observedTokenUsage: evidenceValueV1Schema(observedTokenUsageV1Schema),
+  observedTokenUsage: observedTokenUsageV1Schema,
   likelyTests: likelyTestsV1Schema,
   assessment: currentAssessmentV1Schema,
   providerCapabilityLimitations: evidenceValueV1Schema(
@@ -214,6 +236,7 @@ export const runDetailV1Schema = z.object({
 }).strict();
 
 export type ObservedTokenUsageV1 = z.infer<typeof observedTokenUsageV1Schema>;
+export type ObservedTokenUsageCountersV1 = z.infer<typeof observedTokenUsageCountersV1Schema>;
 export type ProviderCapabilityLimitationV1 = z.infer<typeof providerCapabilityLimitationV1Schema>;
 export type LikelyTestsV1 = z.infer<typeof likelyTestsV1Schema>;
 export type RunSummaryV1 = z.infer<typeof runSummaryV1Schema>;

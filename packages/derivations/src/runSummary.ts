@@ -13,6 +13,7 @@ import type {
   LikelyTestsDetectedSummary,
   LikelyTestsSummary,
   ObservedTokenUsage,
+  ObservedTokenUsageSummary,
   ProviderCapabilityLimitation,
   RunSummary,
   RunSummaryGitReference,
@@ -120,9 +121,39 @@ function trackedFinalDiff(
   return unavailableEvidence("git_recovered");
 }
 
-function observedTokenUsage(
-  events: readonly TraceEventV1[]
-): SummaryEvidence<ObservedTokenUsage> {
+const TOKEN_USAGE_COUNTER_KEYS = [
+  ["inputTokens", "input"],
+  ["cachedInputTokens", "cachedInput"],
+  ["outputTokens", "output"],
+  ["reasoningOutputTokens", "reasoningOutput"],
+  ["cacheWriteInputTokens", "cacheWriteInput"]
+] as const;
+
+const LEGACY_TOKEN_USAGE_KEYS = [
+  "input_tokens",
+  "cached_input_tokens",
+  "output_tokens",
+  "reasoning_output_tokens",
+  "cache_write_input_tokens"
+] as const;
+
+const LEGACY_REDACTION_MARKER = /^\[\[REDACTED:[a-z0-9_-]+(?::hmac-sha256:[a-f0-9]{32})?\]\]$/;
+
+function legacyUsageHasRedactionMarker(event: TraceEventV1): boolean {
+  let usage: Readonly<Record<string, unknown>> | undefined;
+  try {
+    usage = asObject(asObject(event.normalizedPayload)?.usage);
+  } catch {
+    usage = undefined;
+  }
+  if (usage === undefined) return false;
+  return LEGACY_TOKEN_USAGE_KEYS.some((key) => {
+    const value = usage[key];
+    return typeof value === "string" && LEGACY_REDACTION_MARKER.test(value);
+  });
+}
+
+function observedTokenUsage(input: RunSummaryInput): ObservedTokenUsageSummary {
   const totals: Record<keyof ObservedTokenUsage, number | null> = {
     inputTokens: null,
     cachedInputTokens: null,
@@ -130,38 +161,77 @@ function observedTokenUsage(
     reasoningOutputTokens: null,
     cacheWriteInputTokens: null
   };
-  const keys = [
-    ["inputTokens", "input_tokens"],
-    ["cachedInputTokens", "cached_input_tokens"],
-    ["outputTokens", "output_tokens"],
-    ["reasoningOutputTokens", "reasoning_output_tokens"],
-    ["cacheWriteInputTokens", "cache_write_input_tokens"]
-  ] as const;
   const supportingEventIds: string[] = [];
 
-  for (const event of [...events].sort(compareChronology)) {
-    if (event.provenance !== "observed" || event.kind !== "turn.completed") continue;
-    let usage: Readonly<Record<string, unknown>> | undefined;
+  if (input.run.capturePolicy !== "standard") {
+    return {
+      state: "unavailable",
+      value: null,
+      availability: "unavailable",
+      provenance: null,
+      reason: "capture_policy",
+      supportingEventIds: [],
+      supportingArtifactIds: []
+    };
+  }
+
+  const observedTurnCompletions = [...input.events]
+    .sort(compareChronology)
+    .filter((event) => event.provenance === "observed" && event.kind === "turn.completed");
+
+  for (const event of observedTurnCompletions) {
+    let usageCounters: Readonly<Record<string, unknown>> | undefined;
     try {
-      usage = asObject(asObject(event.normalizedPayload)?.usage);
+      usageCounters = asObject(asObject(event.normalizedPayload)?.usageCounters);
     } catch {
-      usage = undefined;
+      usageCounters = undefined;
     }
-    if (!usage) continue;
 
     let observed = false;
-    for (const [target, source] of keys) {
-      const value = usage[source];
-      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) continue;
-      totals[target] = (totals[target] ?? 0) + value;
+    for (const [target, source] of TOKEN_USAGE_COUNTER_KEYS) {
+      const value = usageCounters?.[source];
+      if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) continue;
+      const next = (totals[target] ?? 0) + value;
+      if (!Number.isSafeInteger(next)) continue;
+      totals[target] = next;
       observed = true;
     }
     if (observed) supportingEventIds.push(event.id);
   }
 
-  return supportingEventIds.length === 0
-    ? unavailableEvidence()
-    : availableEvidence({ ...totals }, "observed", supportingEventIds);
+  if (supportingEventIds.length > 0) {
+    return {
+      state: "available",
+      value: { ...totals },
+      availability: "available",
+      provenance: "observed",
+      supportingEventIds,
+      supportingArtifactIds: []
+    };
+  }
+  const redactedEventIds = observedTurnCompletions
+    .filter(legacyUsageHasRedactionMarker)
+    .map(({ id }) => id);
+  if (redactedEventIds.length > 0) {
+    return {
+      state: "unavailable",
+      value: null,
+      availability: "unavailable",
+      provenance: null,
+      reason: "redacted_by_policy",
+      supportingEventIds: redactedEventIds,
+      supportingArtifactIds: []
+    };
+  }
+  return {
+    state: "unavailable",
+    value: null,
+    availability: "unavailable",
+    provenance: null,
+    reason: input.run.endedAt === null ? "not_yet_available" : "not_captured",
+    supportingEventIds: [],
+    supportingArtifactIds: []
+  };
 }
 
 function capabilityLimitations(
@@ -179,6 +249,9 @@ function capabilityLimitations(
   }
   if (input.toolDurations !== "native") {
     limitations.push({ capability: "tool_durations", availability: input.toolDurations });
+  }
+  if (input.tokenUsage !== "native") {
+    limitations.push({ capability: "token_usage", availability: input.tokenUsage });
   }
   if (input.interruptionSignal !== "native") {
     limitations.push({
@@ -549,7 +622,7 @@ export function summarizeRun(input: RunSummaryInput): RunSummary {
           [validatedUntracked.artifactId]
         ),
     elapsedRecorderTimeMs: elapsed,
-    observedTokenUsage: observedTokenUsage(input.events),
+    observedTokenUsage: observedTokenUsage(input),
     likelyTests: likelyTests(input),
     assessment: assessment(input.currentAssessment),
     providerCapabilityLimitations: availableEvidence(

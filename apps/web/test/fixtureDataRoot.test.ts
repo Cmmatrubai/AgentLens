@@ -45,11 +45,23 @@ describe("browser fixture data", () => {
           fileReads: "unavailable",
           toolOutput: "partial",
           toolDurations: "unavailable",
+          tokenUsage: "native",
           interruptionSignal: "partial"
         }
       });
       expect(summary.terminalCommands.value).toBe(2);
       expect(summary.failedTerminalCommands.value).toBe(1);
+      expect(summary.observedTokenUsage).toMatchObject({
+        state: "available",
+        value: {
+          inputTokens: 101,
+          cachedInputTokens: 11,
+          outputTokens: 202,
+          reasoningOutputTokens: 31,
+          cacheWriteInputTokens: 7
+        },
+        supportingEventIds: ["fixture-completed-recovery-provider-terminal"]
+      });
       expect(summary.likelyTests).toMatchObject({
         state: "detected",
         attempts: { total: 2, latest: "passed", previousFailures: 1 }

@@ -3,6 +3,7 @@ import type {
   CapturePolicy,
   TraceEventV1
 } from "@agentlens/core";
+import { codexExecCapabilities } from "@agentlens/core";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -19,6 +20,7 @@ const providerCapabilities: AdapterCapabilities = {
   fileReads: "unavailable",
   toolOutput: "partial",
   toolDurations: "unavailable",
+  tokenUsage: "native",
   interruptionSignal: "partial"
 };
 
@@ -155,12 +157,12 @@ describe("run summary evidence fields", () => {
       sequence: 4,
       kind: "turn.completed",
       normalizedPayload: {
-        usage: {
-          input_tokens: 101,
-          cached_input_tokens: 11,
-          output_tokens: 202,
-          reasoning_output_tokens: 31,
-          cache_write_input_tokens: 7
+        usageCounters: {
+          input: 101,
+          cachedInput: 11,
+          output: 202,
+          reasoningOutput: 31,
+          cacheWriteInput: 7
         }
       }
     });
@@ -228,6 +230,7 @@ describe("run summary evidence fields", () => {
       supportingArtifactIds: []
     });
     expect(summary.observedTokenUsage).toEqual({
+      state: "available",
       value: {
         inputTokens: 101,
         cachedInputTokens: 11,
@@ -263,13 +266,95 @@ describe("run summary evidence fields", () => {
     });
   });
 
-  it("keeps unknown token usage and untracked-file count null and unavailable", () => {
-    const summary = summarizeRun(input());
+  it("sums each approved counter across chronological turn completions", () => {
+    const later = event({
+      id: "usage-later",
+      sequence: 9,
+      kind: "turn.completed",
+      normalizedPayload: {
+        usageCounters: {
+          input: 3,
+          cachedInput: 13,
+          output: 19,
+          reasoningOutput: 29,
+          cacheWriteInput: 37
+        }
+      }
+    });
+    const earlier = event({
+      id: "usage-earlier",
+      sequence: 2,
+      kind: "turn.completed",
+      normalizedPayload: {
+        usageCounters: {
+          input: 2,
+          cachedInput: 5,
+          output: 7,
+          reasoningOutput: 11,
+          cacheWriteInput: 17
+        }
+      }
+    });
+
+    expect(summarizeRun(input({ events: [later, earlier] })).observedTokenUsage).toEqual({
+      state: "available",
+      value: {
+        inputTokens: 5,
+        cachedInputTokens: 18,
+        outputTokens: 26,
+        reasoningOutputTokens: 40,
+        cacheWriteInputTokens: 54
+      },
+      availability: "available",
+      provenance: "observed",
+      supportingEventIds: ["usage-earlier", "usage-later"],
+      supportingArtifactIds: []
+    });
+  });
+
+  it("leaves never-emitted counters null and ignores invalid or overflow counters", () => {
+    const usage = event({
+      id: "usage-partial-and-invalid",
+      sequence: 2,
+      kind: "turn.completed",
+      normalizedPayload: {
+        usageCounters: {
+          input: -1,
+          cachedInput: 0.5,
+          output: 9,
+          reasoningOutput: Number.MAX_SAFE_INTEGER + 1,
+          cacheWriteInput: Number.NaN
+        }
+      }
+    });
+
+    expect(summarizeRun(input({ events: [usage] })).observedTokenUsage).toEqual({
+      state: "available",
+      value: {
+        inputTokens: null,
+        cachedInputTokens: null,
+        outputTokens: 9,
+        reasoningOutputTokens: null,
+        cacheWriteInputTokens: null
+      },
+      availability: "available",
+      provenance: "observed",
+      supportingEventIds: ["usage-partial-and-invalid"],
+      supportingArtifactIds: []
+    });
+  });
+
+  it("reports an active standard run as waiting for provider usage", () => {
+    const summary = summarizeRun(input({
+      run: { ...input().run, endedAt: null }
+    }));
 
     expect(summary.observedTokenUsage).toEqual({
+      state: "unavailable",
       value: null,
       availability: "unavailable",
       provenance: null,
+      reason: "not_yet_available",
       supportingEventIds: [],
       supportingArtifactIds: []
     });
@@ -280,6 +365,81 @@ describe("run summary evidence fields", () => {
       supportingEventIds: [],
       supportingArtifactIds: []
     });
+  });
+
+  it.each(["metadata-only", "strict"] as const)(
+    "reports %s token usage as unavailable by capture policy",
+    (capturePolicy) => {
+      const summary = summarizeRun(input({
+        run: { ...input().run, capturePolicy },
+        events: [event({
+          id: `${capturePolicy}-usage`,
+          sequence: 1,
+          kind: "turn.completed",
+          normalizedPayload: { usageCounters: { input: 10 } }
+        })]
+      }));
+
+      expect(summary.observedTokenUsage).toEqual({
+        state: "unavailable",
+        value: null,
+        availability: "unavailable",
+        provenance: null,
+        reason: "capture_policy",
+        supportingEventIds: [],
+        supportingArtifactIds: []
+      });
+    }
+  );
+
+  it("recognizes legacy redaction markers only to report token usage redacted by policy", () => {
+    const legacy = event({
+      id: "legacy-redacted-usage",
+      sequence: 2,
+      kind: "turn.completed",
+      normalizedPayload: {
+        usage: {
+          input_tokens: "[[REDACTED:json-usage:hmac-sha256:0123456789abcdef0123456789abcdef]]"
+        }
+      }
+    });
+
+    expect(summarizeRun(input({
+      run: { ...input().run, endedAt: STARTED_AT + 2_000 },
+      events: [legacy]
+    })).observedTokenUsage).toEqual({
+      state: "unavailable",
+      value: null,
+      availability: "unavailable",
+      provenance: null,
+      reason: "redacted_by_policy",
+      supportingEventIds: ["legacy-redacted-usage"],
+      supportingArtifactIds: []
+    });
+  });
+
+  it("reports a terminal standard run without provider usage as not captured", () => {
+    const completed = event({
+      id: "terminal-without-usage",
+      sequence: 2,
+      kind: "turn.completed"
+    });
+
+    expect(summarizeRun(input({ events: [completed] })).observedTokenUsage).toEqual({
+      state: "unavailable",
+      value: null,
+      availability: "unavailable",
+      provenance: null,
+      reason: "not_captured",
+      supportingEventIds: [],
+      supportingArtifactIds: []
+    });
+  });
+
+  it("declares Codex token usage native once normalized usage counters exist", () => {
+    expect(codexExecCapabilities).toMatchObject({ tokenUsage: "native" });
+    expect(summarizeRun(input()).providerCapabilityLimitations.value)
+      .not.toContainEqual({ capability: "token_usage", availability: "unavailable" });
   });
 
   it("distinguishes an absent tracked diff from unavailable Git evidence", () => {

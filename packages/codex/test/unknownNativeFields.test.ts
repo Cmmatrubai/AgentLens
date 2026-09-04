@@ -375,6 +375,7 @@ describe("Codex evidence-preserving normalization", () => {
       fileReads: "unavailable",
       toolOutput: "partial",
       toolDurations: "unavailable",
+      tokenUsage: "native",
       interruptionSignal: "partial"
     });
   });

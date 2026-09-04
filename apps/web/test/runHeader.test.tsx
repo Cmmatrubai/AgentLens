@@ -79,4 +79,137 @@ describe("RunHeader frozen facts", () => {
     expect(screen.getByText("Likely tests: unavailable due to capture policy")).toBeVisible();
     expect(screen.getByText("Not reviewed · projected state · no human evidence")).toBeVisible();
   });
+
+  it("renders every available usage counter separately without a total", () => {
+    const base = run();
+    render(<RunHeader run={run({
+      summary: {
+        ...base.summary,
+        observedTokenUsage: {
+          state: "available",
+          value: {
+            inputTokens: 2,
+            cachedInputTokens: 3,
+            outputTokens: 5,
+            reasoningOutputTokens: 7,
+            cacheWriteInputTokens: 11
+          },
+          origin: { type: "event", provenance: "observed" },
+          supportingEventIds: ["usage-event"],
+          supportingArtifactIds: []
+        }
+      }
+    })} />);
+
+    for (const [label, value] of [
+      ["Input", "2"],
+      ["Cached input", "3"],
+      ["Output", "5"],
+      ["Reasoning output", "7"],
+      ["Cache-write input", "11"]
+    ] as const) {
+      expect(screen.getByText(label).parentElement).toHaveTextContent(`${label}${value}`);
+    }
+    expect(screen.queryByText("28")).not.toBeInTheDocument();
+  });
+
+  it("uses not emitted for missing fields in available usage", () => {
+    const base = run();
+    render(<RunHeader run={run({
+      summary: {
+        ...base.summary,
+        observedTokenUsage: {
+          state: "available",
+          value: {
+            inputTokens: 13,
+            cachedInputTokens: null,
+            outputTokens: null,
+            reasoningOutputTokens: null,
+            cacheWriteInputTokens: null
+          },
+          origin: { type: "event", provenance: "observed" },
+          supportingEventIds: ["partial-usage-event"],
+          supportingArtifactIds: []
+        }
+      }
+    })} />);
+
+    expect(screen.getByText("Input").parentElement).toHaveTextContent("Input13");
+    expect(screen.getAllByText("not emitted")).toHaveLength(4);
+    expect(screen.queryByText(/total/i)).not.toBeInTheDocument();
+  });
+
+  it("explains legacy redacted usage without exposing a value", () => {
+    const base = run();
+    render(<RunHeader run={run({
+      summary: {
+        ...base.summary,
+        observedTokenUsage: {
+          state: "unavailable",
+          reason: "redacted_by_policy",
+          origin: null,
+          supportingEventIds: ["legacy-redacted-usage"],
+          supportingArtifactIds: []
+        }
+      }
+    })} />);
+
+    expect(screen.getByText("Provider usage fields were present but redacted by the capture policy used for this run.")).toBeVisible();
+  });
+
+  it("explains restrictive capture policy usage omission", () => {
+    const base = run();
+    render(<RunHeader run={run({
+      capturePolicy: "metadata-only",
+      summary: {
+        ...base.summary,
+        observedTokenUsage: {
+          state: "unavailable",
+          reason: "capture_policy",
+          origin: null,
+          supportingEventIds: [],
+          supportingArtifactIds: []
+        }
+      }
+    })} />);
+
+    expect(screen.getByText("Usage counters are unavailable under this run's capture policy.")).toBeVisible();
+  });
+
+  it("explains active runs waiting for provider usage", () => {
+    const base = run();
+    render(<RunHeader run={run({
+      endedAt: null,
+      summary: {
+        ...base.summary,
+        observedTokenUsage: {
+          state: "unavailable",
+          reason: "not_yet_available",
+          origin: null,
+          supportingEventIds: [],
+          supportingArtifactIds: []
+        }
+      }
+    })} />);
+
+    expect(screen.getByText("Waiting for provider usage at turn completion.")).toBeVisible();
+  });
+
+  it("explains terminal provider runs that emitted no usable usage counters", () => {
+    const base = run();
+    render(<RunHeader run={run({
+      summary: {
+        ...base.summary,
+        observedTokenUsage: {
+          state: "unavailable",
+          reason: "not_captured",
+          origin: null,
+          supportingEventIds: [],
+          supportingArtifactIds: []
+        }
+      }
+    })} />);
+
+    expect(screen.getByText("The provider did not emit usable usage counters.")).toBeVisible();
+  });
 });

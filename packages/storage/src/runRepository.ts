@@ -2154,7 +2154,10 @@ export class RunRepository {
             AND (event_sources.item_type IS NULL OR event_sources.item_type = 'file_change')
             AND (event_sources.event_type IS NULL OR event_sources.event_type IN ('item.completed', 'item.failed')))
           OR (events.provenance = 'observed' AND events.kind = 'turn.completed'
-            AND json_type(events.normalized_payload_json, '$.usage') = 'object')
+            AND (
+              json_type(events.normalized_payload_json, '$.usageCounters') = 'object'
+              OR json_type(events.normalized_payload_json, '$.usage') = 'object'
+            ))
           OR (events.provenance = 'recorder' AND events.kind IN (
             'error', 'recorder.recovery', 'recorder.ownership_lost',
             'recorder.interruption', 'recorder.process_exit'
