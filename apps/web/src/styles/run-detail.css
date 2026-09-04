@@ -87,17 +87,25 @@
 
 .trajectory-toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(340px, 1.5fr) auto;
-  align-items: end;
-  gap: var(--space-3);
-  padding: var(--space-4) 0 var(--space-3);
+  grid-template-columns: minmax(190px, 0.8fr) minmax(300px, 1.25fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-3) 0 var(--space-2);
 }
 
 .trajectory-toolbar h2 {
-  margin: 2px 0 4px;
-  font-size: 18px;
+  margin: 1px 0 2px;
+  font-size: 17px;
   font-weight: 500;
 }
+
+.trajectory-toolbar__title .page-eyebrow,
+.trajectory-toolbar__count {
+  margin: 0;
+  font-size: 10px;
+}
+
+.trajectory-toolbar__count { color: var(--text-muted); }
 
 .trajectory-toolbar__legend,
 .trajectory-toolbar__jumps,
@@ -157,8 +165,7 @@
 
 .trajectory-viewport {
   position: relative;
-  height: min(68vh, 760px);
-  min-height: 520px;
+  height: clamp(560px, calc(100vh - 248px), 790px);
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -176,7 +183,7 @@
   top: 0;
   left: 0;
   width: 100%;
-  padding: 0 var(--space-3) var(--space-2);
+  padding: 0 var(--space-3) var(--space-1);
 }
 
 @media (max-width: 1100px) {

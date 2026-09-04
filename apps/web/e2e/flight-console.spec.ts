@@ -1,4 +1,4 @@
-import { expect, expectNoHorizontalOverflow, openBootstrapped, test } from "./fixtures.js";
+import { expect, expectNoHorizontalOverflow, navigateToRun, openBootstrapped, test } from "./fixtures.js";
 
 test("the desktop ledger is flat, dense, and evidence-complete", async ({ page, productionUi }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -19,4 +19,27 @@ test("the desktop ledger is flat, dense, and evidence-complete", async ({ page, 
   await expect(page.getByText("Human review").first()).toBeVisible();
   await expect(page.getByText("Git").first()).toBeVisible();
   await expectNoHorizontalOverflow(page);
+});
+
+test("about ten trajectory events remain visible and selection does not move adjacent rows", async ({ page, productionUi }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await openBootstrapped(page, productionUi);
+  await navigateToRun(page, "fixture-trajectory-50");
+  const viewport = page.locator(".trajectory-viewport");
+  const visible = await viewport.evaluate((viewportElement) => {
+    const viewportBox = viewportElement.getBoundingClientRect();
+    const rows = [...viewportElement.querySelectorAll<HTMLElement>('[role="option"]')];
+    return rows.filter((row) => {
+      const box = row.getBoundingClientRect();
+      return box.bottom > viewportBox.top && box.top < viewportBox.bottom;
+    }).length;
+  });
+  expect(visible).toBeGreaterThanOrEqual(9);
+  expect(visible).toBeLessThanOrEqual(13);
+  const second = page.getByRole("option").nth(1);
+  const third = page.getByRole("option").nth(2);
+  const before = await third.boundingBox();
+  await second.click();
+  const after = await third.boundingBox();
+  expect(Math.abs((after?.y ?? 0) - (before?.y ?? 0))).toBeLessThanOrEqual(1);
 });

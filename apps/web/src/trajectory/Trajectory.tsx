@@ -10,6 +10,8 @@ import type { LiveTrajectoryAppend } from "./useTrajectoryPages.js";
 
 import type { TrajectoryEventV1 } from "@agentlens/api-contract";
 
+const COMPACT_ROW_ESTIMATE = 68;
+
 export function Trajectory(props: Readonly<{
   events: readonly TrajectoryEventV1[];
   runId?: string;
@@ -33,7 +35,7 @@ export function Trajectory(props: Readonly<{
   const anchorRef = useRef<Readonly<{ eventId: string; offset: number }> | null>(null);
   const inlineEvidenceRef = useRef<HTMLDivElement>(null);
   const [inlineEvidenceHeight, setInlineEvidenceHeight] = useState(0);
-  const [selectedRowHeight, setSelectedRowHeight] = useState(132);
+  const [selectedRowHeight, setSelectedRowHeight] = useState(COMPACT_ROW_ESTIMATE);
   const pendingFocusRef = useRef<Readonly<{
     index: number;
     onFocused?: () => void;
@@ -46,7 +48,7 @@ export function Trajectory(props: Readonly<{
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 144,
+    estimateSize: () => COMPACT_ROW_ESTIMATE,
     overscan: 3,
     rangeExtractor: (range) => {
       const indexes = defaultRangeExtractor(range);
@@ -60,7 +62,7 @@ export function Trajectory(props: Readonly<{
       return indexes;
     },
     getItemKey: (index) => rows[index]!.key,
-    measureElement: (element) => element.getBoundingClientRect().height || 144,
+    measureElement: (element) => element.getBoundingClientRect().height || COMPACT_ROW_ESTIMATE,
     observeElementRect: (instance, callback) => {
       const element = instance.scrollElement;
       if (element === null) return () => undefined;
@@ -241,7 +243,7 @@ export function Trajectory(props: Readonly<{
                     rowRefs.current.set(item.index, element);
                     for (const eventId of eventIds) eventRowRefs.current.set(eventId, element);
                     if (containsSelection) {
-                      const height = Math.ceil(element.getBoundingClientRect().height) || 132;
+                      const height = Math.ceil(element.getBoundingClientRect().height) || COMPACT_ROW_ESTIMATE;
                       setSelectedRowHeight((current) => current === height ? current : height);
                     }
                     const pending = pendingFocusRef.current;

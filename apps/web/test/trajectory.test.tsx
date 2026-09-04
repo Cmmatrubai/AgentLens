@@ -660,10 +660,13 @@ describe("virtualized execution trajectory", () => {
     );
 
     const selected = screen.getByRole("option", { selected: true });
+    const relationshipAction = container.querySelector<HTMLElement>('[data-row-action="relationship"]');
     expect(within(selected).queryByRole("button")).toBeNull();
-    expect(container.querySelector('[data-row-action="relationship"]')).toHaveTextContent(
+    expect(selected).toContainElement(relationshipAction);
+    expect(relationshipAction).toHaveTextContent(
       "Jump to correlates with event event-900"
     );
+    expect(container.querySelector(".trajectory-row__relationships")).toBeNull();
     expect(selected).toHaveAccessibleName(/Jump to correlates with event event-900/);
     expect(document.querySelectorAll('[role="option"][tabindex="0"]')).toHaveLength(1);
     selected.focus();
