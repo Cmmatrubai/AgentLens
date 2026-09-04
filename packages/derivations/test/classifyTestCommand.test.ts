@@ -121,7 +121,11 @@ describe("classifyTestCommand", () => {
     "sh -c \"pnpm test && /usr/bin/zsh -c 'pnpm test'\"",
     "sh -c \"pnpm test && command /usr/bin/zsh -c 'pnpm test'\"",
     "sh -c \"pnpm test && env /usr/bin/zsh -c 'pnpm test'\"",
-    "sh -c \"pnpm test && command /opt/homebrew/bin/bash -c 'pnpm test'\""
+    "sh -c \"pnpm test && command /opt/homebrew/bin/bash -c 'pnpm test'\"",
+    "sh -c \"pnpm test && /bin/dash -c 'pnpm test'\"",
+    "sh -c \"pnpm test && command /bin/dash -c 'pnpm test'\"",
+    "sh -c \"pnpm test && env /bin/fish -c 'pnpm test'\"",
+    "sh -c \"pnpm test && busybox sh -c 'pnpm test'\""
   ])("rejects a nested shell command in every constrained compound wrapper form: %s", (command) => {
     expect(classify(command)).toBeNull();
   });

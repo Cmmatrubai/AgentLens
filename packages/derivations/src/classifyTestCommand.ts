@@ -75,6 +75,21 @@ const attachedLongMavenOptions = [
   "--builder="
 ] as const;
 
+const shellFamilyExecutables = new Set([
+  "ash",
+  "bash",
+  "csh",
+  "dash",
+  "fish",
+  "ksh",
+  "mksh",
+  "pdksh",
+  "sh",
+  "tcsh",
+  "yash",
+  "zsh"
+]);
+
 const recognizers: readonly ((argv: readonly string[]) => RecognizedTestCommand | null)[] = [
   recognizePytest,
   recognizeJest,
@@ -102,7 +117,7 @@ export function classifyTestCommand(
   let firstRecognized: RecognizedTestCommand | null = null;
   for (const segment of envelope.segments) {
     const segmentCommand = tokenizeSimpleCommand(segment);
-    if (segmentCommand === null || isShellCommand(segmentCommand.executable)) return null;
+    if (segmentCommand === null || isShellCommand(segmentCommand.argv)) return null;
     const recognized = recognize(segmentCommand.argv);
     if (firstRecognized === null && recognized !== null) firstRecognized = recognized;
   }
@@ -168,9 +183,20 @@ function packageManagerRuns(argv: readonly string[], runner: "jest" | "vitest"):
     (argv[0] === "npm" && argv[1] === "exec" && argv[2] === runner);
 }
 
-function isShellCommand(executable: string): boolean {
+function executableName(executable: string): string {
   const basename = executable.slice(executable.lastIndexOf("/") + 1);
-  return basename === "sh" || basename === "bash" || basename === "zsh";
+  return basename;
+}
+
+function isShellFamilyExecutable(executable: string | undefined): boolean {
+  return executable !== undefined && shellFamilyExecutables.has(executableName(executable));
+}
+
+function isShellCommand(argv: readonly string[]): boolean {
+  // tokenizeSimpleCommand already strips its constrained `command` and `env`
+  // wrappers. BusyBox selects its applet from argv[1], so inspect that slot too.
+  if (isShellFamilyExecutable(argv[0])) return true;
+  return executableName(argv[0] ?? "") === "busybox" && isShellFamilyExecutable(argv[1]);
 }
 
 function recognizeNpm(argv: readonly string[]): RecognizedTestCommand | null {
