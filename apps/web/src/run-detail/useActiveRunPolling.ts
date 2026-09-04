@@ -49,7 +49,7 @@ export function useActiveRunPolling(input: Readonly<{
       controller = pollController;
       let terminalFailure: unknown = null;
       let terminalRun: RunDetailV1 | null = null;
-      let pageSettled = false;
+      let pageResponseSucceeded = false;
       const lastSequence = eventsRef.current.at(-1)?.sequence;
       const eventQuery = lastSequence === undefined
         ? { limit: pollLimit }
@@ -66,14 +66,13 @@ export function useActiveRunPolling(input: Readonly<{
         pollController.abort();
       };
       const pageRequest = retryActiveSnapshotRequest({
-        request: () => input.client.getEvents(input.runId, eventQuery, pollController.signal),
+        request: () => input.client.getEvents(input.runId, eventQuery, pollController.signal).then((page) => {
+          pageResponseSucceeded = true;
+          return page;
+        }),
         signal: pollController.signal,
         onRetryableFailure: markRetrying
-      }).then((page) => {
-        pageSettled = true;
-        return page;
       }).catch((failure: unknown) => {
-        pageSettled = true;
         stopOnTerminalFailure(failure);
         throw failure;
       });
@@ -84,8 +83,9 @@ export function useActiveRunPolling(input: Readonly<{
       }).then((nextRun) => {
         if (!active(nextRun.status)) {
           terminalRun = nextRun;
+          if (controller === pollController) controller = null;
           queueMicrotask(() => {
-            if (terminalRun === nextRun && !pageSettled && !pollController.signal.aborted) {
+            if (terminalRun === nextRun && !pageResponseSucceeded && !pollController.signal.aborted) {
               pollController.abort();
             }
           });
@@ -104,7 +104,17 @@ export function useActiveRunPolling(input: Readonly<{
       });
       const [runResult, pageResult] = await Promise.allSettled([runRequest, pageRequest]);
       if (controller === pollController) controller = null;
-      if (disposed || terminalRun !== null || (pollController.signal.aborted && terminalFailure === null)) return;
+      if (terminalRun !== null) {
+        if (pageResult.status === "fulfilled") {
+          try {
+            onPageRef.current(pageResult.value);
+          } catch (error) {
+            setPollState({ runId: input.runId, degraded: false, error });
+          }
+        }
+        return;
+      }
+      if (disposed || (pollController.signal.aborted && terminalFailure === null)) return;
 
       let latestStatus = input.status;
       let degraded = false;

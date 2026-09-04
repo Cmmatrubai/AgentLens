@@ -340,6 +340,45 @@ describe("active run polling", () => {
     expect(getEvents).toHaveBeenCalledTimes(2);
   });
 
+  it("commits a settled final page once when the paired run becomes terminal", async () => {
+    vi.useFakeTimers();
+    const finalPage = deferred<TrajectoryPageV1>();
+    const terminalRun = deferred<RunDetailV1>();
+    const getRun = vi.fn()
+      .mockResolvedValueOnce(run("running", 4))
+      .mockImplementationOnce(() => terminalRun.promise);
+    const getEvents = vi.fn((_runId: string, query: EventPageQueryV1) => {
+      if (query.afterSequence === 4) return finalPage.promise;
+      return Promise.resolve(page("tail", [event(1), event(2), event(3), event(4)], 4));
+    });
+    renderDetail(api({ getRun, getEvents }));
+
+    await flushQueries();
+    expect(screen.getByText("Committed event 4")).toBeVisible();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(getEvents).toHaveBeenCalledTimes(2);
+    expect(getRun).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      finalPage.resolve(page("after", [event(5)], 5));
+      for (let tick = 0; tick < 8; tick += 1) await Promise.resolve();
+    });
+    const finalPageSignal = getEvents.mock.calls.at(-1)?.[2] as AbortSignal | undefined;
+    expect(finalPageSignal?.aborted).toBe(false);
+
+    await act(async () => {
+      terminalRun.resolve(run("completed", 5));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText("completed")).toBeVisible();
+    expect(screen.getAllByText("Committed event 5")).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(getEvents).toHaveBeenCalledTimes(2);
+    expect(getRun).toHaveBeenCalledTimes(2);
+  });
+
   it("catches an unhandled merge failure, mutated valid evidence, or continued polling after a contract contradiction", async () => {
     vi.useFakeTimers();
     const contradictoryEvent = { ...event(5), eventId: "event-4" };
