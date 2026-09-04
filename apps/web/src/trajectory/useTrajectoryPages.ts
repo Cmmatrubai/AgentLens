@@ -90,7 +90,18 @@ export function trajectoryPageCursors(
   return { earlier, later };
 }
 
-export function useTrajectoryPages(runId: string, selectedEventId: string | null) {
+function hasCanonicalGap(events: readonly TrajectoryEventV1[]): boolean {
+  for (let index = 1; index < events.length; index += 1) {
+    if (events[index - 1]!.sequence + 1 !== events[index]!.sequence) return true;
+  }
+  return false;
+}
+
+export function useTrajectoryPages(
+  runId: string,
+  selectedEventId: string | null,
+  run: Readonly<{ terminal: boolean; totalEventCount: number }> | null
+) {
   const client = useAgentLensApi();
   const [entries, setEntries] = useState<readonly Readonly<{
     page: TrajectoryPageV1;
@@ -110,6 +121,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
   const initialRequestRef = useRef<Readonly<{ identity: object; controller: AbortController }> | null>(null);
   const selectionRequestRef = useRef<object | null>(null);
   const cursorRequestRef = useRef<Readonly<{ identity: object; controller: AbortController }> | null>(null);
+  const autoFillAttemptRef = useRef<Readonly<{ runId: string; initialPage: TrajectoryPageV1 }> | null>(null);
   const entriesRef = useRef<readonly Readonly<{
     page: TrajectoryPageV1;
     request: TrajectoryCursorRequest | null;
@@ -172,6 +184,7 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     initialRequestRef.current = { identity, controller };
     cursorRequestRef.current?.controller.abort();
     cursorRequestRef.current = null;
+    autoFillAttemptRef.current = null;
     selectionRequestRef.current = null;
     entriesRef.current = [];
     const resetLiveAppend = { runId, revision: 0, identities: [] };
@@ -306,9 +319,31 @@ export function useTrajectoryPages(runId: string, selectedEventId: string | null
     pages,
     entries.map(({ request }) => request)
   ), [entries, pages]);
+  const loadedEventCount = events.length;
+  const totalEventCount = run?.totalEventCount ?? null;
+  const isComplete = totalEventCount !== null &&
+    loadedEventCount === totalEventCount &&
+    !hasCanonicalGap(events) &&
+    cursors.earlier === null &&
+    cursors.later === null;
+
+  useEffect(() => {
+    const initialPage = entries[0]?.page;
+    if (state !== "ready" || run === null || entries.length !== 1 || initialPage === undefined) return;
+    const attempted = autoFillAttemptRef.current;
+    if (attempted?.runId === runId && attempted.initialPage === initialPage) return;
+    const remaining = run.totalEventCount - loadedEventCount;
+    const laterCursor = cursors.later;
+    if (!run.terminal || remaining < 1 || remaining > pageLimit || laterCursor === null) return;
+    autoFillAttemptRef.current = { runId, initialPage };
+    void loadCursor("later", laterCursor);
+  }, [cursors.later, entries, loadedEventCount, loadCursor, run, runId, state]);
 
   return {
     events,
+    loadedEventCount,
+    totalEventCount,
+    isComplete,
     state,
     error,
     retrying,

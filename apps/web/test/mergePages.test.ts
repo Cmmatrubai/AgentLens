@@ -123,6 +123,14 @@ describe("mergeTrajectoryPages", () => {
     ])).toThrow(/sequence/i);
   });
 
+  it("deduplicates a bounded overlap by event and canonical sequence", () => {
+    const overlap = event("event-100", 100);
+    expect(mergeTrajectoryPages([
+      page("head", [event("event-99", 99), overlap], { hasLater: true, latest: 101 }),
+      page("cursor", [overlap, event("event-101", 101)], { hasEarlier: true, latest: 101 })
+    ]).map(({ sequence }) => sequence)).toEqual([99, 100, 101]);
+  });
+
   it("accepts empty windows but rejects cross-run pages and incompatible item metadata", () => {
     expect(mergeTrajectoryPages([page("head", []), page("after", [], { latest: 4 })]))
       .toEqual([]);

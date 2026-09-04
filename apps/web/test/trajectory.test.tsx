@@ -5,6 +5,7 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { Trajectory } from "../src/trajectory/Trajectory.js";
+import { TrajectoryToolbar } from "../src/trajectory/TrajectoryToolbar.js";
 import { RunWorkspace } from "../src/run-detail/RunWorkspace.js";
 
 function events(count: number): TrajectoryEventV1[] {
@@ -67,6 +68,51 @@ function translatedTop(element: HTMLElement): number {
 }
 
 describe("virtualized execution trajectory", () => {
+  it("distinguishes a partial loaded count from a completed immutable event set", () => {
+    const view = render(
+      <TrajectoryToolbar
+        eventCount={100}
+        totalEventCount={101}
+        isComplete={false}
+        hasEarlier={false}
+        hasLater={true}
+        onEarlier={null}
+        onLater={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("100 of 101 immutable events loaded")).toBeVisible();
+    expect(screen.queryByText(/complete/i)).toBeNull();
+
+    view.rerender(
+      <TrajectoryToolbar
+        eventCount={101}
+        totalEventCount={101}
+        isComplete={true}
+        hasEarlier={false}
+        hasLater={false}
+        onEarlier={null}
+        onLater={null}
+      />
+    );
+
+    expect(screen.getByText("101 of 101 immutable events loaded")).toBeVisible();
+
+    view.rerender(
+      <TrajectoryToolbar
+        eventCount={7}
+        totalEventCount={null}
+        isComplete={false}
+        hasEarlier={false}
+        hasLater={false}
+        onEarlier={null}
+        onLater={null}
+      />
+    );
+
+    expect(screen.getByText("7 immutable events loaded")).toBeVisible();
+  });
+
   it.each([10, 50, 250, 1_000])("keeps the mounted row DOM bounded for %i events", (count) => {
     render(
       <Trajectory

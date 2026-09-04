@@ -101,6 +101,28 @@ function wrapper(client: AgentLensApiClient) {
   );
 }
 
+function completedRun(totalEventCount: number) {
+  return { terminal: true, totalEventCount } as const;
+}
+
+function activeRun(totalEventCount: number) {
+  return { terminal: false, totalEventCount } as const;
+}
+
+function eventRange(
+  runId: string,
+  firstSequence: number,
+  lastSequence: number,
+  finalEventId?: string
+): readonly TrajectoryEventV1[] {
+  return Array.from({ length: lastSequence - firstSequence + 1 }, (_, index) => {
+    const sequence = firstSequence + index;
+    return event(runId, finalEventId !== undefined && sequence === lastSequence
+      ? finalEventId
+      : "event-" + sequence, sequence);
+  });
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -119,7 +141,7 @@ describe("trajectory request ownership", () => {
       .mockRejectedValueOnce(retryable)
       .mockResolvedValueOnce(page("run-a", [event("run-a", "event-a", 1)]));
     const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
-    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    const view = renderHook(() => useTrajectoryPages("run-a", null, null), { wrapper: wrapper(client) });
 
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(view.result.current.state).toBe("loading");
@@ -148,7 +170,7 @@ describe("trajectory request ownership", () => {
       ? Promise.reject(retryable)
       : Promise.resolve(page("run-b", [event("run-b", "event-b", 1)])));
     const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
-    const view = renderHook(({ runId }) => useTrajectoryPages(runId, null), {
+    const view = renderHook(({ runId }) => useTrajectoryPages(runId, null, null), {
       initialProps: { runId: "run-a" }, wrapper: wrapper(client)
     });
 
@@ -172,7 +194,7 @@ describe("trajectory request ownership", () => {
     });
     const getEvents = vi.fn().mockRejectedValue(failure);
     const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
-    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    const view = renderHook(() => useTrajectoryPages("run-a", null, null), { wrapper: wrapper(client) });
 
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(view.result.current.state).toBe("error");
@@ -203,7 +225,7 @@ describe("trajectory request ownership", () => {
       return Promise.resolve(page("run-a", [event("run-a", "event-head", 1)], { hasLater: true, latest: 10 }));
     });
     const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
-    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    const view = renderHook(() => useTrajectoryPages("run-a", null, null), { wrapper: wrapper(client) });
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(view.result.current.hasLater).toBe(true);
 
@@ -242,7 +264,7 @@ describe("trajectory request ownership", () => {
           : page("run-a", [event("run-a", "event-head", 1)], { hasLater: true, latest: 100 })
       ))
     } as AgentLensApiClient;
-    const view = renderHook(({ selectedEventId }) => useTrajectoryPages("run-a", selectedEventId), {
+    const view = renderHook(({ selectedEventId }) => useTrajectoryPages("run-a", selectedEventId, null), {
       initialProps: { selectedEventId: null as string | null }, wrapper: wrapper(client)
     });
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
@@ -309,7 +331,7 @@ describe("trajectory request ownership", () => {
         }));
       })
     } as AgentLensApiClient;
-    const view = renderHook(({ selectedEventId }) => useTrajectoryPages("run-a", selectedEventId), {
+    const view = renderHook(({ selectedEventId }) => useTrajectoryPages("run-a", selectedEventId, null), {
       initialProps: { selectedEventId: null as string | null }, wrapper: wrapper(client)
     });
     await act(async () => { await vi.advanceTimersByTimeAsync(0); });
@@ -341,7 +363,7 @@ describe("trajectory request ownership", () => {
       getEvents: vi.fn((runId: string, _query: unknown, _signal?: AbortSignal) =>
         runId === "run-a" ? runA.promise : runB.promise)
     } as AgentLensApiClient;
-    const view = renderHook(({ runId }) => useTrajectoryPages(runId, null), {
+    const view = renderHook(({ runId }) => useTrajectoryPages(runId, null, null), {
       initialProps: { runId: "run-a" },
       wrapper: wrapper(client)
     });
@@ -362,7 +384,7 @@ describe("trajectory request ownership", () => {
     const client = {
       listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents
     } as AgentLensApiClient;
-    const view = renderHook(({ runId }) => useTrajectoryPages(runId, null), {
+    const view = renderHook(({ runId }) => useTrajectoryPages(runId, null, null), {
       initialProps: { runId: "run-a" },
       wrapper: wrapper(client)
     });
@@ -393,7 +415,7 @@ describe("trajectory request ownership", () => {
             : page("run-a", [event("run-a", "event-head", 1)], { hasLater: true, latest: 100 })
       ))
     } as AgentLensApiClient;
-    const view = renderHook(({ selected }) => useTrajectoryPages("run-a", selected), {
+    const view = renderHook(({ selected }) => useTrajectoryPages("run-a", selected, null), {
       initialProps: { selected: null as string | null },
       wrapper: wrapper(client)
     });
@@ -428,7 +450,7 @@ describe("trajectory request ownership", () => {
           : page("run-a", [event("run-a", "event-head", 1)])
       ))
     } as AgentLensApiClient;
-    const view = renderHook(({ selectedEventId }) => useTrajectoryPages("run-a", selectedEventId), {
+    const view = renderHook(({ selectedEventId }) => useTrajectoryPages("run-a", selectedEventId, null), {
       initialProps: { selectedEventId: null as string | null },
       wrapper: wrapper(client)
     });
@@ -454,7 +476,7 @@ describe("trajectory request ownership", () => {
       return Promise.resolve(page(runId, [event(runId, `${runId}-head`, 1)], { hasLater: runId === "run-a", latest: 10 }));
     });
     const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
-    const view = renderHook(({ runId }) => useTrajectoryPages(runId, null), {
+    const view = renderHook(({ runId }) => useTrajectoryPages(runId, null, null), {
       initialProps: { runId: "run-a" }, wrapper: wrapper(client)
     });
     await waitFor(() => expect(view.result.current.hasLater).toBe(true));
@@ -483,7 +505,7 @@ describe("trajectory request ownership", () => {
       }));
     });
     const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
-    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    const view = renderHook(() => useTrajectoryPages("run-a", null, null), { wrapper: wrapper(client) });
     await waitFor(() => expect(view.result.current.hasLater).toBe(true));
     const loadLater = view.result.current.loadLater!;
     const loadEarlier = view.result.current.loadEarlier!;
@@ -528,7 +550,7 @@ describe("trajectory request ownership", () => {
           })
         : emptyLater));
     const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
-    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    const view = renderHook(() => useTrajectoryPages("run-a", null, null), { wrapper: wrapper(client) });
     await waitFor(() => expect(view.result.current.hasLater).toBe(true));
 
     await act(async () => { await view.result.current.loadLater?.(); });
@@ -562,7 +584,7 @@ describe("trajectory request ownership", () => {
       });
     });
     const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
-    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    const view = renderHook(() => useTrajectoryPages("run-a", null, null), { wrapper: wrapper(client) });
     await waitFor(() => expect(view.result.current.hasLater).toBe(true));
 
     await act(async () => { await view.result.current.loadLater?.(); });
@@ -576,6 +598,272 @@ describe("trajectory request ownership", () => {
   });
 });
 
+describe("completed trajectory bounded auto-fill", () => {
+  it("keeps a completed 100-event trajectory on its initial page", async () => {
+    const initial = page("run-100", eventRange("run-100", 1, 100), { latest: 100 });
+    const getEvents = vi.fn(async () => initial);
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(
+      () => useTrajectoryPages("run-100", null, completedRun(100)),
+      { wrapper: wrapper(client) }
+    );
+
+    await waitFor(() => expect(view.result.current.state).toBe("ready"));
+
+    expect(getEvents).toHaveBeenCalledTimes(1);
+    expect({
+      loaded: view.result.current.loadedEventCount,
+      total: view.result.current.totalEventCount,
+      complete: view.result.current.isComplete
+    }).toEqual({ loaded: 100, total: 100, complete: true });
+  });
+
+  it("loads exactly one final completed-run page at 101 events and resolves its reconciliation selection", async () => {
+    const initial = page("run-101", eventRange("run-101", 1, 100), {
+      hasLater: true,
+      latest: 101
+    });
+    const reconciled = "run-101-reconciled";
+    const later = {
+      ...page("run-101", eventRange("run-101", 101, 101, reconciled), {
+        hasEarlier: true,
+        latest: 101
+      }),
+      mode: "cursor" as const
+    };
+    const getEvents = vi.fn(async (_runId: string, query: { cursor?: string }) =>
+      query.cursor === undefined ? initial : later);
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(
+      ({ selectedEventId }) => useTrajectoryPages("run-101", selectedEventId, completedRun(101)),
+      { initialProps: { selectedEventId: null as string | null }, wrapper: wrapper(client) }
+    );
+
+    await waitFor(() => expect(view.result.current.loadedEventCount).toBe(101));
+    view.rerender({ selectedEventId: reconciled });
+    await waitFor(() => expect(view.result.current.selectionState).toBe("idle"));
+
+    expect(getEvents).toHaveBeenCalledTimes(2);
+    expect(getEvents.mock.calls[1]?.[1]).toEqual({ limit: 100, cursor: "later-run-101" });
+    expect(view.result.current.events.at(-1)?.eventId).toBe(reconciled);
+    expect(view.result.current.isComplete).toBe(true);
+    expect(client.getEvent).not.toHaveBeenCalled();
+  });
+
+  it("loads exactly one final completed-run page at 200 events", async () => {
+    const initial = page("run-200", eventRange("run-200", 1, 100), {
+      hasLater: true,
+      latest: 200
+    });
+    const later = {
+      ...page("run-200", eventRange("run-200", 101, 200), {
+        hasEarlier: true,
+        latest: 200
+      }),
+      mode: "cursor" as const
+    };
+    const getEvents = vi.fn(async (_runId: string, query: { cursor?: string }) =>
+      query.cursor === undefined ? initial : later);
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(
+      () => useTrajectoryPages("run-200", null, completedRun(200)),
+      { wrapper: wrapper(client) }
+    );
+
+    await waitFor(() => expect(view.result.current.loadedEventCount).toBe(200));
+
+    expect(getEvents).toHaveBeenCalledTimes(2);
+    expect(view.result.current.isComplete).toBe(true);
+    expect(view.result.current.hasLater).toBe(false);
+  });
+
+  it("does not auto-fill a completed 201-event trajectory or an active 101-event trajectory", async () => {
+    const completedInitial = page("run-201", eventRange("run-201", 1, 100), {
+      hasLater: true,
+      latest: 201
+    });
+    const activeInitial = page("run-active-101", eventRange("run-active-101", 1, 100), {
+      hasLater: true,
+      latest: 101
+    });
+    const completedLater = {
+      ...page("run-201", eventRange("run-201", 101, 200), {
+        hasEarlier: true,
+        hasLater: true,
+        latest: 201
+      }),
+      mode: "cursor" as const
+    };
+    const getEvents = vi.fn(async (runId: string, query: { cursor?: string }) => {
+      if (runId === "run-active-101") return activeInitial;
+      return query.cursor === undefined ? completedInitial : completedLater;
+    });
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const completed = renderHook(
+      () => useTrajectoryPages("run-201", null, completedRun(201)),
+      { wrapper: wrapper(client) }
+    );
+    const active = renderHook(
+      () => useTrajectoryPages("run-active-101", null, activeRun(101)),
+      { wrapper: wrapper(client) }
+    );
+
+    await waitFor(() => expect(completed.result.current.state).toBe("ready"));
+    await waitFor(() => expect(active.result.current.state).toBe("ready"));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(getEvents.mock.calls.filter(([runId]) => runId === "run-201")).toHaveLength(1);
+    expect(getEvents.mock.calls.filter(([runId]) => runId === "run-active-101")).toHaveLength(1);
+    expect(completed.result.current.isComplete).toBe(false);
+    expect(active.result.current.isComplete).toBe(false);
+
+    await act(async () => { await completed.result.current.loadLater?.(); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(completed.result.current.loadedEventCount).toBe(200);
+    expect(getEvents.mock.calls.filter(([runId]) => runId === "run-201")).toHaveLength(2);
+    expect(completed.result.current.hasLater).toBe(true);
+  });
+
+  it("deduplicates an overlapping final page but withholds completion when the total remains missing", async () => {
+    const initial = page("run-overlap", eventRange("run-overlap", 1, 100), {
+      hasLater: true,
+      latest: 101
+    });
+    const duplicate = {
+      ...page("run-overlap", [event("run-overlap", "event-100", 100)], {
+        hasEarlier: true,
+        latest: 101
+      }),
+      mode: "cursor" as const
+    };
+    const getEvents = vi.fn(async (_runId: string, query: { cursor?: string }) =>
+      query.cursor === undefined ? initial : duplicate);
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(
+      () => useTrajectoryPages("run-overlap", null, completedRun(101)),
+      { wrapper: wrapper(client) }
+    );
+
+    await waitFor(() => expect(getEvents).toHaveBeenCalledTimes(2));
+
+    expect(view.result.current.loadedEventCount).toBe(100);
+    expect(view.result.current.events.filter(({ eventId }) => eventId === "event-100")).toHaveLength(1);
+    expect(view.result.current.isComplete).toBe(false);
+    expect(view.result.current.hasLater).toBe(true);
+  });
+
+  it("retains its initial page while an automatic final-page read retries a safe active-snapshot refusal", async () => {
+    vi.useFakeTimers();
+    const initial = page("run-auto-retry", eventRange("run-auto-retry", 1, 100), {
+      hasLater: true,
+      latest: 101
+    });
+    const final = {
+      ...page("run-auto-retry", eventRange("run-auto-retry", 101, 101), {
+        hasEarlier: true,
+        latest: 101
+      }),
+      mode: "cursor" as const
+    };
+    const retryable = new AgentLensClientError({
+      code: "active_snapshot_unavailable",
+      status: 503,
+      retryable: true,
+      message: "safe retryable fixture failure"
+    });
+    let cursorAttempts = 0;
+    const getEvents = vi.fn(async (_runId: string, query: { cursor?: string }) => {
+      if (query.cursor === undefined) return initial;
+      cursorAttempts += 1;
+      if (cursorAttempts === 1) throw retryable;
+      return final;
+    });
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(
+      () => useTrajectoryPages("run-auto-retry", null, completedRun(101)),
+      { wrapper: wrapper(client) }
+    );
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(view.result.current.events).toHaveLength(100);
+    expect(view.result.current.pagingState).toBe("loading");
+    expect(view.result.current.retrying).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+
+    expect(view.result.current.loadedEventCount).toBe(101);
+    expect(view.result.current.isComplete).toBe(true);
+    expect(cursorAttempts).toBe(2);
+  });
+
+  it("retains its first page and manual later control when the final cursor page fails", async () => {
+    const initial = page("run-second-page-failure", eventRange("run-second-page-failure", 1, 100), {
+      hasLater: true,
+      latest: 101
+    });
+    const failure = new AgentLensClientError({
+      code: "invalid_cursor",
+      status: 400,
+      retryable: false,
+      message: "sanitized cursor failure"
+    });
+    const getEvents = vi.fn(async (_runId: string, query: { cursor?: string }) => {
+      if (query.cursor === undefined) return initial;
+      throw failure;
+    });
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(
+      () => useTrajectoryPages("run-second-page-failure", null, completedRun(101)),
+      { wrapper: wrapper(client) }
+    );
+
+    await waitFor(() => expect(view.result.current.pagingState).toBe("error"));
+
+    expect(view.result.current.events).toHaveLength(100);
+    expect(view.result.current.hasLater).toBe(true);
+    expect(view.result.current.loadLater).not.toBeNull();
+    expect(view.result.current.isComplete).toBe(false);
+  });
+
+  it("does not infer completeness from equal counts when canonical sequences have a gap", async () => {
+    const gapped = [
+      ...eventRange("run-gapped", 1, 99),
+      event("run-gapped", "event-101", 101)
+    ];
+    const getEvents = vi.fn(async () => page("run-gapped", gapped, { latest: 101 }));
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(
+      () => useTrajectoryPages("run-gapped", null, completedRun(100)),
+      { wrapper: wrapper(client) }
+    );
+
+    await waitFor(() => expect(view.result.current.state).toBe("ready"));
+
+    expect(view.result.current.loadedEventCount).toBe(100);
+    expect(view.result.current.isComplete).toBe(false);
+  });
+
+  it("does not infer completeness from equal counts while a canonical cursor remains", async () => {
+    const initial = page("run-cursor-inconsistent", eventRange("run-cursor-inconsistent", 1, 100), {
+      hasLater: true,
+      latest: 100
+    });
+    const getEvents = vi.fn(async () => initial);
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(
+      () => useTrajectoryPages("run-cursor-inconsistent", null, completedRun(100)),
+      { wrapper: wrapper(client) }
+    );
+
+    await waitFor(() => expect(view.result.current.state).toBe("ready"));
+
+    expect(view.result.current.loadedEventCount).toBe(100);
+    expect(view.result.current.hasLater).toBe(true);
+    expect(view.result.current.isComplete).toBe(false);
+  });
+});
+
 describe("trajectory merge containment", () => {
   it("publishes only the latest validated live identity delta instead of a cumulative run ledger", async () => {
     const first = event("run-a", "event-1", 1);
@@ -583,7 +871,7 @@ describe("trajectory merge containment", () => {
       listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(),
       getEvents: vi.fn(async () => page("run-a", [first]))
     } as AgentLensApiClient;
-    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    const view = renderHook(() => useTrajectoryPages("run-a", null, null), { wrapper: wrapper(client) });
     await waitFor(() => expect(view.result.current.state).toBe("ready"));
 
     const second = event("run-a", "event-2", 2);
@@ -625,7 +913,7 @@ describe("trajectory merge containment", () => {
       getEvents: vi.fn((_runId: string, query: { cursor?: string }) =>
         Promise.resolve(query.cursor === undefined ? head : contradictory))
     } as AgentLensApiClient;
-    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    const view = renderHook(() => useTrajectoryPages("run-a", null, null), { wrapper: wrapper(client) });
     await waitFor(() => expect(view.result.current.hasLater).toBe(true));
 
     await act(async () => { await view.result.current.loadLater?.(); });

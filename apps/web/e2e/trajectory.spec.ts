@@ -1,6 +1,7 @@
 import type { Page, Request } from "@playwright/test";
 import {
   trajectoryPageV1Schema,
+  type TrajectoryEventV1,
   type TrajectoryPageV1
 } from "../../../packages/api-contract/src/index.js";
 
@@ -53,6 +54,95 @@ async function capturedResponsePage(
   return match.page;
 }
 
+async function stubTerminalTrajectoryTotal(
+  page: Page,
+  totalEventCount: 101 | 201,
+  holdFinalPage = false
+): Promise<Readonly<{
+  releaseFinalPage: () => void;
+  waitForFinalPageRequest: () => Promise<void>;
+  cursorRequestCount: () => number;
+}>> {
+  let cursorRequestCount = 0;
+  let resolveFinalPageRequest!: () => void;
+  const finalPageRequested = new Promise<void>((resolve) => { resolveFinalPageRequest = resolve; });
+  let releaseFinalPage!: () => void;
+  const finalPageRelease = new Promise<void>((resolve) => { releaseFinalPage = resolve; });
+  const runPath = "/api/v1/runs/fixture-trajectory-1000";
+  await page.route("**/api/v1/runs/fixture-trajectory-1000", async (route) => {
+    if (new URL(route.request().url()).pathname !== runPath) {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const body = JSON.parse((await response.body()).toString("utf8")) as Record<string, unknown>;
+    body.eventCount = totalEventCount;
+    await route.fulfill({ response, body: JSON.stringify(body) });
+  });
+  await page.route("**/api/v1/runs/fixture-trajectory-1000/events**", async (route) => {
+    if (new URL(route.request().url()).pathname !== runPath + "/events") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const current = trajectoryPageV1Schema.parse(JSON.parse((await response.body()).toString("utf8")));
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    if (cursor === null) {
+      const initialPage = trajectoryPageV1Schema.parse({
+        ...current,
+        items: current.items.slice(0, 100),
+        window: {
+          state: "nonempty",
+          minSequence: 0,
+          maxSequence: 99,
+          latestCommittedSequence: totalEventCount - 1,
+          hasEarlier: false,
+          hasLater: true,
+          earlierCursor: null,
+          laterCursor: current.window.state === "nonempty" ? current.window.laterCursor : null
+        }
+      });
+      await route.fulfill({ response, body: JSON.stringify(initialPage) });
+      return;
+    }
+    cursorRequestCount += 1;
+    resolveFinalPageRequest();
+    if (holdFinalPage) await finalPageRelease;
+    const item = current.items[0];
+    if (item === undefined) throw new Error("The synthetic final trajectory page needs a source event.");
+    const reconciled: TrajectoryEventV1 = {
+      ...item,
+      eventId: "fixture-trajectory-1000-reconciled",
+      sequence: 100,
+      kind: "run.reconciled",
+      provenance: "recorder",
+      presentationClass: "recorder",
+      safeSummary: "Synthetic terminal run reconciliation"
+    };
+    const finalPage = trajectoryPageV1Schema.parse({
+      ...current,
+      mode: "cursor",
+      items: [reconciled],
+      window: {
+        state: "nonempty",
+        minSequence: 100,
+        maxSequence: 100,
+        latestCommittedSequence: 100,
+        hasEarlier: true,
+        hasLater: false,
+        earlierCursor: current.window.state === "nonempty" ? current.window.earlierCursor : null,
+        laterCursor: null
+      }
+    });
+    await route.fulfill({ response, body: JSON.stringify(finalPage) });
+  });
+  return {
+    releaseFinalPage,
+    waitForFinalPageRequest: () => finalPageRequested,
+    cursorRequestCount: () => cursorRequestCount
+  };
+}
+
 async function visibleAnchor(page: Page, eventId: string): Promise<VisibleAnchor | null> {
   return page.locator(".trajectory-viewport").evaluate((viewport, selectedEventId) => {
     const viewportBounds = viewport.getBoundingClientRect();
@@ -88,7 +178,7 @@ test("a 1000-event run proves exact pages, stable anchors, bounded virtualizatio
   const loadLater = page.getByRole("button", { name: "Load later" });
   const viewport = page.locator(".trajectory-viewport");
   const rows = page.getByRole("option");
-  await expect(page.getByText("100 immutable events loaded")).toBeVisible();
+  await expect(page.getByText("100 of 1,000 immutable events loaded")).toBeVisible();
   expect(await rows.count()).toBeLessThan(30);
 
   for (let pageIndex = 1; pageIndex < 10; pageIndex += 1) {
@@ -120,8 +210,8 @@ test("a 1000-event run proves exact pages, stable anchors, bounded virtualizatio
     });
     requestedCursors.push(new URL(completedRequest.url).searchParams.get("cursor")!);
     pages.push(await capturedResponsePage(captured, completedRequest.request));
-    await expect(page.getByText(`${((pageIndex + 1) * 100).toLocaleString()} immutable events loaded`))
-      .toBeVisible();
+    await expect(page.getByText(`${((pageIndex + 1) * 100).toLocaleString()} of 1,000 immutable events loaded`))
+     .toBeVisible();
     await expect.poll(async () => {
       const after = await visibleAnchor(page, before.eventId);
       return after !== null && after.eventId === before.eventId && Math.abs(after.offset - before.offset) <= 1;
@@ -198,6 +288,43 @@ test("a 1000-event run proves exact pages, stable anchors, bounded virtualizatio
   await expect(page.locator(".event-inspector").getByText(expectedIds[999]!, { exact: true })).toBeVisible();
   expect(await rows.count()).toBeLessThan(30);
   await expectNoHorizontalOverflow(page);
+});
+
+test("a sanitized 101-event terminal run automatically loads its final reconciliation page", async ({
+  page,
+  productionUi
+}) => {
+  const trajectory = await stubTerminalTrajectoryTotal(page, 101, true);
+  await openBootstrapped(page, productionUi);
+  await navigateToRun(page, "fixture-trajectory-1000");
+
+  await expect(page.getByText("100 of 101 immutable events loaded")).toBeVisible();
+  await trajectory.waitForFinalPageRequest();
+  expect(trajectory.cursorRequestCount()).toBe(1);
+  await expect(page.getByRole("button", { name: "Load later" })).toBeDisabled();
+  trajectory.releaseFinalPage();
+
+  await expect(page.getByText("101 of 101 immutable events loaded")).toBeVisible();
+  await page.getByRole("button", { name: "Jump to latest event" }).click();
+  await expect.poll(() => new URL(page.url()).searchParams.get("event"))
+    .toBe("fixture-trajectory-1000-reconciled");
+  await expect(page.locator(".event-inspector").getByText("run.reconciled", { exact: true })).toBeVisible();
+  expect(trajectory.cursorRequestCount()).toBe(1);
+});
+
+test("a sanitized 201-event terminal run does not request a second trajectory page automatically", async ({
+  page,
+  productionUi
+}) => {
+  const trajectory = await stubTerminalTrajectoryTotal(page, 201);
+  await openBootstrapped(page, productionUi);
+  await navigateToRun(page, "fixture-trajectory-1000");
+
+  await expect(page.getByText("100 of 201 immutable events loaded")).toBeVisible();
+  await page.waitForTimeout(250);
+
+  expect(trajectory.cursorRequestCount()).toBe(0);
+  await expect(page.getByRole("button", { name: "Load later" })).toBeEnabled();
 });
 
 test("selected evidence is inline at 800 pixels and reduced motion is honored", async ({ page, productionUi }) => {

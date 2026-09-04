@@ -26,7 +26,12 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
     queryKey: queryKeys.run(runId),
     queryFn: ({ signal }) => client.getRun(runId, signal)
   });
-  const trajectory = useTrajectoryPages(runId, selectedEventId);
+  const trajectory = useTrajectoryPages(runId, selectedEventId, run.data === undefined ? null : {
+    terminal: run.data.status.state === "known" &&
+      run.data.status.value !== "starting" &&
+      run.data.status.value !== "running",
+    totalEventCount: run.data.eventCount
+  });
   const polling = useActiveRunPolling({
     client,
     runId,
@@ -67,6 +72,8 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
       )}
       <TrajectoryToolbar
         eventCount={trajectory.events.length}
+        totalEventCount={trajectory.totalEventCount}
+        isComplete={trajectory.isComplete}
         hasEarlier={trajectory.hasEarlier}
         hasLater={trajectory.hasLater}
         onEarlier={trajectory.loadEarlier}

@@ -655,7 +655,7 @@ describe("conditional assessment transport and mutation ownership", () => {
     expect(screen.getByRole("option", {
       name: /Human assessment updated\. Human evidence\. Completed\./
     })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByText("2 immutable events loaded")).toBeVisible();
+    expect(await screen.findByText("2 of 2 immutable events loaded")).toBeVisible();
     expect(within(screen.getByText("Events").parentElement!).getByText("2")).toBeVisible();
     expect(screen.getByText("Reviewer: success · human evidence")).toBeVisible();
     expect(screen.getByRole("radio", { name: "Partial" })).toBeChecked();

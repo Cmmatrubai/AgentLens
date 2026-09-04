@@ -2,6 +2,8 @@ import type { EventAnchorV1 } from "@agentlens/api-contract";
 
 export function TrajectoryToolbar(props: Readonly<{
   eventCount: number;
+  totalEventCount: number | null;
+  isComplete: boolean;
   hasEarlier: boolean;
   hasLater: boolean;
   onEarlier: (() => void) | null;
@@ -15,6 +17,10 @@ export function TrajectoryToolbar(props: Readonly<{
   }>;
   onJump?: (eventId: string) => void;
 }>) {
+  const eventCount = props.totalEventCount === null
+    ? props.eventCount.toLocaleString() + " immutable events loaded"
+    : props.eventCount.toLocaleString() + " of " + props.totalEventCount.toLocaleString() +
+      " immutable events loaded";
   const jumps = [
     ["first failure", props.anchors?.firstFailure],
     ["recorder recovery", props.anchors?.recorderRecovery],
@@ -27,7 +33,7 @@ export function TrajectoryToolbar(props: Readonly<{
       <div>
         <p className="page-eyebrow">Canonical event sequence</p>
         <h2>Execution trajectory</h2>
-        <span>{props.eventCount.toLocaleString()} immutable events loaded</span>
+        <span data-complete={props.isComplete ? "true" : "false"}>{eventCount}</span>
       </div>
       <div className="trajectory-toolbar__legend" aria-label="Evidence provenance legend">
         <span>◇ Observed</span><span>◆ Derived</span><span>□ Git recovered</span>
