@@ -48,6 +48,25 @@ function splitShellBody(input: string): ShellEnvelope | null {
 
   for (let index = 0; index < input.length; index += 1) {
     const character = input[index]!;
+    if (state === "single") {
+      if (character === "'") state = "unquoted";
+      segment += character;
+      continue;
+    }
+    if (state === "double") {
+      if (character === "\\") {
+        const escaped = input[++index];
+        if (escaped === undefined || escaped === "\n" || escaped === "\r") return null;
+        segment += character + escaped;
+        continue;
+      }
+      if (character === "\n" || character === "\r" || character === "$" || character === "`") {
+        return null;
+      }
+      if (character === "\"") state = "unquoted";
+      segment += character;
+      continue;
+    }
     if (character === "\\") {
       const escaped = input[++index];
       if (escaped === undefined || escaped === "\n" || escaped === "\r") return null;
@@ -57,19 +76,19 @@ function splitShellBody(input: string): ShellEnvelope | null {
     if (character === "\n" || character === "\r" || character === "$" || character === "`") {
       return null;
     }
-    if (character === "'" && state !== "double") {
-      state = state === "single" ? "unquoted" : "single";
+    if (character === "'") {
+      state = "single";
       segment += character;
       continue;
     }
-    if (character === "\"" && state !== "single") {
-      state = state === "double" ? "unquoted" : "double";
+    if (character === "\"") {
+      state = "double";
       segment += character;
       continue;
     }
     if (";|<>()".includes(character)) return null;
     if (character === "&") {
-      if (state !== "unquoted" || input[index + 1] !== "&" || !finishSegment()) return null;
+      if (input[index + 1] !== "&" || !finishSegment()) return null;
       index += 1;
       continue;
     }

@@ -117,6 +117,42 @@ describe("classifyTestCommand", () => {
     });
   });
 
+  it("classifies the historical T01-A1 quoted-regex test command", () => {
+    expect(classify("/bin/zsh -lc \"rg -n --glob '!sources/**' 'runChildProcess\\\\(|onLineTooLarge' apps/cli && pnpm vitest apps/cli/test/processRunner.test.ts packages/codex/test/lineDecoder.test.ts apps/cli/test/recordRun.integration.test.ts --run\"")).toEqual({
+      family: "vitest",
+      confidence: "high",
+      commandShape: "compound",
+      outcomeAttribution: "unavailable",
+      derivationVersion: "test-command/2"
+    });
+  });
+
+  it("treats single-quoted shell metacharacters as literal text", () => {
+    expect(classify("sh -c \"rg 'needle;|<>()&' apps/cli && pnpm vitest --run packages/a.test.ts\"")).toEqual({
+      family: "vitest",
+      confidence: "high",
+      commandShape: "compound",
+      outcomeAttribution: "unavailable",
+      derivationVersion: "test-command/2"
+    });
+  });
+
+  it.each([
+    "sh -c 'printf \"$HOME\" && pnpm vitest --run packages/a.test.ts'",
+    "sh -c 'printf \"`pwd`\" && pnpm vitest --run packages/a.test.ts'"
+  ])("rejects double-quoted shell expansion syntax: %s", (command) => {
+    expect(classify(command)).toBeNull();
+  });
+
+  it.each([
+    "sh -c 'pnpm vitest --run packages/a.test.ts; true'",
+    "sh -c 'pnpm vitest --run packages/a.test.ts | cat'",
+    "sh -c 'pnpm vitest --run packages/a.test.ts $(true)'",
+    "sh -c 'pnpm vitest --run packages/a.test.ts `true`'"
+  ])("rejects unquoted shell control syntax: %s", (command) => {
+    expect(classify(command)).toBeNull();
+  });
+
   it.each([
     "sh -c \"pnpm test && /usr/bin/zsh -c 'pnpm test'\"",
     "sh -c \"pnpm test && command /usr/bin/zsh -c 'pnpm test'\"",
