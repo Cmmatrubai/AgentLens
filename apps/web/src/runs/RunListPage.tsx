@@ -108,41 +108,51 @@ export function RunListPage() {
         <span className="page-heading__privacy">Redacted local evidence</span>
       </header>
 
-      <RunFilters query={query} onApply={apply} />
+      <div className="run-ledger-frame">
+        <RunFilters query={query} onApply={apply} />
+        <div className="run-ledger__columns" aria-hidden="true">
+          <span>Run</span>
+          <span>Recorder / lifecycle</span>
+          <span>Tests</span>
+          <span>Review</span>
+          <span>Final Git</span>
+          <span>Timing</span>
+        </div>
 
-      {result.isPending && <div className="loading-state" role="status">Loading run evidence…</div>}
-      {result.isError && (() => {
-        const copy = errorCopy(result.error);
-        return <ErrorState title={copy.title} message={copy.message} />;
-      })()}
-      {result.data?.items.length === 0 && (
-        <section className="empty-state" aria-labelledby="empty-runs-title">
-          {isConstrainedPage ? (
-            <>
-              <h2 id="empty-runs-title">No runs match these filters</h2>
-              <p>Change the filters or return to a newer run-ledger page.</p>
-            </>
-          ) : (
-            <>
-              <h2 id="empty-runs-title">No runs recorded</h2>
-              <p>Record a Codex execution to create the first durable trace.</p>
-              <code>agentlens record -- codex exec --json ...</code>
-            </>
-          )}
-        </section>
-      )}
-      {result.data !== undefined && result.data.items.length > 0 && (
-        <ol className="run-ledger" aria-label="Recorded runs">
-          {result.data.items.map((run) => <RunRow key={run.runId} run={run} />)}
-        </ol>
-      )}
-      {result.data?.nextCursor !== null && result.data?.nextCursor !== undefined && (
-        <nav className="pagination" aria-label="Run ledger pages">
-          <Link to={{ pathname: "/runs", search: queryParams({ ...query, cursor: result.data.nextCursor }).toString() }}>
-            Older runs
-          </Link>
-        </nav>
-      )}
+        {result.isPending && <div className="loading-state" role="status">Loading run evidence…</div>}
+        {result.isError && (() => {
+          const copy = errorCopy(result.error);
+          return <ErrorState title={copy.title} message={copy.message} />;
+        })()}
+        {result.data?.items.length === 0 && (
+          <section className="empty-state" aria-labelledby="empty-runs-title">
+            {isConstrainedPage ? (
+              <>
+                <h2 id="empty-runs-title">No runs match these filters</h2>
+                <p>Change the filters or return to a newer run-ledger page.</p>
+              </>
+            ) : (
+              <>
+                <h2 id="empty-runs-title">No runs recorded</h2>
+                <p>Record a Codex execution to create the first durable trace.</p>
+                <code>agentlens record -- codex exec --json ...</code>
+              </>
+            )}
+          </section>
+        )}
+        {result.data !== undefined && result.data.items.length > 0 && (
+          <ol className="run-ledger" aria-label="Recorded runs">
+            {result.data.items.map((run) => <RunRow key={run.runId} run={run} />)}
+          </ol>
+        )}
+        {result.data?.nextCursor !== null && result.data?.nextCursor !== undefined && (
+          <nav className="pagination" aria-label="Run ledger pages">
+            <Link to={{ pathname: "/runs", search: queryParams({ ...query, cursor: result.data.nextCursor }).toString() }}>
+              Older runs
+            </Link>
+          </nav>
+        )}
+      </div>
     </section>
   );
 }

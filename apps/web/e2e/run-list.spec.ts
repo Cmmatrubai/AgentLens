@@ -27,9 +27,13 @@ test("the frozen layouts retain evidence without page overflow", async ({ page, 
   for (const viewport of [
     { width: 1440, height: 1000 },
     { width: 1100, height: 900 },
-    { width: 800, height: 900 }
+    { width: 800, height: 900 },
+    { width: 520, height: 900 }
   ]) {
     await page.setViewportSize(viewport);
+    await expect(page.getByText("Lifecycle", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Likely tests", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("Human review", { exact: true }).first()).toBeVisible();
     await expect(page.getByText(/Final Git evidence:/).first()).toBeVisible();
     await expect(page.getByText(/Reviewer:/).first()).toBeVisible();
     await expectNoHorizontalOverflow(page);

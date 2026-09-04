@@ -66,7 +66,7 @@ export function RunFilters(props: Readonly<{
           ))}
         </select>
       </label>
-      <button type="submit">Apply filters</button>
+      <button className="run-filters__submit" type="submit">Apply filters</button>
     </form>
   );
 }

@@ -54,19 +54,16 @@ body,
   }
 
   .run-row__primary {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-2);
+    display: contents;
   }
 
   .run-row__identity,
   .run-row__status {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: var(--space-2);
+    display: flex;
   }
 
   .run-row__label {
-    grid-column: 1 / -1;
+    width: 100%;
   }
 
   .run-detail-header,
@@ -107,7 +104,7 @@ body,
 @media (max-width: 520px) {
   .run-filters,
   .run-detail-header dl,
-  .run-row__evidence {
+  .run-row__destination {
     grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -67,27 +67,17 @@ export function RunRow({ run }: Readonly<{ run: RunListItemV1 }>) {
     <li className="run-ledger__item">
       <article className="run-row">
         <Link className="run-row__destination" to={destination} aria-label={`${title} — inspect run evidence`}>
-          <div className="run-row__primary">
-            <div className="run-row__identity">
-              <span className="run-row__label">{title}</span>
-              <span className="run-row__repository">{run.repository.display}</span>
-              <code>{run.repository.fingerprint}</code>
+            <div className="run-row__primary">
+              <div className="run-row__identity">
+                <span className="run-row__label">{title}</span>
+                <span className="run-row__repository">{run.repository.display}</span>
+                <code>{run.repository.fingerprint}</code>
+              </div>
+              <div className="run-row__status">
+                <StatusBadge status={run.status} />
+                <span className="run-row__provider">{providerText(run)}</span>
+              </div>
             </div>
-            <div className="run-row__status">
-              <StatusBadge status={run.status} />
-              <span className="run-row__provider">{providerText(run)}</span>
-              <time dateTime={new Date(run.startedAt).toISOString()}>
-                {new Intl.DateTimeFormat(undefined, {
-                  month: "short", day: "numeric", hour: "numeric", minute: "2-digit"
-                }).format(run.startedAt)}
-              </time>
-              <Availability
-                label="Recorder duration"
-                unavailableReason="not yet available"
-                {...(recorderDuration === undefined ? {} : { value: recorderDuration })}
-              />
-            </div>
-          </div>
 
           <dl className="run-row__evidence">
             <div>
@@ -109,7 +99,20 @@ export function RunRow({ run }: Readonly<{ run: RunListItemV1 }>) {
               <dt>Git</dt>
               <dd>{gitText(run)}</dd>
             </div>
-          </dl>
+            </dl>
+
+          <div className="run-row__timing">
+            <time dateTime={new Date(run.startedAt).toISOString()}>
+              {new Intl.DateTimeFormat(undefined, {
+                month: "short", day: "numeric", hour: "numeric", minute: "2-digit"
+              }).format(run.startedAt)}
+            </time>
+            <Availability
+              label="Recorder duration"
+              unavailableReason="not yet available"
+              {...(recorderDuration === undefined ? {} : { value: recorderDuration })}
+            />
+          </div>
 
           <div className="run-row__signals">
             {run.finalGitEvidence.state === "available" && run.finalGitEvidence.headChanged && (

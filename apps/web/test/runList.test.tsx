@@ -436,6 +436,19 @@ describe("production run ledger", () => {
     view.unmount();
   });
 
+  it("renders one integrated evidence-ledger frame with accessible evidence columns", async () => {
+    const { container } = renderApp(clientWithList(vi.fn(async () => page([
+      run("ledger-frame", { state: "known", value: "completed" })
+    ]))));
+
+    await screen.findByText("Latest likely test: passed · 1 previous failure");
+    expect(container.querySelector(".run-ledger-frame")).not.toBeNull();
+    expect(container.querySelector(".run-ledger__columns")).toHaveAttribute("aria-hidden", "true");
+    for (const label of ["Lifecycle", "Likely tests", "Human review", "Git"]) {
+      expect(screen.getByText(label)).toBeVisible();
+    }
+  });
+
   it("renders every row as a semantic destination with independent evidence labels", async () => {
     const user = userEvent.setup();
     const item = run("semantic-run", { state: "known", value: "completed" });
