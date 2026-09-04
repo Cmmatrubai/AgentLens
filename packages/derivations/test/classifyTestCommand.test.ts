@@ -118,6 +118,25 @@ describe("classifyTestCommand", () => {
   });
 
   it.each([
+    "sh -c \"pnpm test && /usr/bin/zsh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && command /usr/bin/zsh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && env /usr/bin/zsh -c 'pnpm test'\"",
+    "sh -c \"pnpm test && command /opt/homebrew/bin/bash -c 'pnpm test'\""
+  ])("rejects a nested shell command in every constrained compound wrapper form: %s", (command) => {
+    expect(classify(command)).toBeNull();
+  });
+
+  it("does not mistake harmless shell names in direct command arguments for a nested shell", () => {
+    expect(classify("sh -c \"pnpm vitest -t zsh && pnpm test\"")).toEqual({
+      family: "vitest",
+      confidence: "high",
+      commandShape: "compound",
+      outcomeAttribution: "unavailable",
+      derivationVersion: "test-command/2"
+    });
+  });
+
+  it.each([
     "echo pytest",
     "cat jest-output.txt",
     "pytest-results.txt",

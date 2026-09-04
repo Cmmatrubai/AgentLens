@@ -169,8 +169,8 @@ function packageManagerRuns(argv: readonly string[], runner: "jest" | "vitest"):
 }
 
 function isShellCommand(executable: string): boolean {
-  return executable === "sh" || executable === "bash" || executable === "zsh" ||
-    executable === "/bin/sh" || executable === "/bin/bash" || executable === "/bin/zsh";
+  const basename = executable.slice(executable.lastIndexOf("/") + 1);
+  return basename === "sh" || basename === "bash" || basename === "zsh";
 }
 
 function recognizeNpm(argv: readonly string[]): RecognizedTestCommand | null {
