@@ -1,20 +1,14 @@
 import type { RunDetailV1, TrajectoryEventV1, TrajectoryPageV1 } from "@agentlens/api-contract";
 import { useEffect, useRef, useState } from "react";
 
-import { AgentLensClientError, type AgentLensApiClient } from "../api/client.js";
+import { isRetryableActiveSnapshotError, retryActiveSnapshotRequest } from "../api/activeSnapshotRetry.js";
+import type { AgentLensApiClient } from "../api/client.js";
 
 const pollIntervalMs = 1_000;
 const pollLimit = 100;
 
 function active(status: RunDetailV1["status"] | undefined): boolean {
   return status?.state === "known" && (status.value === "starting" || status.value === "running");
-}
-
-function temporarySnapshotFailure(error: unknown): boolean {
-  return error instanceof AgentLensClientError &&
-    error.code === "active_snapshot_unavailable" &&
-    error.status === 503 &&
-    error.retryable;
 }
 
 export function useActiveRunPolling(input: Readonly<{
@@ -53,20 +47,46 @@ export function useActiveRunPolling(input: Readonly<{
     const poll = async (): Promise<void> => {
       const pollController = new AbortController();
       controller = pollController;
+      let terminalFailure: unknown = null;
       const lastSequence = eventsRef.current.at(-1)?.sequence;
       const eventQuery = lastSequence === undefined
         ? { limit: pollLimit }
         : { limit: pollLimit, afterSequence: lastSequence };
+      const markRetrying = (): void => {
+        if (disposed || controller !== pollController) return;
+        setPollState((current) => current.runId === input.runId
+          ? { ...current, degraded: true, error: null }
+          : current);
+      };
+      const stopOnTerminalFailure = (failure: unknown): void => {
+        if (isRetryableActiveSnapshotError(failure) || pollController.signal.aborted) return;
+        terminalFailure ??= failure;
+        pollController.abort();
+      };
       const [runResult, pageResult] = await Promise.allSettled([
-        input.client.getRun(input.runId, pollController.signal),
-        input.client.getEvents(input.runId, eventQuery, pollController.signal)
+        retryActiveSnapshotRequest({
+          request: () => input.client.getRun(input.runId, pollController.signal),
+          signal: pollController.signal,
+          onRetryableFailure: markRetrying
+        }).catch((failure: unknown) => {
+          stopOnTerminalFailure(failure);
+          throw failure;
+        }),
+        retryActiveSnapshotRequest({
+          request: () => input.client.getEvents(input.runId, eventQuery, pollController.signal),
+          signal: pollController.signal,
+          onRetryableFailure: markRetrying
+        }).catch((failure: unknown) => {
+          stopOnTerminalFailure(failure);
+          throw failure;
+        })
       ]);
-      if (disposed || pollController.signal.aborted) return;
+      if (disposed || (pollController.signal.aborted && terminalFailure === null)) return;
       if (controller === pollController) controller = null;
 
       let latestStatus = input.status;
       let degraded = false;
-      let failure: unknown = null;
+      let failure: unknown = terminalFailure;
       if (runResult.status === "fulfilled") {
         latestStatus = runResult.value.status;
         try {
@@ -74,9 +94,7 @@ export function useActiveRunPolling(input: Readonly<{
         } catch (error) {
           failure = error;
         }
-      } else if (temporarySnapshotFailure(runResult.reason)) {
-        degraded = true;
-      } else {
+      } else if (failure === null && !pollController.signal.aborted) {
         failure = runResult.reason;
       }
       if (pageResult.status === "fulfilled") {
@@ -85,9 +103,7 @@ export function useActiveRunPolling(input: Readonly<{
         } catch (error) {
           if (failure === null) failure = error;
         }
-      } else if (temporarySnapshotFailure(pageResult.reason)) {
-        degraded = true;
-      } else if (failure === null) {
+      } else if (failure === null && !pollController.signal.aborted) {
         failure = pageResult.reason;
       }
       setPollState({ runId: input.runId, degraded, error: failure });

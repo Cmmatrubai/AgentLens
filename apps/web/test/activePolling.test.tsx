@@ -195,6 +195,29 @@ afterEach(() => {
 });
 
 describe("active run polling", () => {
+  it("shows the pre-success retry state while an initial trajectory snapshot is retried", async () => {
+    vi.useFakeTimers();
+    const retryable = new AgentLensClientError({
+      code: "active_snapshot_unavailable",
+      status: 503,
+      retryable: true,
+      message: "safe fixture message"
+    });
+    const getRun = vi.fn(async () => new Promise<RunDetailV1>(() => undefined));
+    const getEvents = vi.fn()
+      .mockRejectedValueOnce(retryable)
+      .mockResolvedValueOnce(page("tail", [], null));
+    renderDetail(api({ getRun, getEvents }));
+
+    await flushQueries();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByLabelText("Live evidence status")).toHaveTextContent(
+      "Waiting for a safe active snapshot · retrying automatically"
+    );
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(screen.getByText("Loading run evidence…")).toBeVisible();
+  });
+
   it("catches an eager duplicate tail request before the initial trajectory snapshot settles", async () => {
     vi.useFakeTimers();
     let resolveInitial!: (value: TrajectoryPageV1) => void;
@@ -279,9 +302,9 @@ describe("active run polling", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
     expect(screen.getByText("Committed event 4")).toBeVisible();
     expect(screen.getByLabelText("Live evidence status")).toHaveTextContent(
-      "Live evidence temporarily unavailable"
+      "Last safe snapshot · retrying automatically"
     );
-    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
     expect(screen.getByText("Committed event 5")).toBeVisible();
     expect(getEvents).toHaveBeenLastCalledWith(
       "run-active",
@@ -554,7 +577,7 @@ describe("follow tail", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
 
     expect(screen.getByText("Committed event 4")).toBeVisible();
-    expect(screen.getByText(/Live evidence temporarily unavailable/)).toBeVisible();
+    expect(screen.getByText("Last safe snapshot · retrying automatically")).toBeVisible();
     const liveRegions = politeLiveRegions(view.container);
     expect(liveRegions).toHaveLength(1);
     expect(liveRegions[0]).toHaveTextContent("1 new event available");

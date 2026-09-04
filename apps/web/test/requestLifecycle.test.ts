@@ -378,6 +378,29 @@ describe("shared browser request lifecycle ledger", () => {
     ]);
   });
 
+  it("keeps sequential settled retry attempts in the original poll generation", () => {
+    const ledger = new RequestLifecycleLedger(origin);
+    const initialRun = request("/api/v1/runs/fixture-running", "GET", "fetch", null, "A1");
+    const initialEvents = request("/api/v1/runs/fixture-running/events?limit=100", "GET", "fetch", null, "A1");
+    const retryRun = request("/api/v1/runs/fixture-running", "GET", "fetch", null, "A1");
+    const retryEvents = request("/api/v1/runs/fixture-running/events?limit=100", "GET", "fetch", null, "A1");
+
+    ledger.started(initialRun);
+    ledger.started(initialEvents);
+    ledger.finished(initialRun);
+    ledger.finished(initialEvents);
+    ledger.started(retryRun);
+    ledger.started(retryEvents);
+
+    expect(ledger.snapshot().map(({ id, pollGeneration }) => ({ id, pollGeneration }))).toEqual([
+      { id: 1, pollGeneration: 1 },
+      { id: 2, pollGeneration: 1 },
+      { id: 3, pollGeneration: 1 },
+      { id: 4, pollGeneration: 1 }
+    ]);
+    expect(ledger.violations()).toEqual([]);
+  });
+
   it("reports active request IDs and poll generations for teardown diagnosis", () => {
     const ledger = new RequestLifecycleLedger(origin);
     const run = request("/api/v1/runs/fixture-running", "GET", "fetch", null, "active-1");

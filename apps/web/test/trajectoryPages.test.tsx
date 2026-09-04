@@ -1,9 +1,9 @@
 import type { EventDetailV1, TrajectoryEventV1, TrajectoryPageV1 } from "@agentlens/api-contract";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentLensApiClient } from "../src/api/client.js";
+import { AgentLensClientError, type AgentLensApiClient } from "../src/api/client.js";
 import { ApiClientProvider } from "../src/api/queries.js";
 import { useTrajectoryPages } from "../src/trajectory/useTrajectoryPages.js";
 
@@ -101,7 +101,180 @@ function wrapper(client: AgentLensApiClient) {
   );
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("trajectory request ownership", () => {
+  it("retries an initial typed active-snapshot refusal without discarding loading state", async () => {
+    vi.useFakeTimers();
+    const retryable = new AgentLensClientError({
+      code: "active_snapshot_unavailable",
+      status: 503,
+      retryable: true,
+      message: "safe fixture message"
+    });
+    const getEvents = vi.fn()
+      .mockRejectedValueOnce(retryable)
+      .mockRejectedValueOnce(retryable)
+      .mockResolvedValueOnce(page("run-a", [event("run-a", "event-a", 1)]));
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(view.result.current.state).toBe("loading");
+    expect(view.result.current.retrying).toBe(true);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(view.result.current.state).toBe("loading");
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+
+    expect(view.result.current.events.map(({ eventId }) => eventId)).toEqual(["event-a"]);
+    expect(view.result.current.retrying).toBe(false);
+  });
+
+  it("aborts an initial active-snapshot retry when navigation changes the run", async () => {
+    vi.useFakeTimers();
+    const retryable = new AgentLensClientError({
+      code: "active_snapshot_unavailable",
+      status: 503,
+      retryable: true,
+      message: "safe fixture message"
+    });
+    const getEvents = vi.fn((runId: string) => runId === "run-a"
+      ? Promise.reject(retryable)
+      : Promise.resolve(page("run-b", [event("run-b", "event-b", 1)])));
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(({ runId }) => useTrajectoryPages(runId, null), {
+      initialProps: { runId: "run-a" }, wrapper: wrapper(client)
+    });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    const abandonedSignal = getEvents.mock.calls[0]?.[2];
+    view.rerender({ runId: "run-b" });
+    expect(abandonedSignal?.aborted).toBe(true);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+
+    expect(view.result.current.events.map(({ eventId }) => eventId)).toEqual(["event-b"]);
+    expect(getEvents.mock.calls.filter(([runId]) => runId === "run-a")).toHaveLength(1);
+  });
+
+  it("does not retry a non-retryable initial trajectory error", async () => {
+    vi.useFakeTimers();
+    const failure = new AgentLensClientError({
+      code: "invalid_cursor",
+      status: 400,
+      retryable: false,
+      message: "safe fixture message"
+    });
+    const getEvents = vi.fn().mockRejectedValue(failure);
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(view.result.current.state).toBe("error");
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+
+    expect(getEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the loaded trajectory while a cursor page retries a typed active-snapshot refusal", async () => {
+    vi.useFakeTimers();
+    const retryable = new AgentLensClientError({
+      code: "active_snapshot_unavailable",
+      status: 503,
+      retryable: true,
+      message: "safe fixture message"
+    });
+    let cursorAttempts = 0;
+    const getEvents = vi.fn((_runId: string, query: { cursor?: string }) => {
+      if (query.cursor === "later-run-a") {
+        cursorAttempts += 1;
+        return cursorAttempts === 1
+          ? Promise.reject(retryable)
+          : Promise.resolve({
+              ...page("run-a", [event("run-a", "event-later", 10)], { hasEarlier: true, latest: 10 }),
+              mode: "cursor" as const
+            });
+      }
+      return Promise.resolve(page("run-a", [event("run-a", "event-head", 1)], { hasLater: true, latest: 10 }));
+    });
+    const client = { listRuns: vi.fn(), getRun: vi.fn(), getEvent: vi.fn(), getEvents } as AgentLensApiClient;
+    const view = renderHook(() => useTrajectoryPages("run-a", null), { wrapper: wrapper(client) });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(view.result.current.hasLater).toBe(true);
+
+    await act(async () => { void view.result.current.loadLater?.(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(view.result.current.events.map(({ eventId }) => eventId)).toEqual(["event-head"]);
+    expect(view.result.current.pagingState).toBe("loading");
+    expect(view.result.current.retrying).toBe(true);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(250); });
+    expect(view.result.current.events.map(({ eventId }) => eventId)).toEqual(["event-head", "event-later"]);
+    expect(view.result.current.pagingState).toBe("idle");
+    expect(view.result.current.retrying).toBe(false);
+    expect(cursorAttempts).toBe(2);
+  });
+
+  it("retries a selected-event lookup only for the typed active-snapshot refusal", async () => {
+    vi.useFakeTimers();
+    const retryable = new AgentLensClientError({
+      code: "active_snapshot_unavailable",
+      status: 503,
+      retryable: true,
+      message: "safe fixture message"
+    });
+    const selected = event("run-a", "event-selected", 40);
+    let detailAttempts = 0;
+    const client = {
+      listRuns: vi.fn(), getRun: vi.fn(),
+      getEvent: vi.fn(() => {
+        detailAttempts += 1;
+        return detailAttempts === 1 ? Promise.reject(retryable) : Promise.resolve(detail(selected));
+      }),
+      getEvents: vi.fn((_runId: string, query: { aroundSequence?: number }) => Promise.resolve(
+        query.aroundSequence === selected.sequence
+          ? { ...page("run-a", [selected], { hasEarlier: true, latest: 100 }), mode: "around" as const }
+          : page("run-a", [event("run-a", "event-head", 1)], { hasLater: true, latest: 100 })
+      ))
+    } as AgentLensApiClient;
+    const view = renderHook(({ selectedEventId }) => useTrajectoryPages("run-a", selectedEventId), {
+      initialProps: { selectedEventId: null as string | null }, wrapper: wrapper(client)
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(view.result.current.state).toBe("ready");
+
+    await act(async () => {
+      view.rerender({ selectedEventId: selected.eventId });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(view.result.current.selectionState).toBe("resolving");
+    expect(view.result.current.retrying).toBe(true);
+    expect(client.getEvent).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(250);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect({
+      eventIds: view.result.current.events.map(({ eventId }) => eventId),
+      selectionState: view.result.current.selectionState,
+      retrying: view.result.current.retrying,
+      detailAttempts
+    }).toEqual({
+      eventIds: ["event-head", "event-selected"],
+      selectionState: "idle",
+      retrying: false,
+      detailAttempts: 2
+    });
+  });
+
   it("ignores an initial page that resolves after navigation aborted its run", async () => {
     const runA = deferred<TrajectoryPageV1>();
     const runB = deferred<TrajectoryPageV1>();

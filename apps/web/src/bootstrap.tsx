@@ -14,6 +14,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
+import { activeSnapshotRetryDelay, isRetryableActiveSnapshotError } from "./api/activeSnapshotRetry.js";
 import { createAgentLensApiClient } from "./api/client.js";
 import { App } from "./app/App.js";
 
@@ -38,10 +39,8 @@ export function boot(bearerToken: string | null): void {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: {
-        retry: (failureCount, error) => {
-          if (error instanceof Error && error.name === "AgentLensClientError") return false;
-          return failureCount < 1;
-        },
+        retry: (_failureCount, error) => isRetryableActiveSnapshotError(error),
+        retryDelay: (attemptIndex) => activeSnapshotRetryDelay(attemptIndex),
         refetchOnWindowFocus: false
       }
     }

@@ -263,6 +263,32 @@ describe("AgentLens authenticated API client", () => {
     });
   });
 
+  it("preserves only the typed active-snapshot retry contract without reflecting server text", async () => {
+    const rawSentinel = "/private/ACTIVE_SNAPSHOT_SENTINEL";
+    const client = createAgentLensApiClient({
+      origin: "http://127.0.0.1:43123",
+      bearerToken: "fixture-bearer",
+      fetchImpl: vi.fn(async () => json({
+        schemaVersion: 1,
+        error: {
+          code: "active_snapshot_unavailable",
+          message: rawSentinel,
+          retryable: true
+        }
+      }, { status: 503 }))
+    });
+
+    const failure = await client.getRun("fixture-run").catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AgentLensClientError);
+    expect(failure).toMatchObject({
+      status: 503,
+      code: "active_snapshot_unavailable",
+      retryable: true,
+      message: "Active run evidence is temporarily unavailable."
+    });
+    expect(JSON.stringify(failure)).not.toContain(rawSentinel);
+  });
+
   it("normalizes aborts raised while consuming a response body and releases the reader", async () => {
     const rawSentinel = "RAW_BODY_ABORT_SENTINEL";
     const stream = new ReadableStream<Uint8Array>({

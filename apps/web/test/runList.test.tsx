@@ -18,6 +18,10 @@ import {
   AgentLensClientError,
   type AgentLensApiClient
 } from "../src/api/client.js";
+import {
+  activeSnapshotRetryDelay,
+  isRetryableActiveSnapshotError
+} from "../src/api/activeSnapshotRetry.js";
 const runListStyle = document.createElement("style");
 
 beforeAll(() => {
@@ -159,11 +163,11 @@ function LocationProbe() {
 
 function renderApp(
   client: AgentLensApiClient | null,
-  initialEntry = "/runs"
-) {
-  const queryClient = new QueryClient({
+  initialEntry = "/runs",
+  queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } }
-  });
+  })
+) {
   return render(
     <MemoryRouter
       future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
@@ -209,6 +213,37 @@ function clientForEmptyDetail(runId: string): AgentLensApiClient {
 }
 
 describe("production run ledger", () => {
+  it("recovers the initial ledger from only a typed active-snapshot refusal", async () => {
+    const retryable = new AgentLensClientError({
+      code: "active_snapshot_unavailable",
+      status: 503,
+      retryable: true,
+      message: "safe fixture message"
+    });
+    const listRuns = vi.fn()
+      .mockRejectedValueOnce(retryable)
+      .mockResolvedValueOnce(page([run("recovered", { state: "known", value: "running" })]));
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: (_failureCount, error) => isRetryableActiveSnapshotError(error),
+          retryDelay: (attemptIndex) => activeSnapshotRetryDelay(attemptIndex),
+          gcTime: 0
+        }
+      }
+    });
+    const view = renderApp(clientWithList(listRuns), "/runs", queryClient);
+
+    expect(await screen.findByLabelText("Live evidence status")).toHaveTextContent(
+      "Waiting for a safe active snapshot · retrying automatically"
+    );
+    expect(await screen.findByText("Run recovered")).toBeVisible();
+    expect(listRuns).toHaveBeenCalledTimes(2);
+    expect(screen.queryByLabelText("Live evidence status")).not.toBeInTheDocument();
+    view.unmount();
+    queryClient.clear();
+  });
+
   it("renders the maximum contract-valid timestamp without crashing", async () => {
     const item = run("maximum-date", { state: "known", value: "completed" }, {
       startedAt: maximumEcmaScriptTimestamp,

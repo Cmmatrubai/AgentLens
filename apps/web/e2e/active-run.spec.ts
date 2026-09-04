@@ -63,54 +63,77 @@ test("active zero-event tail polling appends without forcing history and stops a
 test.describe("retryable active snapshot failure", () => {
   test.use({
     allowedSameOriginFailures: {
-      responses: [{
-        method: "GET",
-        pathname: "/api/v1/runs/fixture-running/events",
-        status: 503
-      }]
+      responses: [
+        { method: "GET", pathname: "/api/v1/runs/fixture-running", status: 503 },
+        { method: "GET", pathname: "/api/v1/runs/fixture-running/events", status: 503 },
+        { method: "GET", pathname: "/api/v1/runs/fixture-running/events", status: 503 }
+      ]
     }
   });
 
-  test("retains the existing trajectory", async ({ page, productionUi, releaseFixture, requestLifecycle }) => {
+  test("recovers initial and later safe snapshots without reflecting sidecar detail", async ({
+    page, productionUi, releaseFixture, requestLifecycle
+  }) => {
     await openBootstrapped(page, productionUi);
     releaseFixture.appendActive();
     expect(releaseFixture.activeWalModes()).toEqual([0o600, 0o600, 0o600]);
-    await navigateToRun(page, "fixture-running");
-    await expect(page.getByText("1 immutable events loaded")).toBeVisible();
-    let injected = false;
-    await page.route("**/api/v1/runs/fixture-running/events**", async (route) => {
-      if (!injected) {
-        injected = true;
+    const retryResponseBody = JSON.stringify({
+      schemaVersion: 1,
+      error: { code: "active_snapshot_unavailable", message: "Active evidence is temporarily unavailable.", retryable: true }
+    });
+    const retryResponseBodies: string[] = [];
+    page.on("response", (response) => {
+      if (response.status() !== 503 ||
+          new URL(response.url()).pathname.startsWith("/api/v1/runs/fixture-running") === false) return;
+      void response.text().then((body) => { retryResponseBodies.push(body); });
+    });
+    let refuseRun = true;
+    let refusedEvents = 0;
+    let refuseLaterEvent = false;
+    let delayLaterEventRecovery = false;
+    await page.route("**/api/v1/runs/fixture-running**", async (route) => {
+      const pathname = new URL(route.request().url()).pathname;
+      const isRun = pathname === "/api/v1/runs/fixture-running";
+      const isEvents = pathname === "/api/v1/runs/fixture-running/events";
+      if ((isRun && refuseRun) || (isEvents && (refusedEvents === 0 || refuseLaterEvent))) {
+        if (isRun) refuseRun = false;
+        if (isEvents) {
+          refusedEvents += 1;
+          refuseLaterEvent = false;
+          delayLaterEventRecovery = refusedEvents === 2;
+        }
         await route.fulfill({
           status: 503,
           contentType: "application/json",
-          body: JSON.stringify({
-            schemaVersion: 1,
-            error: { code: "active_snapshot_unavailable", message: "Active evidence is temporarily unavailable.", retryable: true }
-          })
+          body: retryResponseBody
         });
         return;
       }
+      if (isEvents && delayLaterEventRecovery) {
+        delayLaterEventRecovery = false;
+        await new Promise<void>((resolve) => { setTimeout(resolve, 750); });
+      }
       await route.continue();
     });
-    const failedCheckpoint = requestLifecycle.checkpoint();
-    const failedPoll = requestLifecycle.waitForPollGeneration(failedCheckpoint, {
-      runId: "fixture-running",
-      eventSearch: "?limit=100&afterSequence=0"
-    });
-    const degradedVisible = expect(page.getByText(/Live evidence temporarily unavailable/))
-      .toBeVisible({ timeout: 7_500 });
+
+    const waitingForSnapshot = expect(page.getByLabel("Live evidence status")).toHaveText(
+      "Waiting for a safe active snapshot · retrying automatically"
+    );
+    await page.locator('a[href="/runs/fixture-running"]').click();
+    await expect(page).toHaveURL(/\/runs\/fixture-running(?:\?|$)/);
+    await waitingForSnapshot;
+    await expect(page.getByText("1 immutable events loaded")).toBeVisible({ timeout: 7_500 });
+    await expect(page.getByLabel("Live evidence status")).toHaveCount(0);
+
+    refuseLaterEvent = true;
     releaseFixture.appendActive();
-    const [failedGeneration] = await Promise.all([failedPoll, degradedVisible]);
-    expect((await failedGeneration.events.request.response())?.status()).toBe(503);
-    const recoveredCheckpoint = requestLifecycle.checkpoint();
-    const recoveredPoll = requestLifecycle.waitForPollGeneration(recoveredCheckpoint, {
-      runId: "fixture-running",
-      eventSearch: "?limit=100&afterSequence=0"
-    });
-    const recoveredGeneration = await recoveredPoll;
-    expect((await recoveredGeneration.events.request.response())?.status()).toBe(200);
+    await expect(page.getByLabel("Live evidence status")).toHaveText(
+      "Last safe snapshot · retrying automatically",
+      { timeout: 7_500 }
+    );
+    await expect(page.getByText("1 immutable events loaded")).toBeVisible();
     await expect(page.getByText("Committed active event 1")).toBeVisible();
+    await expect(page.getByLabel("Live evidence status")).toHaveCount(0);
     const terminalCheckpoint = requestLifecycle.checkpoint();
     const terminalPoll = requestLifecycle.waitForPollGeneration(terminalCheckpoint, {
       runId: "fixture-running",
@@ -121,6 +144,10 @@ test.describe("retryable active snapshot failure", () => {
       terminalPoll,
       expect(page.getByText("completed", { exact: true }).first()).toBeVisible({ timeout: 7_500 })
     ]);
+    await expect.poll(() => retryResponseBodies.length).toBe(3);
+    for (const body of retryResponseBodies) {
+      expect(body).not.toMatch(/\/(?:Users|private|tmp)\b|-(?:wal|shm)\b/i);
+    }
     expect(requestLifecycle.describeActive(productionUi.origin)).toEqual([]);
   });
 });

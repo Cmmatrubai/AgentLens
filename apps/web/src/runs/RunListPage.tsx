@@ -7,6 +7,7 @@ import {
   type RunListQueryV1,
   type RunStatusQueryV1
 } from "../api/client.js";
+import { isRetryableActiveSnapshotError } from "../api/activeSnapshotRetry.js";
 import { useRunList } from "../api/queries.js";
 import { ErrorState } from "../app/ErrorState.js";
 import { RunFilters } from "./RunFilters.js";
@@ -86,6 +87,7 @@ export function RunListPage() {
   const query = useMemo(() => parseQuery(searchParams), [serializedSearch]);
   const canonical = queryParams(query);
   const result = useRunList(query);
+  const retryingActiveSnapshot = isRetryableActiveSnapshotError(result.failureReason);
   const isConstrainedPage = query.cursor !== undefined ||
     query.status !== undefined ||
     query.repository !== undefined ||
@@ -110,6 +112,13 @@ export function RunListPage() {
 
       <RunFilters query={query} onApply={apply} />
 
+      {retryingActiveSnapshot && (
+        <p className="live-evidence-state live-evidence-state--degraded" aria-label="Live evidence status">
+          {result.data === undefined
+            ? "Waiting for a safe active snapshot · retrying automatically"
+            : "Last safe snapshot · retrying automatically"}
+        </p>
+      )}
       {result.isPending && <div className="loading-state" role="status">Loading run evidence…</div>}
       {result.isError && (() => {
         const copy = errorCopy(result.error);

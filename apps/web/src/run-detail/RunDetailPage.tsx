@@ -2,6 +2,7 @@ import { browserAddressableEventIdV1Schema } from "@agentlens/api-contract";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
+import { isRetryableActiveSnapshotError } from "../api/activeSnapshotRetry.js";
 import { useAgentLensApi } from "../api/queries.js";
 import { queryKeys } from "../api/queryKeys.js";
 import { ErrorState } from "../app/ErrorState.js";
@@ -35,8 +36,17 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
     onPage: trajectory.appendPage
   });
   const select = (eventId: string): void => setSearchParams({ event: eventId });
+  const retryingActiveSnapshot = trajectory.retrying || polling.degraded ||
+    isRetryableActiveSnapshotError(run.failureReason);
+  const activeSnapshotCopy = run.data === undefined && trajectory.events.length === 0
+    ? "Waiting for a safe active snapshot · retrying automatically"
+    : "Last safe snapshot · retrying automatically";
 
-  if (run.isPending) return <div className="loading-state">Loading run evidence…</div>;
+  if (run.isPending) {
+    return retryingActiveSnapshot
+      ? <p className="live-evidence-state live-evidence-state--degraded" aria-label="Live evidence status">{activeSnapshotCopy}</p>
+      : <div className="loading-state">Loading run evidence…</div>;
+  }
   if (run.isError) return <ErrorState title="Run evidence unavailable" message="AgentLens could not load this run." />;
   return (
     <section className="run-detail-page">
@@ -45,9 +55,9 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
       {invalidEventQuery && (
         <section className="trajectory-selection-error" role="alert">The selected event link is invalid.</section>
       )}
-      {polling.degraded && (
+      {retryingActiveSnapshot && (
         <p className="live-evidence-state live-evidence-state--degraded" aria-label="Live evidence status">
-          Live evidence temporarily unavailable · retrying automatically.
+          {activeSnapshotCopy}
         </p>
       )}
       {polling.error !== null && (

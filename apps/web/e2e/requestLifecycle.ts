@@ -489,7 +489,8 @@ export class RequestLifecycleLedger<TRequest extends BrowserRequestLike = Browse
       generation: null,
       runId: classified.runId
     };
-    if (group[classified.kind] !== undefined) {
+    const previous = group[classified.kind];
+    if (previous !== undefined && snapshot(previous).terminal.state === "active") {
       this.#violations.push(
         `correlation ${correlation} assigned more than one ${classified.kind} request for run ${classified.runId}`
       );
@@ -497,7 +498,11 @@ export class RequestLifecycleLedger<TRequest extends BrowserRequestLike = Browse
     }
     group[classified.kind] = record;
     this.#pollGroups.set(groupKey, group);
-    if (group.run === undefined || group.events === undefined || group.generation !== null) return;
+    if (group.generation !== null) {
+      record.pollGeneration = group.generation;
+      return;
+    }
+    if (group.run === undefined || group.events === undefined) return;
     const generation = (this.#pollGenerations.get(classified.runId) ?? 0) + 1;
     this.#pollGenerations.set(classified.runId, generation);
     group.generation = generation;
