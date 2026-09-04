@@ -4,10 +4,13 @@ import "@fontsource/geist-sans/600.css";
 import "@fontsource-variable/geist-mono/wght.css";
 import "./styles/tokens.css";
 import "./styles/global.css";
+import "./styles/shell.css";
 import "./styles/run-list.css";
+import "./styles/run-detail.css";
 import "./styles/trajectory.css";
 import "./styles/evidence.css";
 import "./styles/assessment.css";
+import "./styles/responsive.css";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
