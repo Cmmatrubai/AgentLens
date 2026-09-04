@@ -27,10 +27,6 @@ body,
     padding: var(--space-6);
   }
 
-  .run-detail-header dl {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
   .run-workspace {
     grid-template-columns: minmax(0, 1fr) minmax(320px, 340px);
   }
@@ -72,8 +68,13 @@ body,
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .run-detail-header dl {
+  .run-evidence-strip dl {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .run-evidence-strip__primary,
+  .run-evidence-strip__metadata {
+    grid-column: span 1;
   }
 
   .trajectory-row {
@@ -103,7 +104,7 @@ body,
 
 @media (max-width: 520px) {
   .run-filters,
-  .run-detail-header dl {
+  .run-evidence-strip dl {
     grid-template-columns: minmax(0, 1fr);
   }
 }

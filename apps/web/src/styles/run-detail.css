@@ -4,30 +4,38 @@
 
 .run-detail-page__back {
   display: inline-block;
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-2);
   color: var(--text-muted);
+  font-size: 12px;
 }
 
 .run-detail-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(420px, 0.8fr);
-  gap: var(--space-6);
-  padding-bottom: var(--space-6);
+  grid-template-columns: minmax(220px, 0.45fr) minmax(0, 1.55fr);
+  gap: var(--space-4);
+  padding-bottom: var(--space-4);
   border-bottom: 1px solid var(--border-soft);
 }
 
+.run-detail-header .page-eyebrow {
+  margin: 0;
+  font-size: 10px;
+}
+
 .run-detail-header h1 {
-  margin: 2px 0 var(--space-2);
+  margin: 2px 0 var(--space-1);
   overflow-wrap: anywhere;
-  font-size: clamp(24px, 3vw, 36px);
+  font-size: clamp(22px, 2.4vw, 30px);
   font-weight: 500;
   letter-spacing: -0.04em;
 }
 
 .run-detail-header__identity {
+  margin: 0;
   overflow-wrap: anywhere;
   color: var(--text-muted);
   font-family: var(--font-code);
+  font-size: 12px;
 }
 
 .run-detail-header__signals {
@@ -37,24 +45,42 @@
   gap: var(--space-2);
 }
 
-.run-detail-header dl {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-3);
-  margin: 0;
-}
-
-.run-detail-header dl div {
+.run-evidence-strip {
   min-width: 0;
 }
 
-.run-detail-header dt {
+.run-evidence-strip dl {
+  display: grid;
+  grid-template-columns: repeat(20, minmax(0, 1fr));
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+}
+
+.run-evidence-strip__primary {
+  grid-column: span 5;
+}
+
+.run-evidence-strip__metadata {
+  grid-column: span 4;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  font-family: var(--font-code);
+  font-size: 12px;
+}
+
+.run-evidence-strip__primary,
+.run-evidence-strip__metadata {
+  min-width: 0;
+}
+
+.run-evidence-strip dt {
   color: var(--text-dim);
   font-size: 11px;
   text-transform: uppercase;
 }
 
-.run-detail-header dd {
+.run-evidence-strip dd {
   margin: 3px 0 0;
   overflow-wrap: anywhere;
 }
@@ -63,8 +89,8 @@
   display: grid;
   grid-template-columns: minmax(220px, 1fr) minmax(340px, 1.5fr) auto;
   align-items: end;
-  gap: var(--space-4);
-  padding: var(--space-6) 0 var(--space-4);
+  gap: var(--space-3);
+  padding: var(--space-4) 0 var(--space-3);
 }
 
 .trajectory-toolbar h2 {
