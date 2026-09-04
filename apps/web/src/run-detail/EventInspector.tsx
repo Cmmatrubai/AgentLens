@@ -4,7 +4,7 @@ import type {
   TrajectoryEventV1
 } from "@agentlens/api-contract";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { AgentLensClientError } from "../api/client.js";
 import {
@@ -91,6 +91,7 @@ export function EventInspector(props: Readonly<{
   onRelationshipJump: (eventId: string) => void;
   session?: EventInspectorSession;
   onSessionChange?: (session: EventInspectorSession) => void;
+  children?: ReactNode;
 }>) {
   const idPrefix = useId().replaceAll(":", "");
   const motionPolicy = useMotionPolicy();
@@ -136,17 +137,20 @@ export function EventInspector(props: Readonly<{
       <h2 id={`${idPrefix}-title`}>Event inspector</h2>
       <p className="event-inspector__summary">{props.event.safeSummary || "No safe summary available."}</p>
       <InspectorTabs idPrefix={idPrefix} tabs={tabs} selected={session.selectedTab} onSelect={chooseTab} />
-      <AnimatePresence mode="wait" initial={false}>
-        <motion.div
-          key={`${props.event.eventId}:${session.selectedTab}`}
-          className="event-inspector__body"
-          data-testid="event-inspector-body"
-          data-inspector-event={props.event.eventId}
-          initial={{ opacity: 0, x: 4 }}
-          animate={{ opacity: 1, x: 0 }}
-          exit={{ opacity: 0, x: -4 }}
-          transition={motionPolicy.inspector}
-        >
+      <div
+        className="event-inspector__body"
+        data-testid="event-inspector-body"
+        data-inspector-event={props.event.eventId}
+      >
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.div
+            key={`${props.event.eventId}:${session.selectedTab}`}
+            className="event-inspector__panel"
+            initial={{ opacity: 0, x: 4 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -4 }}
+            transition={motionPolicy.inspector}
+          >
           {session.selectedTab === "evidence" && (
             <div
               role="tabpanel"
@@ -234,8 +238,10 @@ export function EventInspector(props: Readonly<{
               {native.data !== undefined && <NativeEvidence response={native.data} />}
             </div>
           )}
-        </motion.div>
-      </AnimatePresence>
+          </motion.div>
+        </AnimatePresence>
+        {props.children}
+      </div>
     </section>
   );
 }

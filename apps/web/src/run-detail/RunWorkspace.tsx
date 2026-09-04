@@ -123,12 +123,13 @@ export function RunWorkspace(props: Readonly<{
         onRelationshipJump={props.onSelect}
         session={inspectorSession}
         onSessionChange={setInspectorSession}
-      />
-      <GitEvidenceSummary
-        runId={props.runId}
-        {...(props.run === undefined ? {} : { run: props.run })}
-        onOpenDiff={() => setDeepEvidenceOpen(true)}
-      />
+      >
+        <GitEvidenceSummary
+          runId={props.runId}
+          {...(props.run === undefined ? {} : { run: props.run })}
+          onOpenDiff={() => setDeepEvidenceOpen(true)}
+        />
+      </EventInspector>
     </>
   );
   const inlineInspector = narrow && selected !== null ? (

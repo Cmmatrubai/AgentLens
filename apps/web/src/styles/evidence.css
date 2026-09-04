@@ -25,7 +25,7 @@
 }
 
 .trajectory-inspector > .event-inspector {
-  flex: 1 1 0;
+  flex: 1 1 auto;
 }
 
 .event-inspector {
@@ -33,6 +33,7 @@
   grid-template-rows: auto auto auto auto minmax(0, 1fr);
   min-height: 0;
   max-height: 100%;
+  overflow: hidden;
 }
 
 .event-inspector__body {

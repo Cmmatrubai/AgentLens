@@ -67,4 +67,62 @@ test("the desktop inspector frame remains fixed across selections and tabs", asy
     expect(Math.abs(afterSelection[coordinate] - before[coordinate])).toBeLessThanOrEqual(1);
     expect(Math.abs(afterTab[coordinate] - before[coordinate])).toBeLessThanOrEqual(1);
   }
+
+  for (const viewport of [
+    { width: 1440, height: 1000 },
+    { width: 1100, height: 900 }
+  ]) {
+    await page.setViewportSize(viewport);
+    const metrics = await inspector.evaluate((element) => {
+      const required = <T extends Element>(selector: string): T => {
+        const match = element.querySelector<T>(selector);
+        if (match === null) throw new Error(`missing inspector element: ${selector}`);
+        return match;
+      };
+      const body = required<HTMLElement>(".event-inspector__body");
+      const trajectory = element.closest(".run-workspace")?.querySelector<HTMLElement>(".trajectory-viewport");
+      if (trajectory === null || trajectory === undefined) throw new Error("missing trajectory viewport");
+      return {
+        bodyClientHeight: body.clientHeight,
+        bodyScrollHeight: body.scrollHeight,
+        headingHeight: required<HTMLElement>(".event-inspector h2").getBoundingClientRect().height,
+        summaryHeight: required<HTMLElement>(".event-inspector__summary").getBoundingClientRect().height,
+        tabsHeight: required<HTMLElement>(".inspector-tabs").getBoundingClientRect().height,
+        inspectorHeight: element.getBoundingClientRect().height,
+        trajectoryHeight: trajectory.getBoundingClientRect().height
+      };
+    });
+    const label = `${viewport.width}×${viewport.height}`;
+    expect.soft(metrics.headingHeight, `${label} inspector heading height`).toBeGreaterThanOrEqual(18);
+    expect.soft(metrics.summaryHeight, `${label} inspector summary height`).toBeGreaterThanOrEqual(16);
+    expect.soft(metrics.tabsHeight, `${label} inspector tabs height`).toBeGreaterThanOrEqual(36);
+    expect.soft(metrics.bodyClientHeight, `${label} inspector body visible height`)
+      .toBeGreaterThanOrEqual(Math.min(metrics.bodyScrollHeight, 120));
+    expect.soft(Math.abs(metrics.inspectorHeight - metrics.trajectoryHeight), `${label} matched frame height`)
+      .toBeLessThanOrEqual(1);
+  }
+
+  await page.setViewportSize({ width: 800, height: 900 });
+  const inline = page.getByTestId("inline-event-inspector");
+  await expect(inline).toBeVisible();
+  const selectedEventId = await page.getByRole("option", { selected: true }).getAttribute("data-event-id");
+  if (selectedEventId === null) throw new Error("selected inline event identity unavailable");
+  await expect(inline.locator(".event-inspector__body"))
+    .toHaveAttribute("data-inspector-event", selectedEventId);
+  const inlineMetrics = await inline.evaluate((element) => {
+    const body = element.querySelector<HTMLElement>(".event-inspector__body");
+    const tabs = element.querySelector<HTMLElement>(".inspector-tabs");
+    if (body === null || tabs === null) throw new Error("inline inspector body or tabs missing");
+    return {
+      bodyClientHeight: body.clientHeight,
+      bodyScrollHeight: body.scrollHeight,
+      tabsHeight: tabs.getBoundingClientRect().height,
+      anchorEventId: element.closest("[data-inline-evidence-anchor-for]")
+        ?.getAttribute("data-inline-evidence-anchor-for") ?? null
+    };
+  });
+  expect(inlineMetrics.tabsHeight).toBeGreaterThanOrEqual(36);
+  expect(inlineMetrics.bodyClientHeight)
+    .toBeGreaterThanOrEqual(Math.min(inlineMetrics.bodyScrollHeight, 120));
+  expect(inlineMetrics.anchorEventId).toBe(selectedEventId);
 });
