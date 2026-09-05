@@ -67,6 +67,52 @@ function translatedTop(element: HTMLElement): number {
 }
 
 describe("virtualized execution trajectory", () => {
+  it("Home and End address the first and last immutable member of a routine cluster", async () => {
+    const fixture = events(4).map((event) => ({ ...event, kind: "message", presentationClass: "message" as const,
+      provenance: "observed" as const, status: { state: "known" as const, value: "completed" as const } }));
+    const select = vi.fn();
+    render(<Trajectory events={fixture} selectedEventId={null} expandedGroupKeys={new Set()}
+      onSelect={select} onEscapeDeepEvidence={vi.fn()} onRelationshipJump={vi.fn()} />);
+    screen.getByRole("option").focus();
+    await userEvent.keyboard("{Home}{Enter}");
+    expect(select).toHaveBeenLastCalledWith("event-1");
+    await userEvent.keyboard("{End}{Enter}");
+    expect(select).toHaveBeenLastCalledWith("event-4");
+  });
+  it("exposes routine members and clarification outside the listbox without requesting content", async () => {
+    const fixture = events(4).map((event) => ({ ...event, kind: "message", presentationClass: "message" as const,
+      provenance: "observed" as const, status: { state: "known" as const, value: "completed" as const } }));
+    const onSelect = vi.fn();
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    render(<Trajectory events={fixture} selectedEventId="event-2" expandedGroupKeys={new Set()}
+      onSelect={onSelect} onEscapeDeepEvidence={vi.fn()} onRelationshipJump={vi.fn()} />);
+    expect(screen.getByRole("checkbox", { name: "Group routine events" })).toBeChecked();
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    const clarification = screen.getByRole("region", { name: "Node clarification" });
+    expect(screen.getByRole("listbox")).not.toContainElement(clarification);
+    expect(clarification).toHaveTextContent("Safe event 2");
+    expect(clarification).toHaveTextContent("Observed evidence");
+    await userEvent.click(within(clarification).getByRole("button", { name: /Select immutable event event-3/ }));
+    expect(onSelect).toHaveBeenLastCalledWith("event-3");
+    await userEvent.click(screen.getByRole("checkbox", { name: "Group routine events" }));
+    expect(screen.getAllByRole("option")).toHaveLength(4);
+    expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", "event-2");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("keeps exact edges after unrelated selection and traverses branch direction", async () => {
+    const fixture = events(3);
+    fixture[1] = { ...fixture[1]!, relationships: [{ type: "derived_from", eventId: "event-1" }] };
+    const jump = vi.fn();
+    const view = render(<Trajectory events={fixture} selectedEventId="event-3" expandedGroupKeys={new Set()}
+      onSelect={vi.fn()} onEscapeDeepEvidence={vi.fn()} onRelationshipJump={jump} />);
+    expect(view.container.querySelector('[data-graph-edge][data-source="event-2"][data-target="event-1"]')).not.toBeNull();
+    const source = screen.getAllByRole("option").find((node) => node.dataset.eventId === "event-2")!;
+    source.focus();
+    await userEvent.keyboard("{ArrowRight}");
+    expect(jump).toHaveBeenLastCalledWith("event-1");
+  });
   it.each([10, 50, 250, 1_000])("keeps the mounted row DOM bounded for %i events", (count) => {
     render(
       <Trajectory
@@ -97,9 +143,7 @@ describe("virtualized execution trajectory", () => {
         domain: "turn" as const,
         phase: index === 0 ? "started" as const : "completed" as const
       } : null,
-      relationships: index === 1
-        ? [{ type: "correlates_with" as const, eventId: "measured-3" }]
-        : []
+      relationships: []
     }));
     const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
       if (this.classList.contains("trajectory-viewport") || this.classList.contains("trajectory-stage")) {
@@ -141,9 +185,7 @@ describe("virtualized execution trajectory", () => {
       groupedRow.focus();
       expect(document.activeElement).toBe(groupedRow);
 
-      await waitFor(() => expect(container.querySelector("[data-relationship-connector]"))
-        .toHaveAttribute("y1", "110"));
-      expect(container.querySelector("[data-relationship-connector]")).toHaveAttribute("y2", "290");
+      expect(container.querySelector("[data-graph-node]")).not.toBeNull();
     } finally {
       rectSpy.mockRestore();
     }
@@ -243,116 +285,45 @@ describe("virtualized execution trajectory", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it("renders only selected visible connectors and uses a labeled jump for an unloaded target", async () => {
-    let targetTop = 180;
-    const rect = (top: number, bottom: number, left = 0, right = 800): DOMRect => ({
-      x: left, y: top, top, bottom, left, right, width: right - left, height: bottom - top,
-      toJSON: () => ({})
-    } as DOMRect);
-    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
-      if (this.classList.contains("trajectory-viewport") || this.classList.contains("trajectory-stage")) {
-        return rect(0, 520);
-      }
-      if (this.dataset.eventId === "event-1") return rect(40, 140, 100, 700);
-      if (this.dataset.eventId === "event-2") return rect(targetTop, targetTop + 100, 100, 700);
-      return rect(0, 132);
-    });
+  it("retains deduplicated exact paths and exposes unloaded jumps outside the listbox", async () => {
     const fixture = events(50);
-    fixture[0] = {
-      ...fixture[0]!,
-      relationships: [
-        { type: "correlates_with", eventId: "event-2" },
-        { type: "correlates_with", eventId: "event-2" },
-        { type: "derived_from", eventId: "event-900" },
-        { type: "derived_from", eventId: "event-900" }
-      ]
-    };
-    const onRelationshipJump = vi.fn();
-    const { container } = render(
-      <Trajectory
-        events={fixture}
-        selectedEventId="event-1"
-        expandedGroupKeys={new Set()}
-        onSelect={vi.fn()}
-        onEscapeDeepEvidence={vi.fn()}
-        onRelationshipJump={onRelationshipJump}
-      />
-    );
-
-    await waitFor(() => expect(container.querySelectorAll("[data-relationship-connector]")).toHaveLength(1));
-    const connector = container.querySelector("[data-relationship-connector]")!;
-    expect(connector).toHaveAttribute("x1", "400");
-    expect(connector).toHaveAttribute("y1", "90");
-    expect(connector).toHaveAttribute("x2", "400");
-    expect(connector).toHaveAttribute("y2", "230");
-    expect(getComputedStyle(container.querySelector("[data-relationship-overlay]")!).pointerEvents)
-      .toBe("none");
-    expect(container.querySelector("[data-global-relationship-graph]")).toBeNull();
-
-    const jump = [...container.querySelectorAll<HTMLElement>('[data-row-action="relationship"]')]
-      .find((action) => action.textContent === "Jump to derived from event event-900");
-    expect(jump).toBeDefined();
-    await userEvent.click(jump!);
-    expect(onRelationshipJump).toHaveBeenCalledWith("event-900");
-    expect([...container.querySelectorAll('[data-row-action="relationship"]')].filter(
-      (action) => action.textContent === "Jump to derived from event event-900"
-    )).toHaveLength(1);
-    targetTop = 300;
-    fireEvent(window, new Event("resize"));
-    await waitFor(() => expect(connector).toHaveAttribute("y2", "350"));
-    rectSpy.mockRestore();
+    fixture[0] = { ...fixture[0]!, relationships: [
+      { type: "correlates_with", eventId: "event-2" }, { type: "correlates_with", eventId: "event-2" },
+      { type: "derived_from", eventId: "event-900" }] };
+    const jump = vi.fn();
+    const { container } = render(<Trajectory events={fixture} selectedEventId="event-1" expandedGroupKeys={new Set()}
+      onSelect={vi.fn()} onEscapeDeepEvidence={vi.fn()} onRelationshipJump={jump} />);
+    expect(container.querySelectorAll("[data-graph-edge]")).toHaveLength(2);
+    expect(container.querySelector("[data-relationship-overlay]")).toHaveAttribute("aria-hidden", "true");
+    expect(getComputedStyle(container.querySelector("[data-relationship-overlay]")!).pointerEvents).toBe("none");
+    const action = screen.getByRole("button", { name: /Jump to derived from event event-900/ });
+    expect(screen.getByRole("listbox")).not.toContainElement(action);
+    await userEvent.click(action);
+    expect(jump).toHaveBeenLastCalledWith("event-900");
+    expect(container.querySelector("[data-relationship-overlay]")).toHaveTextContent("not loaded");
   });
 
-  it("offers grouped-event, expansion, and relationship actions through the one row tab stop", async () => {
+  it("offers immutable members and expansion through Alt-arrow actions and real clarification buttons", async () => {
     const groupKey = `grp_${"b".repeat(64)}`;
-    const fixture = events(2).map((item, index) => ({
-      ...item,
+    const fixture = events(2).map((item, index) => ({ ...item,
       eventId: index === 0 ? "group-start" : "group-terminal",
       kind: index === 0 ? "turn.started" : "turn.completed",
       status: { state: "known" as const, value: index === 0 ? "in_progress" as const : "completed" as const },
-      presentationClass: "lifecycle" as const,
-      lifecycleGroupKey: groupKey,
-      lifecycle: {
-        domain: "turn" as const,
-        phase: index === 0 ? "started" as const : "completed" as const
-      },
-      relationships: index === 1 ? [
-        { type: "derived_from" as const, eventId: "event-900" },
-        { type: "recovers" as const, eventId: "event-901" }
-      ] : []
-    }));
-    const onSelect = vi.fn();
-    const onExpandGroup = vi.fn();
-    const onRelationshipJump = vi.fn();
-    render(
-      <Trajectory
-        events={fixture}
-        selectedEventId="group-terminal"
-        expandedGroupKeys={new Set()}
-        onSelect={onSelect}
-        onExpandGroup={onExpandGroup}
-        onEscapeDeepEvidence={vi.fn()}
-        onRelationshipJump={onRelationshipJump}
-      />
-    );
-    const row = screen.getByRole("option");
-    expect(within(row).queryByRole("button")).toBeNull();
-    expect(row).toHaveAccessibleName(/Use Left and Right Arrow to choose a row action/);
-    expect(row).toHaveAccessibleName(/Jump to derived from event event-900/);
-    expect(row).toHaveAccessibleName(/Jump to recovers event event-901/);
-    row.focus();
-
-    await userEvent.keyboard("{Enter}");
-    expect(onSelect).toHaveBeenLastCalledWith("group-terminal");
-    await userEvent.keyboard("{ArrowRight}{Enter}");
-    expect(onSelect).toHaveBeenLastCalledWith("group-start");
-    await userEvent.keyboard("{ArrowRight}{Enter}");
-    expect(onExpandGroup).toHaveBeenCalledOnce();
-    await userEvent.keyboard("{ArrowRight}{Enter}");
-    expect(onRelationshipJump).toHaveBeenCalledWith("event-900");
-    await userEvent.keyboard("{ArrowRight}{Enter}");
-    expect(onRelationshipJump).toHaveBeenCalledWith("event-901");
-    expect(document.querySelectorAll('[role="option"][tabindex="0"]')).toHaveLength(1);
+      presentationClass: "lifecycle" as const, lifecycleGroupKey: groupKey,
+      lifecycle: { domain: "turn" as const, phase: index === 0 ? "started" as const : "completed" as const } }));
+    const select = vi.fn(), expand = vi.fn();
+    render(<Trajectory events={fixture} selectedEventId="group-terminal" expandedGroupKeys={new Set()}
+      onSelect={select} onExpandGroup={expand} onEscapeDeepEvidence={vi.fn()} onRelationshipJump={vi.fn()} />);
+    const node = screen.getByRole("option");
+    expect(within(node).queryByRole("button")).toBeNull();
+    node.focus();
+    await userEvent.keyboard("{Alt>}{ArrowRight}{/Alt}{Enter}");
+    expect(select).toHaveBeenLastCalledWith("group-start");
+    await userEvent.keyboard("{Alt>}{ArrowRight}{/Alt}{Enter}");
+    expect(expand).toHaveBeenCalledOnce();
+    await userEvent.click(screen.getByRole("button", { name: /Select immutable event group-start/ }));
+    expect(select).toHaveBeenLastCalledWith("group-start");
+    expect(screen.getAllByRole("option").filter((node) => node.tabIndex === 0)).toHaveLength(1);
   });
 
   it("presents the controlled selected lifecycle member as the current row action", async () => {
@@ -368,9 +339,7 @@ describe("virtualized execution trajectory", () => {
         domain: "turn" as const,
         phase: index === 0 ? "started" as const : "completed" as const
       },
-      relationships: index === 0
-        ? [{ type: "correlates_with" as const, eventId: "controlled-terminal" }]
-        : []
+      relationships: []
     }));
     function ControlledWorkspace() {
       const [selectedEventId, setSelectedEventId] = useState("controlled-terminal");
@@ -394,25 +363,24 @@ describe("virtualized execution trajectory", () => {
     expect(row).toHaveAttribute("data-event-id", "controlled-terminal");
     expect(row).toHaveAccessibleName(/Safe event 2.*Completed.*Current action: Select event controlled-terminal/);
 
-    await userEvent.keyboard("{ArrowRight}{Enter}");
+    await userEvent.keyboard("{Alt>}{ArrowRight}{/Alt}{Enter}");
     await waitFor(() => expect(screen.getByRole("status", { name: "Controlled selection" }))
       .toHaveTextContent("controlled-start"));
     expect(screen.getByRole("option")).toBe(row);
     expect(row).toHaveAttribute("data-event-id", "controlled-start");
     expect(row).toHaveAttribute("data-sequence", "1");
     expect(row).toHaveAccessibleName(/Safe event 1.*In progress.*Current action: Select event controlled-start/);
-    expect(row).toHaveAccessibleName(/Jump to correlates with event controlled-terminal/);
     expect(document.activeElement).toBe(row);
 
     await userEvent.keyboard("{Enter}");
     expect(screen.getByRole("status", { name: "Controlled selection" })).toHaveTextContent("controlled-start");
-    await userEvent.keyboard("{ArrowRight}{Enter}");
+    await userEvent.keyboard("{Alt>}{ArrowRight}{/Alt}{Enter}");
     await waitFor(() => expect(row).toHaveAttribute("data-event-id", "controlled-terminal"));
     expect(row).toHaveAccessibleName(/Current action: Select event controlled-terminal/);
-    await userEvent.keyboard("{ArrowRight}{Enter}");
+    await userEvent.keyboard("{Alt>}{ArrowRight}{/Alt}{Enter}");
     await waitFor(() => expect(row).toHaveAttribute("data-event-id", "controlled-start"));
 
-    await userEvent.keyboard("{ArrowRight}{ArrowRight}{Enter}");
+    await userEvent.keyboard("{Alt>}{ArrowRight}{/Alt}{Alt>}{ArrowRight}{/Alt}{Enter}");
     await waitFor(() => expect(container.querySelectorAll("[data-lifecycle-member]")).toHaveLength(2));
     await userEvent.click(container.querySelector<HTMLElement>('[data-lifecycle-member="controlled-terminal"]')!);
     await waitFor(() => expect(row).toHaveAttribute("data-event-id", "controlled-terminal"));
@@ -440,9 +408,7 @@ describe("virtualized execution trajectory", () => {
         domain: "turn" as const,
         phase: index === 0 ? "started" as const : "completed" as const
       } : null,
-      relationships: index === 1
-        ? [{ type: "correlates_with" as const, eventId: "toggle-target" }]
-        : []
+      relationships: []
     }));
     const isExpanded = () => document.querySelector("[data-lifecycle-member]") !== null;
     const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
@@ -484,9 +450,9 @@ describe("virtualized execution trajectory", () => {
 
       await userEvent.keyboard("{Enter}");
       expect(onSelect).toHaveBeenLastCalledWith("toggle-terminal");
-      await userEvent.keyboard("{ArrowRight}{Enter}");
+      await userEvent.keyboard("{Alt>}{ArrowRight}{/Alt}{Enter}");
       expect(onSelect).toHaveBeenLastCalledWith("toggle-start");
-      await userEvent.keyboard("{ArrowRight}{Enter}");
+      await userEvent.keyboard("{Alt>}{ArrowRight}{/Alt}{Enter}");
 
       await waitFor(() => expect(container.querySelectorAll("[data-lifecycle-member]")).toHaveLength(2));
       expect([...container.querySelectorAll<HTMLElement>("[data-lifecycle-member]")]
@@ -505,15 +471,13 @@ describe("virtualized execution trajectory", () => {
       expect(translatedTop(targetWrapper)).toBeGreaterThanOrEqual(
         translatedTop(groupWrapper) + groupWrapper.getBoundingClientRect().height
       );
-      await waitFor(() => expect(container.querySelector("[data-relationship-connector]"))
-        .toHaveAttribute("y1", "180"));
-      expect(container.querySelector("[data-relationship-connector]")).toHaveAttribute("y2", "430");
+      expect(container.querySelectorAll("[data-graph-node]")).toHaveLength(2);
 
-      await userEvent.keyboard("{ArrowLeft}{Enter}");
+      await userEvent.keyboard("{Alt>}{ArrowLeft}{/Alt}{Enter}");
       expect(onSelect).toHaveBeenLastCalledWith("toggle-start");
-      await userEvent.keyboard("{ArrowLeft}{Enter}");
+      await userEvent.keyboard("{Alt>}{ArrowLeft}{/Alt}{Enter}");
       expect(onSelect).toHaveBeenLastCalledWith("toggle-terminal");
-      await userEvent.keyboard("{ArrowRight}{ArrowRight}{Enter}");
+      await userEvent.keyboard("{Alt>}{ArrowRight}{/Alt}{Alt>}{ArrowRight}{/Alt}{Enter}");
       await waitFor(() => expect(container.querySelector("[data-lifecycle-member]")).toBeNull());
       expect(groupRow).toHaveAccessibleName(/Current action: Expand lifecycle events/);
       expect(document.activeElement).toBe(groupRow);
@@ -526,7 +490,7 @@ describe("virtualized execution trajectory", () => {
       await waitFor(() => expect(container.querySelector("[data-lifecycle-member]")).toBeNull());
       await userEvent.click(screen.getByText("Expand lifecycle events", { selector: '[data-row-action="expand"]' }));
       await waitFor(() => expect(container.querySelectorAll("[data-lifecycle-member]")).toHaveLength(2));
-      expect(document.activeElement).toBe(groupRow);
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Collapse lifecycle events" }));
       expect(document.querySelectorAll('[role="option"][tabindex="0"]')).toHaveLength(1);
       await waitFor(() => expect(translatedTop(targetWrapper)).toBe(360));
     } finally {
@@ -534,54 +498,21 @@ describe("virtualized execution trajectory", () => {
     }
   });
 
-  it("labels a same-group relationship without a connector in compact and expanded states", () => {
+  it("keeps lifecycle relationship endpoints separate with exact direction", async () => {
     const groupKey = `grp_${"c".repeat(64)}`;
-    const fixture = events(2).map((item, index) => ({
-      ...item,
+    const fixture = events(2).map((item, index) => ({ ...item,
       eventId: index === 0 ? "same-start" : "same-terminal",
       kind: index === 0 ? "turn.started" : "turn.completed",
       status: { state: "known" as const, value: index === 0 ? "in_progress" as const : "completed" as const },
-      presentationClass: "lifecycle" as const,
-      lifecycleGroupKey: groupKey,
-      lifecycle: {
-        domain: "turn" as const,
-        phase: index === 0 ? "started" as const : "completed" as const
-      },
-      relationships: index === 0 ? [{ type: "correlates_with" as const, eventId: "same-terminal" }] : []
-    }));
-    const instanceKey = `lifecycle:${groupKey}:same-start:1:same-terminal:2`;
-    const view = render(
-      <Trajectory
-        events={fixture}
-        selectedEventId="same-start"
-        expandedGroupKeys={new Set()}
-        onSelect={vi.fn()}
-        onExpandGroup={vi.fn()}
-        onEscapeDeepEvidence={vi.fn()}
-        onRelationshipJump={vi.fn()}
-      />
-    );
-
-    expect(screen.getByRole("option")).toHaveAccessibleName(/Jump to correlates with event same-terminal/);
-    expect(view.container.querySelectorAll('[data-row-action="relationship"]')).toHaveLength(1);
-    expect(view.container.querySelector("[data-relationship-connector]")).toBeNull();
-
-    view.rerender(
-      <Trajectory
-        events={fixture}
-        selectedEventId="same-start"
-        expandedGroupKeys={new Set([instanceKey])}
-        onSelect={vi.fn()}
-        onExpandGroup={vi.fn()}
-        onEscapeDeepEvidence={vi.fn()}
-        onRelationshipJump={vi.fn()}
-      />
-    );
-    expect(screen.getAllByRole("option")).toHaveLength(1);
-    expect(screen.getByRole("option")).toHaveAccessibleName(/Jump to correlates with event same-terminal/);
-    expect(view.container.querySelectorAll("[data-lifecycle-member]")).toHaveLength(2);
-    expect(view.container.querySelectorAll('[data-row-action="relationship"]')).toHaveLength(1);
-    expect(view.container.querySelector("[data-relationship-connector]")).toBeNull();
+      presentationClass: "lifecycle" as const, lifecycleGroupKey: groupKey,
+      lifecycle: { domain: "turn" as const, phase: index === 0 ? "started" as const : "completed" as const },
+      relationships: index === 0 ? [{ type: "correlates_with" as const, eventId: "same-terminal" }] : [] }));
+    const view = render(<Trajectory events={fixture} selectedEventId="same-start" expandedGroupKeys={new Set()}
+      onSelect={vi.fn()} onEscapeDeepEvidence={vi.fn()} onRelationshipJump={vi.fn()} />);
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(view.container.querySelector('[data-graph-edge="correlates_with"]')).toHaveAttribute("data-source", "same-start");
+    expect(view.container.querySelector('[data-graph-edge="correlates_with"]')).toHaveAttribute("data-target", "same-terminal");
+    await waitFor(() => expect(screen.getByRole("button", { name: /Jump to correlates with event same-terminal/ })).toBeVisible());
   });
 
   it("moves the sole roving tab stop to virtual End and Home destinations before focusing them", async () => {
@@ -635,43 +566,30 @@ describe("virtualized execution trajectory", () => {
     expect(Number(tabStops[0]!.dataset.sequence)).toBeGreaterThanOrEqual(40);
 
     await userEvent.tab();
+    expect(document.activeElement).toBe(screen.getByRole("checkbox", { name: "Group routine events" }));
+    await userEvent.tab();
     expect(document.activeElement).toBe(tabStops[0]);
     await userEvent.keyboard("{Home}");
     await waitFor(() => expect(document.activeElement).toHaveAttribute("data-event-id", "event-1"));
     expect(document.activeElement).toHaveAttribute("aria-selected", "true");
   });
 
-  it("keeps relationship actions in the row composite and its accessible label", async () => {
+  it("pins selected and bounded distant relationship regions while keeping semantic branch access", async () => {
     const fixture = events(1_000);
-    fixture[0] = {
-      ...fixture[0]!,
-      relationships: [{ type: "correlates_with", eventId: "event-900" }]
-    };
-    const onRelationshipJump = vi.fn();
-    const { container } = render(
-      <Trajectory
-        events={fixture}
-        selectedEventId="event-1"
-        expandedGroupKeys={new Set()}
-        onSelect={vi.fn()}
-        onEscapeDeepEvidence={vi.fn()}
-        onRelationshipJump={onRelationshipJump}
-      />
-    );
-
+    fixture[0] = { ...fixture[0]!, relationships: [{ type: "correlates_with", eventId: "event-900" }] };
+    const jump = vi.fn();
+    const { container } = render(<Trajectory events={fixture} selectedEventId="event-1" expandedGroupKeys={new Set()}
+      onSelect={vi.fn()} onEscapeDeepEvidence={vi.fn()} onRelationshipJump={jump} />);
+    expect(container.querySelector('[data-event-id="event-900"]')).not.toBeNull();
+    expect(screen.getAllByRole("option").length).toBeLessThan(30);
     const selected = screen.getByRole("option", { selected: true });
-    const relationshipAction = container.querySelector<HTMLElement>('[data-row-action="relationship"]');
     expect(within(selected).queryByRole("button")).toBeNull();
-    expect(selected).toContainElement(relationshipAction);
-    expect(relationshipAction).toHaveTextContent(
-      "Jump to correlates with event event-900"
-    );
-    expect(container.querySelector(".trajectory-row__relationships")).toBeNull();
-    expect(selected).toHaveAccessibleName(/Jump to correlates with event event-900/);
-    expect(document.querySelectorAll('[role="option"][tabindex="0"]')).toHaveLength(1);
+    const action = screen.getByRole("button", { name: /Jump to correlates with event event-900/ });
+    expect(screen.getByRole("listbox")).not.toContainElement(action);
     selected.focus();
-    await userEvent.keyboard("{ArrowRight}{Enter}");
-    expect(onRelationshipJump).toHaveBeenCalledWith("event-900");
+    await userEvent.keyboard("{ArrowRight}");
+    expect(jump).toHaveBeenLastCalledWith("event-900");
+    expect(document.activeElement).toHaveAttribute("data-event-id", "event-900");
   });
 
   it("resets expanded lifecycle instances when the run identity changes", async () => {
@@ -701,7 +619,7 @@ describe("virtualized execution trajectory", () => {
     );
     const groupedRow = screen.getByRole("option");
     groupedRow.focus();
-    await userEvent.keyboard("{ArrowRight}{ArrowRight}{Enter}");
+    await userEvent.keyboard("{Alt>}{ArrowRight}{/Alt}{Alt>}{ArrowRight}{/Alt}{Enter}");
     expect(screen.getAllByRole("option")).toHaveLength(1);
     expect(screen.getByRole("option")).toHaveAccessibleName(/Collapse lifecycle events/);
     expect(document.querySelectorAll("[data-lifecycle-member]")).toHaveLength(2);

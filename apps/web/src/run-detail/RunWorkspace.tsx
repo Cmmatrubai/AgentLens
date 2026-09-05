@@ -139,7 +139,6 @@ export function RunWorkspace(props: Readonly<{
       data-inline-inspector-for={selected.eventId}
       ref={restoreFocusWithin}
       initial={false}
-      layout="position"
       transition={motionPolicy.inspector}
       data-motion={motionPolicy.reduced ? "reduced" : "standard"}
       onClick={(event) => event.stopPropagation()}
@@ -160,6 +159,9 @@ export function RunWorkspace(props: Readonly<{
         onRelationshipJump={props.onSelect}
         onEscapeDeepEvidence={() => setDeepEvidenceOpen(false)}
         inlineEvidence={inlineInspector}
+        onFocusInspector={() => {
+          document.querySelector<HTMLElement>(".event-inspector [role='tab'], .event-inspector button")?.focus();
+        }}
         onExpandGroup={(key) => setExpandedGroupKeys((current) => {
           const next = new Set(current);
           next.has(key) ? next.delete(key) : next.add(key);
@@ -178,7 +180,7 @@ export function RunWorkspace(props: Readonly<{
           <p role="alert">The selected event is unavailable in this run.</p>
         )}
         {props.selectionState === "idle" && selected === null && (
-          <p>Select a trajectory row to inspect its bounded evidence.</p>
+          <p>Select a trajectory node to inspect its bounded evidence.</p>
         )}
         {inspector}
       </motion.aside>}

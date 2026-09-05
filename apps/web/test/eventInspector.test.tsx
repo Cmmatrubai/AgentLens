@@ -619,7 +619,7 @@ describe("bounded event inspector", () => {
       </Providers>
     );
     expect(screen.queryByRole("option", { selected: true })?.getAttribute("data-event-id") ?? null)
-      .toBe(initialNarrow ? selectedEventId : null);
+      .toBe(selectedEventId);
     await userEvent.click(await screen.findByRole("button", { name: "Open tracked final diff" }));
     const expand = await screen.findByRole("button", { name: "Expand diff for src/a.ts" });
     await userEvent.click(expand);

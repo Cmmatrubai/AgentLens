@@ -275,6 +275,7 @@ describe("active run polling", () => {
     renderDetail(api({ getRun, getEvents }));
 
     await flushQueries();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Group routine events" }));
     expect(screen.getByText("Committed event 4")).toBeVisible();
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
     expect(screen.getByText("Committed event 4")).toBeVisible();
@@ -300,6 +301,7 @@ describe("active run polling", () => {
     renderDetail(api({ getRun, getEvents }));
 
     await flushQueries();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Group routine events" }));
     await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
 
     expect(screen.getByText("Committed event 4")).toBeVisible();
@@ -539,6 +541,7 @@ describe("follow tail", () => {
     }));
     const view = renderDetail(client, "/runs/run-active?event=event-3");
     await flushQueries();
+    fireEvent.click(screen.getByRole("checkbox", { name: "Group routine events" }));
     const viewport = trajectoryViewport(screen.getByRole("listbox", { name: "Execution trajectory" }));
     Object.defineProperties(viewport, {
       clientHeight: { configurable: true, value: 200 },
