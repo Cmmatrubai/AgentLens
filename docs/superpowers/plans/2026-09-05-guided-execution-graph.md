@@ -16,7 +16,7 @@
 - This graph correction is inserted after old Task 6 and supersedes uniform 68px row density; old later tasks remain pending. Stop for visual review after all four tasks below, not between them.
 - Preserve DTO/API/storage/CLI contracts, exact immutable event identity, pagination, invalid link states, run-scoped selection and explicit raw/native/note/Git loading. No inferred causal branch or generated explanation.
 - Keep semantic DOM targets with non-interactive SVG; clarification and raw inspector controls outside the listbox. Preserve keyboard access to every grouped event and existing Escape/focus restoration.
-- Desktop selection must not change node coordinates. Narrow views retain graph/path and inline evidence. Honor reduced motion and bounded virtualization. No animation or new data fetch caused solely by clarification mount.
+- Desktop selection must not change node coordinates. Narrow views retain graph/path and inline evidence. Honor reduced motion and bounded virtualization. Clarification may use the specified short reveal, but its mount must not animate graph/inspector layout or initiate an additional data fetch.
 - Each task uses TDD for behavioral changes, targeted regression runs while iterating, one relevant broader test run before its commit, and a fresh task review. Controller performs final cumulative suite/typecheck/build/browser verification.
 
 ## File responsibility map
