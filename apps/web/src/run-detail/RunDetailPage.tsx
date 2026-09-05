@@ -1,10 +1,12 @@
 import { browserAddressableEventIdV1Schema } from "@agentlens/api-contract";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import { useAgentLensApi } from "../api/queries.js";
 import { queryKeys } from "../api/queryKeys.js";
 import { ErrorState } from "../app/ErrorState.js";
+import { initialGraphEventId } from "../trajectory/initialGraphSelection.js";
 import { TrajectoryToolbar } from "../trajectory/TrajectoryToolbar.js";
 import { useTrajectoryPages } from "../trajectory/useTrajectoryPages.js";
 import { RunHeader } from "./RunHeader.js";
@@ -14,6 +16,7 @@ import { useActiveRunPolling } from "./useActiveRunPolling.js";
 function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
   const client = useAgentLensApi();
   const queryClient = useQueryClient();
+  const initializedRunRef = useRef<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const eventValues = searchParams.getAll("event");
   const hasEventQuery = searchParams.has("event");
@@ -34,7 +37,21 @@ function TrajectoryDetail({ runId }: Readonly<{ runId: string }>) {
     onRun: (nextRun) => queryClient.setQueryData(queryKeys.run(runId), nextRun),
     onPage: trajectory.appendPage
   });
-  const select = (eventId: string): void => setSearchParams({ event: eventId });
+  useEffect(() => {
+    if (initializedRunRef.current === runId || run.data?.runId !== runId || trajectory.state !== "ready") return;
+    initializedRunRef.current = runId;
+    if (hasEventQuery) return;
+    const eventId = initialGraphEventId(run.data.anchors, trajectory.events);
+    if (eventId === null) return;
+    const nextSearchParams = new URLSearchParams(searchParams);
+    nextSearchParams.set("event", eventId);
+    setSearchParams(nextSearchParams, { replace: true });
+  }, [hasEventQuery, run.data, runId, searchParams, setSearchParams, trajectory.events, trajectory.state]);
+  const select = (eventId: string): void => {
+    const nextSearchParams = new URLSearchParams(searchParams);
+    nextSearchParams.set("event", eventId);
+    setSearchParams(nextSearchParams);
+  };
 
   if (run.isPending) return <div className="loading-state">Loading run evidence…</div>;
   if (run.isError) return <ErrorState title="Run evidence unavailable" message="AgentLens could not load this run." />;
