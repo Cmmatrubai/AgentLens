@@ -113,5 +113,5 @@ export function RunDetailPage() {
   if (runId === undefined) {
     return <ErrorState title="Run not found" message="The requested run identity is unavailable." />;
   }
-  return <TrajectoryDetail runId={runId} />;
+  return <TrajectoryDetail key={runId} runId={runId} />;
 }

@@ -5,7 +5,7 @@ import type {
   TrajectoryPageV1
 } from "@agentlens/api-contract";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   MemoryRouter,
   Route,
@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AgentLensApiClient, EventPageQueryV1 } from "../src/api/client.js";
 import { ApiClientProvider } from "../src/api/queries.js";
+import { queryKeys } from "../src/api/queryKeys.js";
 import { RunDetailPage } from "../src/run-detail/RunDetailPage.js";
 import { initialGraphEventId } from "../src/trajectory/initialGraphSelection.js";
 
@@ -204,6 +205,12 @@ function client(overrides: Partial<AgentLensApiClient>): AgentLensApiClient {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((accept) => { resolve = accept; });
+  return { promise, resolve };
+}
+
 function NavigationProbe() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -222,15 +229,24 @@ function NavigationProbe() {
 function renderDetail(
   api: AgentLensApiClient,
   initialEntries: readonly string[],
-  initialIndex = initialEntries.length - 1
+  options: Readonly<{
+    initialIndex?: number;
+    cachedRuns?: readonly RunDetailV1[];
+  }> = {}
 ) {
   const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false } }
+    defaultOptions: {
+      queries: { retry: false, gcTime: options.cachedRuns === undefined ? 0 : Number.POSITIVE_INFINITY },
+      mutations: { retry: false }
+    }
   });
+  for (const cachedRun of options.cachedRuns ?? []) {
+    queryClient.setQueryData(queryKeys.run(cachedRun.runId), cachedRun);
+  }
   return render(
     <MemoryRouter
       initialEntries={[...initialEntries]}
-      initialIndex={initialIndex}
+      initialIndex={options.initialIndex ?? initialEntries.length - 1}
       future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
     >
       <QueryClientProvider client={queryClient}>
@@ -417,6 +433,39 @@ describe("initial graph route selection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open run B" }));
     await waitFor(() => expect(screen.getByTestId("location"))
       .toHaveTextContent("/runs/run-b?scope=beta&event=event-b"));
+    expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", runBEvent.eventId);
+  });
+
+  it.each([
+    ["nonempty", [event("event-a", 1, "run-a")] as readonly TrajectoryEventV1[]],
+    ["empty", [] as readonly TrajectoryEventV1[]]
+  ])("waits for a cached next run's own initial page when the prior run is %s", async (_case, runAEvents) => {
+    const runA = runDetail("run-a", { eventCount: runAEvents.length });
+    const runB = runDetail("run-b");
+    const runBEvent = event("event-b", 1, "run-b");
+    const runBPage = deferred<TrajectoryPageV1>();
+    const getEvents = vi.fn((runId: string) => runId === "run-a"
+      ? Promise.resolve(trajectoryPage(runId, runAEvents))
+      : runBPage.promise);
+    const api = client({
+      getRun: vi.fn(async (runId: string) => runId === "run-a" ? runA : runB),
+      getEvents
+    });
+
+    renderDetail(api, ["/runs/run-a?scope=alpha"], { cachedRuns: [runB] });
+    if (runAEvents.length === 0) {
+      expect(await screen.findByText("No trajectory events are available for this run.")).toBeVisible();
+    } else {
+      expect(await screen.findByRole("option", { selected: true })).toHaveAttribute("data-event-id", "event-a");
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "Open run B" }));
+    await waitFor(() => expect(getEvents.mock.calls.some(([runId]) => runId === "run-b")).toBe(true));
+    expect(screen.getByTestId("location").textContent).toBe("/runs/run-b?scope=beta");
+
+    await act(async () => runBPage.resolve(trajectoryPage("run-b", [runBEvent])));
+    await waitFor(() => expect(screen.getByTestId("location").textContent)
+      .toBe("/runs/run-b?scope=beta&event=event-b"));
     expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", runBEvent.eventId);
   });
 
