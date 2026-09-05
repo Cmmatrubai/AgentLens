@@ -6,6 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { Trajectory } from "../src/trajectory/Trajectory.js";
 import { RunWorkspace } from "../src/run-detail/RunWorkspace.js";
+import { ExecutionGraphEdges } from "../src/trajectory/ExecutionGraphEdges.js";
+import { projectExecutionGraph } from "../src/trajectory/projectExecutionGraph.js";
 
 function events(count: number): TrajectoryEventV1[] {
   return Array.from({ length: count }, (_, index) => {
@@ -67,6 +69,65 @@ function translatedTop(element: HTMLElement): number {
 }
 
 describe("virtualized execution trajectory", () => {
+  it("shares dense relationship labels without hiding exact paths or boundary distinctions", () => {
+    const fixture = events(41);
+    fixture[0] = { ...fixture[0]!, relationships: fixture.slice(1).map((event) => ({ type: "derived_from", eventId: event.eventId })) };
+    const graph = projectExecutionGraph({ events: fixture, expandedGroupKeys: new Set() });
+    const positions = new Map(graph.nodes.map((_node, index) => [index, { start: index * 160, size: 160 }]));
+    const { container } = render(<ExecutionGraphEdges graph={graph} positions={positions} viewportStart={0}
+      viewportHeight={520} height={6560} selectedEventId={null} />);
+    expect(container.querySelectorAll("[data-graph-edge]")).toHaveLength(40);
+    expect(container.querySelector('[data-source="event-1"][data-target="event-41"]')).not.toBeNull();
+    expect(container.querySelector("svg")).toHaveTextContent("derived from · offscreen · 38 relationships");
+    expect(container.querySelector("svg")).toHaveTextContent("derived from · 2 relationships");
+    const labels = [...container.querySelectorAll(".execution-graph-relationship text")];
+    expect(labels).toHaveLength(2);
+    expect(labels.every((label) => Number(label.getAttribute("y")) >= 12 && Number(label.getAttribute("y")) <= 508)).toBe(true);
+  });
+  it("keeps crossing relationships visible with both endpoints outside the mounted window", async () => {
+    const fixture = events(1_000);
+    fixture[0] = { ...fixture[0]!, relationships: [{ type: "derived_from", eventId: "event-900" }] };
+    const { container } = render(<Trajectory events={fixture} selectedEventId="event-500" expandedGroupKeys={new Set()}
+      onSelect={vi.fn()} onEscapeDeepEvidence={vi.fn()} onRelationshipJump={vi.fn()} />);
+    const viewport = container.querySelector<HTMLElement>(".trajectory-viewport")!;
+    Object.defineProperty(viewport, "scrollTop", { configurable: true, value: 60_000, writable: true });
+    fireEvent.scroll(viewport);
+    await waitFor(() => expect(container.querySelector('[data-event-id="event-1"]')).toBeNull());
+    expect(container.querySelector('[data-event-id="event-900"]')).toBeNull();
+    expect(screen.getAllByRole("option").length).toBeLessThan(30);
+    const edge = container.querySelector('[data-graph-edge][data-source="event-1"][data-target="event-900"]');
+    expect(edge).not.toBeNull();
+    expect(edge?.getAttribute("d")).toContain("60012");
+    expect(edge?.getAttribute("d")).toContain("60508");
+    expect(container.querySelector("[data-relationship-overlay]")).toHaveTextContent("offscreen");
+  });
+
+  it.each([0, 300])("separates outgoing and clipped boundary relationship labels at viewport %i", (viewportStart) => {
+    const fixture = events(6);
+    fixture[0] = { ...fixture[0]!, relationships: [
+      { type: "derived_from", eventId: "event-5" },
+      { type: "correlates_with", eventId: "event-6" },
+      { type: "recovers", eventId: "unloaded-event" }
+    ] };
+    fixture[1] = { ...fixture[1]!, relationships: [{ type: "derived_from", eventId: "event-6" }] };
+    fixture[5] = { ...fixture[5]!, relationships: [
+      { type: "derived_from", eventId: "event-1" },
+      { type: "correlates_with", eventId: "event-2" },
+      { type: "recovers", eventId: "event-3" }
+    ] };
+    const graph = projectExecutionGraph({ events: fixture, expandedGroupKeys: new Set() });
+    const positions = new Map(graph.nodes.map((_node, index) => [index, { start: index * 160, size: 160 }]));
+    const { container } = render(<ExecutionGraphEdges graph={graph} positions={positions} viewportStart={viewportStart}
+      viewportHeight={520} height={960} selectedEventId={null} />);
+    const labels = [...container.querySelectorAll(".execution-graph-relationship text")];
+    expect(labels.length).toBeGreaterThanOrEqual(3);
+    const ys = labels.map((label) => Number(label.getAttribute("y"))).sort((a, b) => a - b);
+    for (let index = 1; index < ys.length; index++) expect(ys[index]! - ys[index - 1]!).toBeGreaterThanOrEqual(14);
+    expect(ys[0]).toBeGreaterThanOrEqual(viewportStart + 12);
+    expect(ys.at(-1)).toBeLessThanOrEqual(viewportStart + 508);
+    expect(container.querySelector('[data-source="event-1"][data-target="event-5"]')).not.toBeNull();
+    expect(container.querySelector('[data-source="event-1"][data-target="event-6"]')).not.toBeNull();
+  });
   it("Home and End address the first and last immutable member of a routine cluster", async () => {
     const fixture = events(4).map((event) => ({ ...event, kind: "message", presentationClass: "message" as const,
       provenance: "observed" as const, status: { state: "known" as const, value: "completed" as const } }));

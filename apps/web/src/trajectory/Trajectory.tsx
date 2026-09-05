@@ -69,7 +69,12 @@ export function Trajectory(props: Readonly<{
   const virtualItems = virtualizer.getVirtualItems();
   const selectedItem = virtualItems.find((item) => item.index === selectedIndex);
   const lateral = wide && !props.inlineEvidence;
-  const positions = new Map(virtualItems.map((item) => [item.index, { start: item.start, size: item.size }]));
+  // getVirtualItems refreshes this public geometry cache for the whole projection.
+  // It includes measured sizes and estimates for unmounted nodes without adding cards.
+  const positions = new Map(nodes.map((_node, index) => {
+    const item = virtualizer.measurementsCache[index]!;
+    return [index, { start: item.start, size: item.size }];
+  }));
   const runId = props.runId ?? props.events[0]?.runId ?? "";
   const scrollToLatest = useCallback(() => {
     if (nodes.length) virtualizer.scrollToOffset(Math.max(0,
