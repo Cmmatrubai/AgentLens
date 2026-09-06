@@ -131,13 +131,14 @@ export function Trajectory(props: Readonly<{
     if (offset !== undefined) virtualizer.scrollToOffset(offset - anchor.offset);
   }, [graph, virtualizer]);
 
-  const previousSelection = useRef<string | null>(null);
+  const selectionAlignment = useRef<{ eventId: string | null; pending: boolean }>({ eventId: null, pending: false });
   useLayoutEffect(() => {
-    if (props.selectedEventId === previousSelection.current) return;
-    // An around-event request can resolve this same selection on a later render.
-    if (props.selectedEventId !== null && selectedIndex < 0) return;
-    previousSelection.current = props.selectedEventId;
-    if (selectedIndex < 0) return;
+    // Record every requested transition, even while its around-event page is pending.
+    if (props.selectedEventId !== selectionAlignment.current.eventId) {
+      selectionAlignment.current = { eventId: props.selectedEventId, pending: props.selectedEventId !== null };
+    }
+    if (!selectionAlignment.current.pending || selectedIndex < 0) return;
+    selectionAlignment.current.pending = false;
     setFocusId(props.selectedEventId);
     const offset = virtualizer.getOffsetForIndex(selectedIndex, "start")?.[0];
     const viewport = scrollRef.current;

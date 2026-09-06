@@ -148,6 +148,44 @@ describe("virtualized execution trajectory", () => {
     } finally { unmount?.(); geometry.restore(); }
   });
 
+  it("realigns a loaded selection returned to while another selection is still unresolved", () => {
+    const geometry = mockScrollGeometry();
+    const fixture = events(102);
+    const loaded = fixture.slice(0, 101);
+    const props = { selectedEventId: "event-80", expandedGroupKeys: new Set<string>(),
+      onSelect: vi.fn(), onEscapeDeepEvidence: vi.fn(), onRelationshipJump: vi.fn() };
+    let unmount: (() => void) | undefined;
+    try {
+      const view = render(<Trajectory {...props} events={loaded} />);
+      unmount = view.unmount;
+      const viewport = view.container.querySelector<HTMLElement>(".trajectory-viewport")!;
+      const region = screen.getByRole("option", { selected: true }).closest<HTMLElement>(".execution-graph-region")!;
+      const alignedOffset = translatedTop(region) - 520 / 3;
+      expect(viewport.scrollTop).toBeCloseTo(alignedOffset);
+      fireEvent.scroll(viewport);
+      viewport.scrollTop -= 800;
+      fireEvent.scroll(viewport);
+      const historyOffset = viewport.scrollTop;
+
+      view.rerender(<Trajectory {...props} events={loaded} selectedEventId="event-102" />);
+      expect(screen.queryByRole("option", { selected: true })).toBeNull();
+      expect(viewport.scrollTop).toBe(historyOffset);
+      view.rerender(<Trajectory {...props} events={loaded} />);
+      expect(viewport.scrollTop).toBeCloseTo(alignedOffset);
+      expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", "event-80");
+
+      fireEvent.scroll(viewport);
+      viewport.scrollTop = historyOffset;
+      fireEvent.scroll(viewport);
+      view.rerender(<Trajectory {...props} events={fixture}
+        liveAppend={{ runId: "run-virtual", revision: 1, identities: ["event-102:102"] }} />);
+      expect(viewport.scrollTop).toBe(historyOffset);
+      expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", "event-80");
+      expect(screen.getByRole("button", { name: "1 new event" })).toBeVisible();
+      expect(props.onSelect).not.toHaveBeenCalled();
+    } finally { unmount?.(); geometry.restore(); }
+  });
+
   it.each([false, true])("keeps the latest node visible and follows successive appends after a tall historical clarification (tall latest region: %s)", async (tallLatestRegion) => {
     const geometry = mockScrollGeometry("event-1", tallLatestRegion ? "event-42" : undefined);
     const fixture = events(44);
