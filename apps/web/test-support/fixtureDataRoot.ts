@@ -181,6 +181,94 @@ function finishRun(
   });
 }
 
+export const syntheticMixedGraphRunId = "fixture-synthetic-mixed-graph";
+
+// A separate synthetic run: never amend real captures or reuse privacy fixture IDs.
+async function appendSyntheticMixedGraph(repository: RunRepository, dataRoot: string): Promise<void> {
+  const runId = syntheticMixedGraphRunId;
+  const recorderInstanceId = `recorder-${runId}`;
+  repository.createRun(runInput({ id: runId, startedAt: baseTime,
+    label: "Synthetic mixed-evidence graph fixture",
+    repositoryFingerprint: "repo-synthetic-graph", repositoryDisplay: "Synthetic graph fixture" }), {
+    recorderInstanceId, recorderPid: process.pid, recorderStartToken: `synthetic-${runId}`,
+    heartbeatAt: baseTime
+  });
+  let sequence = 0;
+  for (let index = 0; index < 3; index += 1) repository.appendEvent(observedEvent({
+    runId, id: `${runId}-routine-${index}`, sequence: sequence++, kind: "message.agent",
+    status: "completed", summary: `Synthetic routine message ${index + 1}`,
+    normalizedPayload: { role: "agent", text: `Synthetic graph fixture message ${index + 1}` }
+  }));
+  for (const phase of ["started", "completed"] as const) repository.appendEvent(observedEvent({
+    runId, id: `${runId}-successful-command-${phase}`, sequence: sequence++, kind: "command",
+    status: phase === "started" ? "in_progress" : "completed",
+    summary: `Synthetic successful command ${phase}`,
+    source: { provider: "codex-exec", itemId: `${runId}-successful-item`,
+      itemType: "command_execution", eventType: `item.${phase}` },
+    normalizedPayload: { commandEvidence: { state: "available", redactedCommand: "synthetic-check" },
+      ...(phase === "completed" ? { exitCode: 0 } : {}) }
+  }));
+  const itemId = `${runId}-test-item`;
+  const commandEvidence = { state: "available", redactedCommand: "pnpm test synthetic/example.test.ts" };
+  repository.appendEvent(observedEvent({
+    runId, id: `${runId}-command-started`, sequence: sequence++, kind: "command", status: "in_progress",
+    summary: "Synthetic test command started",
+    source: { provider: "codex-exec", itemId, itemType: "command_execution", eventType: "item.started" },
+    normalizedPayload: { commandEvidence }
+  }));
+  const failedCommandId = `${runId}-command-failed`;
+  const nativePayload = await prepareNativePayload(redactJson({ type: "item.completed",
+    item: { id: itemId, type: "command_execution", command: commandEvidence.redactedCommand,
+      exit_code: 1, aggregated_output: "FAIL synthetic graph fixture" }
+  }, { policy: "standard", key: Buffer.alloc(32, 0x5a), contentClass: "native", runId }), new ArtifactStore(dataRoot));
+  repository.appendEvent(observedEvent({
+    runId, id: failedCommandId, sequence: sequence++, kind: "command", status: "failed",
+    summary: "Synthetic test command failed",
+    source: { provider: "codex-exec", itemId, itemType: "command_execution", eventType: "item.completed" },
+    normalizedPayload: { commandEvidence, exitCode: 1,
+      aggregatedOutput: `FAIL synthetic graph fixture\n${"Synthetic output remains explicitly loaded.\n".repeat(300)}` },
+    nativePayload
+  }));
+  sequence = appendTestDerivations(repository, { runId, sourceEventId: failedCommandId,
+    sourceStatus: "failed", exitCode: 1, sequence });
+  repository.appendEvent(observedEvent({
+    runId, id: `${runId}-file-change`, sequence: sequence++, kind: "fileChange", status: "completed",
+    summary: "Synthetic provider file change: paths only",
+    source: { provider: "codex-exec", itemId: `${runId}-file-item`, itemType: "file_change", eventType: "item.completed" },
+    normalizedPayload: { changes: [{ path: "synthetic/example.ts", kind: "update" }] }
+  }));
+  repository.appendEvent(observedEvent({
+    runId, id: `${runId}-open-command`, sequence: sequence++, kind: "command", status: "in_progress",
+    summary: "Synthetic command left open before recorder recovery",
+    source: { provider: "codex-exec", itemId: `${runId}-open-item`, itemType: "command_execution", eventType: "item.started" },
+    normalizedPayload: { commandEvidence: { state: "available", redactedCommand: "synthetic-check" } }
+  }));
+  sequence += repository.appendRecoveryForOpenEvents(runId, {
+    receivedAt: new Date(baseTime + sequence * 1_000).toISOString(),
+    eventIdFor: (openEvent) => `${runId}-recovery-${openEvent.id}`
+  }).length;
+  finishRun(repository, { runId, recorderInstanceId, sequence, exitCode: 0, signal: null, providerCompleted: true });
+  const diff = await completedArtifact(dataRoot, runId, "git-tracked-final-diff", "text/x-diff", [
+    "diff --git a/synthetic/example.ts b/synthetic/example.ts", "--- a/synthetic/example.ts",
+    "+++ b/synthetic/example.ts", "@@ -1 +1 @@", "-synthetic before", "+synthetic after", ""
+  ].join("\n"));
+  const initialStatus = await completedArtifact(dataRoot, runId, "git-initial-status", "text/plain", "");
+  const finalStatus = await completedArtifact(dataRoot, runId, "git-final-status", "text/plain", " M synthetic/example.ts\n");
+  const diffCheck = await completedArtifact(dataRoot, runId, "git-diff-check", "application/json",
+    JSON.stringify({ passed: true, output: "" }));
+  for (const artifact of [diff, initialStatus, finalStatus, diffCheck]) await repository.commitArtifactMetadata(artifact);
+  repository.saveGitEvidence(runId, {
+    initialHead: "1".repeat(40), finalHead: "1".repeat(40), initialBranch: "synthetic-fixture", finalBranch: "synthetic-fixture",
+    initialStatus: { state: "artifact", artifactId: initialStatus.id }, finalStatus: { state: "artifact", artifactId: finalStatus.id },
+    trackedFinalDiff: { state: "artifact", artifactId: diff.id }, diffCheck: { state: "artifact", artifactId: diffCheck.id },
+    diffCheckPassed: true, untrackedMetadata: { state: "absent" }, headChanged: false, branchChanged: false,
+    capturedAt: baseTime + 90_000
+  });
+  await repository.updateAssessment({ expectedRevision: { state: "unconditional" }, runId,
+    eventId: `${runId}-assessment`, receivedAt: new Date(baseTime + 91_000).toISOString(),
+    verdict: "partial", taskCompleted: "uncertain" });
+}
+
 export async function createFixtureDataRoot(): Promise<Readonly<{
   dataRoot: string;
   root: string;
@@ -622,6 +710,7 @@ export async function createFixtureDataRoot(): Promise<Readonly<{
     repositoryDisplay: maximumUnbrokenText
   }), "recorder-fixture-maximum-width");
 
+  await appendSyntheticMixedGraph(repository, dataRoot);
   database.close();
   return { root, dataRoot };
 }

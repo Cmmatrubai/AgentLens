@@ -14,6 +14,7 @@ import {
 } from "../../../packages/storage/src/index.js";
 
 import { createFixtureDataRoot } from "../test-support/fixtureDataRoot.js";
+export { syntheticMixedGraphRunId } from "../test-support/fixtureDataRoot.js";
 import {
   classifyFailedRequests,
   type FailedRequestObservation,

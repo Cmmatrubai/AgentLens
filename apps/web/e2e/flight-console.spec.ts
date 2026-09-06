@@ -21,21 +21,31 @@ test("the desktop ledger is flat, dense, and evidence-complete", async ({ page, 
   await expectNoHorizontalOverflow(page);
 });
 
-test("about ten trajectory events remain visible and selection does not move adjacent rows", async ({ page, productionUi }) => {
+test("trajectory nodes have bounded widths, breathing room, and stable adjacent coordinates", async ({ page, productionUi }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   await openBootstrapped(page, productionUi);
   await navigateToRun(page, "fixture-trajectory-50");
+  await page.getByRole("checkbox", { name: "Group routine events" }).uncheck();
   const viewport = page.locator(".trajectory-viewport");
   const visible = await viewport.evaluate((viewportElement) => {
     const viewportBox = viewportElement.getBoundingClientRect();
     const rows = [...viewportElement.querySelectorAll<HTMLElement>('[role="option"]')];
     return rows.filter((row) => {
       const box = row.getBoundingClientRect();
-      return box.bottom > viewportBox.top && box.top < viewportBox.bottom;
-    }).length;
+      return box.top >= viewportBox.top && box.bottom <= viewportBox.bottom;
+    }).map((row) => {
+      const box = row.getBoundingClientRect();
+      return { y: box.y, width: box.width, height: box.height };
+    });
   });
-  expect(visible).toBeGreaterThanOrEqual(9);
-  expect(visible).toBeLessThanOrEqual(13);
+  expect(visible.length).toBeGreaterThanOrEqual(2);
+  expect(await page.getByRole("option").count()).toBeLessThan(30);
+  for (const [index, node] of visible.entries()) {
+    expect(node.width).toBeLessThanOrEqual(300);
+    expect(node.width).toBeGreaterThan(180);
+    if (index > 0) expect(node.y - (visible[index - 1]!.y + visible[index - 1]!.height))
+      .toBeGreaterThanOrEqual(24);
+  }
   const second = page.getByRole("option").nth(1);
   const third = page.getByRole("option").nth(2);
   const before = await third.boundingBox();
@@ -48,6 +58,7 @@ test("the desktop inspector frame remains fixed across selections and tabs", asy
   await page.setViewportSize({ width: 1440, height: 1000 });
   await openBootstrapped(page, productionUi);
   await navigateToRun(page, "fixture-trajectory-50");
+  await page.getByRole("checkbox", { name: "Group routine events" }).uncheck();
 
   const inspector = page.locator(".trajectory-inspector");
   const before = await inspector.boundingBox();
