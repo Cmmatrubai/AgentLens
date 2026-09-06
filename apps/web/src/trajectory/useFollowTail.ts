@@ -46,9 +46,10 @@ export function useFollowTail(input: Readonly<{
 
   return {
     newEventCount,
-    observeViewport(element: HTMLElement): void {
-      const distance = element.scrollHeight - element.clientHeight - element.scrollTop;
-      followingRef.current = distance <= tailThresholdPx;
+    observeViewport(element: HTMLElement, tail?: Readonly<{ bottomInset: number; nodeEnd: number }>): void {
+      const distance = element.scrollHeight - (tail?.bottomInset ?? 0) - element.clientHeight - element.scrollTop;
+      // Extra clarification space is scrollable, but is not the execution tail.
+      followingRef.current = distance <= tailThresholdPx && element.scrollTop < (tail?.nodeEnd ?? Infinity);
     },
     jumpToLatest(): void {
       followingRef.current = true;

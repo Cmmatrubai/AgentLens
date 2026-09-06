@@ -76,10 +76,27 @@ export function Trajectory(props: Readonly<{
     return [index, { start: item.start, size: item.size }];
   }));
   const runId = props.runId ?? props.events[0]?.runId ?? "";
+  const tailGeometry = useCallback(() => {
+    const last = virtualizer.measurementsCache[nodes.length - 1];
+    const height = scrollRef.current?.clientHeight || 520;
+    const node = nodes.at(-1);
+    const element = node && nodeRefs.current.get(node.key);
+    return {
+      // A tall final region must not put its node above the viewport either.
+      offset: Math.max(0, Math.min(last?.start ?? 0, virtualizer.getTotalSize() - height)),
+      bottomInset: (lateral ? footerReserve : 0) + Math.max(0, (last?.size ?? 0) - height),
+      nodeEnd: (last?.start ?? 0) + (element
+        ? element.offsetTop + (element.getBoundingClientRect().height || last?.size || 0)
+        : last?.size ?? 0)
+    };
+  }, [nodes, virtualizer, lateral, footerReserve]);
   const scrollToLatest = useCallback(() => {
-    if (nodes.length) virtualizer.scrollToOffset(Math.max(0,
-      virtualizer.getTotalSize() + (lateral ? footerReserve : 0) - (scrollRef.current?.clientHeight || 520)));
-  }, [nodes.length, virtualizer, lateral, footerReserve]);
+    if (nodes.length) {
+      // Tail navigation supersedes the previous viewport's history anchor.
+      anchorRef.current = null;
+      virtualizer.scrollToOffset(tailGeometry().offset);
+    }
+  }, [nodes.length, virtualizer, tailGeometry]);
   const followTail = useFollowTail({ runId, liveAppend: props.liveAppend ?? { runId, revision: 0, identities: [] },
     onFollowTail: scrollToLatest });
 
@@ -117,6 +134,8 @@ export function Trajectory(props: Readonly<{
   const previousSelection = useRef<string | null>(null);
   useLayoutEffect(() => {
     if (props.selectedEventId === previousSelection.current) return;
+    // An around-event request can resolve this same selection on a later render.
+    if (props.selectedEventId !== null && selectedIndex < 0) return;
     previousSelection.current = props.selectedEventId;
     if (selectedIndex < 0) return;
     setFocusId(props.selectedEventId);
@@ -131,7 +150,7 @@ export function Trajectory(props: Readonly<{
     const viewport = scrollRef.current;
     if (!viewport) return;
     const first = virtualItems.find((item) => item.end > viewport.scrollTop && item.start < viewport.scrollTop + (viewport.clientHeight || 520));
-    if (!first) return;
+    if (!first) { anchorRef.current = null; return; }
     const eventId = nodes[first.index]!.events[0]!.eventId;
     anchorRef.current = { eventId, offset: first.start - viewport.scrollTop };
     if (!pendingFocus.current && !viewport.contains(document.activeElement)) setFocusId(eventId);
@@ -176,7 +195,7 @@ export function Trajectory(props: Readonly<{
     }}>{followTail.newEventCount} new {followTail.newEventCount === 1 ? "event" : "events"}</button>
       <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">{followTail.newEventCount} new {followTail.newEventCount === 1 ? "event" : "events"} available</span></div>}
     <div ref={scrollRef} className="trajectory-viewport" data-clarification-layout={lateral ? "adjacent" : "below"}
-      onScroll={(event) => followTail.observeViewport(event.currentTarget)}>
+      onScroll={(event) => followTail.observeViewport(event.currentTarget, tailGeometry())}>
       <div className="execution-graph-canvas" style={{ height: virtualizer.getTotalSize() + (lateral ? footerReserve : 0) }}>
         <div className="trajectory-stage" role="listbox" aria-label="Execution trajectory" style={{ height: virtualizer.getTotalSize() }}>
           {virtualItems.map((item) => {

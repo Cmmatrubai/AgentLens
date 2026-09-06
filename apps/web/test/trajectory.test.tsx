@@ -68,7 +68,146 @@ function translatedTop(element: HTMLElement): number {
   return Number(match[1]);
 }
 
+// JSDOM has no layout or native scrolling. Keep the real virtualizer and model
+// only the measured DOM geometry and the browser's clamped scroll operation.
+function mockScrollGeometry(tallClarificationEventId?: string, tallRegionEventId?: string) {
+  const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+    if (this.classList.contains("trajectory-viewport")) return rect(0, 520);
+    if (this.classList.contains("execution-graph-region")) {
+      return rect(0, this.querySelector(`[data-event-id="${tallRegionEventId}"]`) ? 1_200 : Number.parseFloat(this.style.minHeight));
+    }
+    if (this.classList.contains("execution-graph-clarification")) {
+      const selected = this.closest(".execution-graph-canvas")?.querySelector('[aria-selected="true"]');
+      return rect(0, selected?.getAttribute("data-event-id") === tallClarificationEventId ? 1_200 : 300);
+    }
+    return rect(0, 100);
+  });
+  const heightSpy = vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function () {
+    return this.classList.contains("trajectory-viewport") ? 520 : 0;
+  });
+  const scrollHeightSpy = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function () {
+    return this.classList.contains("trajectory-viewport")
+      ? Number.parseFloat(this.querySelector<HTMLElement>(".execution-graph-canvas")?.style.height ?? "0") : 0;
+  });
+  const scrollTo = vi.fn(function (this: HTMLElement, options: ScrollToOptions) {
+    this.scrollTop = Math.max(0, Math.min(options.top ?? 0, this.scrollHeight - this.clientHeight));
+  });
+  const originalScrollTo = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollTo");
+  Object.defineProperty(HTMLElement.prototype, "scrollTo", { configurable: true, value: scrollTo });
+  return {
+    scrollTo,
+    restore() {
+      rectSpy.mockRestore(); heightSpy.mockRestore(); scrollHeightSpy.mockRestore();
+      if (originalScrollTo) Object.defineProperty(HTMLElement.prototype, "scrollTo", originalScrollTo);
+      else delete (HTMLElement.prototype as Partial<HTMLElement>).scrollTo;
+    }
+  };
+}
+
 describe("virtualized execution trajectory", () => {
+  it("aligns a deferred selection after a substantial head window resolves and does not realign it on polling", async () => {
+    const geometry = mockScrollGeometry();
+    const fixture = events(102);
+    const props = { selectedEventId: "event-101", expandedGroupKeys: new Set<string>(),
+      onSelect: vi.fn(), onEscapeDeepEvidence: vi.fn(), onRelationshipJump: vi.fn() };
+    try {
+      const view = render(<Trajectory {...props} events={fixture.slice(0, 80)} />);
+      const viewport = view.container.querySelector<HTMLElement>(".trajectory-viewport")!;
+      expect(viewport.scrollTop).toBe(0);
+      expect(screen.queryByRole("option", { selected: true })).toBeNull();
+      view.rerender(<Trajectory {...props} events={fixture.slice(0, 101)} />);
+      const selected = screen.getByRole("option", { selected: true });
+      const region = selected.closest<HTMLElement>(".execution-graph-region")!;
+      await waitFor(() => expect(viewport.scrollTop).toBeCloseTo(translatedTop(region) - 520 / 3));
+      fireEvent.scroll(viewport);
+
+      // Reading history after resolution must win over the unchanged selection.
+      viewport.scrollTop -= 800;
+      fireEvent.scroll(viewport);
+      const historyOffset = viewport.scrollTop;
+      view.rerender(<Trajectory {...props} events={fixture}
+        liveAppend={{ runId: "run-virtual", revision: 1, identities: ["event-102:102"] }} />);
+      expect(viewport.scrollTop).toBe(historyOffset);
+      expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", "event-101");
+      expect(screen.getByRole("button", { name: "1 new event" })).toBeVisible();
+      expect(props.onSelect).not.toHaveBeenCalled();
+
+      // Clearing selection makes returning to the same ID a deliberate jump.
+      const liveAppend = { runId: "run-virtual", revision: 1, identities: ["event-102:102"] };
+      view.rerender(<Trajectory {...props} events={fixture} liveAppend={liveAppend} selectedEventId={null} />);
+      expect(viewport.scrollTop).toBe(historyOffset);
+      view.rerender(<Trajectory {...props} events={fixture} liveAppend={liveAppend} />);
+      expect(viewport.scrollTop).toBeCloseTo(translatedTop(region) - 520 / 3);
+    } finally { geometry.restore(); }
+  });
+
+  it.each([false, true])("keeps the latest node visible and follows successive appends after a tall historical clarification (tall latest region: %s)", async (tallLatestRegion) => {
+    const geometry = mockScrollGeometry("event-1", tallLatestRegion ? "event-42" : undefined);
+    const fixture = events(44);
+    fixture[0] = { ...fixture[0]!, relationships: fixture.slice(1, 41).map((event) => ({ type: "derived_from", eventId: event.eventId })) };
+    function FollowingGraph({ count }: { count: number }) {
+      const [selectedEventId, onSelect] = useState("event-1");
+      return <Trajectory events={fixture.slice(0, count)} selectedEventId={selectedEventId} onSelect={onSelect}
+        expandedGroupKeys={new Set()} onEscapeDeepEvidence={vi.fn()} onRelationshipJump={vi.fn()}
+        liveAppend={{ runId: "run-virtual", revision: count - 41, identities: count > 41 ? [`event-${count}:${count}`] : [] }} />;
+    }
+    try {
+      const view = render(<FollowingGraph count={41} />);
+      const viewport = view.container.querySelector<HTMLElement>(".trajectory-viewport")!;
+      const stage = screen.getByRole("listbox");
+      expect(viewport.scrollHeight - Number.parseFloat(stage.style.height)).toBe(1_200);
+      expect(screen.getAllByRole("button", { name: /Jump to derived from event/ })).toHaveLength(40);
+      viewport.scrollTop = 300;
+      fireEvent.scroll(viewport);
+      view.rerender(<FollowingGraph count={42} />);
+      expect(viewport.scrollTop).toBe(300);
+      await userEvent.click(screen.getByRole("button", { name: "1 new event" }));
+      const expectLatestVisible = (id: string) => {
+        const latest = view.container.querySelector<HTMLElement>(`[data-event-id="${id}"]`)!;
+        expect(latest).not.toBeNull();
+        const top = translatedTop(latest.closest<HTMLElement>(".execution-graph-region")!);
+        expect(top).toBeGreaterThanOrEqual(viewport.scrollTop);
+        expect(top + latest.getBoundingClientRect().height).toBeLessThanOrEqual(viewport.scrollTop + viewport.clientHeight);
+      };
+      expectLatestVisible("event-42");
+      expect(document.activeElement).toHaveAttribute("data-event-id", "event-42");
+      expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", "event-42");
+      expect(viewport.scrollHeight - Number.parseFloat(stage.style.height)).toBe(1_200);
+      for (const count of [43, 44]) {
+        fireEvent.scroll(viewport); // Native scroll feedback must keep following enabled.
+        const previousOffset = viewport.scrollTop;
+        view.rerender(<FollowingGraph count={count} />);
+        expect(viewport.scrollTop).toBeGreaterThan(previousOffset);
+        expectLatestVisible(`event-${count}`);
+        expect(screen.queryByRole("button", { name: /new event/ })).toBeNull();
+        expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", "event-42");
+        expect(document.activeElement).toHaveAttribute("data-event-id", "event-42");
+      }
+    } finally { geometry.restore(); }
+  });
+
+  it("pauses following when the user scrolls below all nodes into a tall clarification reserve", () => {
+    const geometry = mockScrollGeometry("event-1");
+    const fixture = events(42);
+    fixture[0] = { ...fixture[0]!, relationships: fixture.slice(1, 41).map((event) => ({ type: "derived_from", eventId: event.eventId })) };
+    const props = { selectedEventId: "event-1", expandedGroupKeys: new Set<string>(),
+      onSelect: vi.fn(), onEscapeDeepEvidence: vi.fn(), onRelationshipJump: vi.fn() };
+    try {
+      const view = render(<Trajectory {...props} events={fixture.slice(0, 41)} />);
+      const viewport = view.container.querySelector<HTMLElement>(".trajectory-viewport")!;
+      viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight;
+      expect(viewport.scrollTop).toBeGreaterThan(Number.parseFloat(screen.getByRole("listbox").style.height));
+      fireEvent.scroll(viewport);
+      const historyOffset = viewport.scrollTop;
+      view.rerender(<Trajectory {...props} events={fixture}
+        liveAppend={{ runId: "run-virtual", revision: 1, identities: ["event-42:42"] }} />);
+      expect(viewport.scrollTop).toBe(historyOffset);
+      expect(screen.getByRole("button", { name: "1 new event" })).toBeVisible();
+      expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", "event-1");
+      expect(props.onSelect).not.toHaveBeenCalled();
+    } finally { geometry.restore(); }
+  });
+
   it("shares dense relationship labels without hiding exact paths or boundary distinctions", () => {
     const fixture = events(41);
     fixture[0] = { ...fixture[0]!, relationships: fixture.slice(1).map((event) => ({ type: "derived_from", eventId: event.eventId })) };
