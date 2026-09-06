@@ -1,13 +1,16 @@
 import type { TrajectoryEventV1 } from "@agentlens/api-contract";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Trajectory } from "../src/trajectory/Trajectory.js";
 import { RunWorkspace } from "../src/run-detail/RunWorkspace.js";
 import { ExecutionGraphEdges } from "../src/trajectory/ExecutionGraphEdges.js";
 import { projectExecutionGraph } from "../src/trajectory/projectExecutionGraph.js";
+
+// Vitest globals are disabled, so RTL cannot register automatic root cleanup.
+afterEach(cleanup);
 
 function events(count: number): TrajectoryEventV1[] {
   return Array.from({ length: count }, (_, index) => {
@@ -70,6 +73,8 @@ function translatedTop(element: HTMLElement): number {
 
 // JSDOM has no layout or native scrolling. Keep the real virtualizer and model
 // only the measured DOM geometry and the browser's clamped scroll operation.
+// Unmount before restoring these prototypes so scheduled virtualizer work cannot
+// keep a detached React root alive under the next test's geometry.
 function mockScrollGeometry(tallClarificationEventId?: string, tallRegionEventId?: string) {
   const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
     if (this.classList.contains("trajectory-viewport")) return rect(0, 520);
@@ -110,8 +115,10 @@ describe("virtualized execution trajectory", () => {
     const fixture = events(102);
     const props = { selectedEventId: "event-101", expandedGroupKeys: new Set<string>(),
       onSelect: vi.fn(), onEscapeDeepEvidence: vi.fn(), onRelationshipJump: vi.fn() };
+    let unmount: (() => void) | undefined;
     try {
       const view = render(<Trajectory {...props} events={fixture.slice(0, 80)} />);
+      unmount = view.unmount;
       const viewport = view.container.querySelector<HTMLElement>(".trajectory-viewport")!;
       expect(viewport.scrollTop).toBe(0);
       expect(screen.queryByRole("option", { selected: true })).toBeNull();
@@ -138,7 +145,7 @@ describe("virtualized execution trajectory", () => {
       expect(viewport.scrollTop).toBe(historyOffset);
       view.rerender(<Trajectory {...props} events={fixture} liveAppend={liveAppend} />);
       expect(viewport.scrollTop).toBeCloseTo(translatedTop(region) - 520 / 3);
-    } finally { geometry.restore(); }
+    } finally { unmount?.(); geometry.restore(); }
   });
 
   it.each([false, true])("keeps the latest node visible and follows successive appends after a tall historical clarification (tall latest region: %s)", async (tallLatestRegion) => {
@@ -151,8 +158,10 @@ describe("virtualized execution trajectory", () => {
         expandedGroupKeys={new Set()} onEscapeDeepEvidence={vi.fn()} onRelationshipJump={vi.fn()}
         liveAppend={{ runId: "run-virtual", revision: count - 41, identities: count > 41 ? [`event-${count}:${count}`] : [] }} />;
     }
+    let unmount: (() => void) | undefined;
     try {
       const view = render(<FollowingGraph count={41} />);
+      unmount = view.unmount;
       const viewport = view.container.querySelector<HTMLElement>(".trajectory-viewport")!;
       const stage = screen.getByRole("listbox");
       expect(viewport.scrollHeight - Number.parseFloat(stage.style.height)).toBe(1_200);
@@ -183,7 +192,7 @@ describe("virtualized execution trajectory", () => {
         expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", "event-42");
         expect(document.activeElement).toHaveAttribute("data-event-id", "event-42");
       }
-    } finally { geometry.restore(); }
+    } finally { unmount?.(); geometry.restore(); }
   });
 
   it("pauses following when the user scrolls below all nodes into a tall clarification reserve", () => {
@@ -192,8 +201,10 @@ describe("virtualized execution trajectory", () => {
     fixture[0] = { ...fixture[0]!, relationships: fixture.slice(1, 41).map((event) => ({ type: "derived_from", eventId: event.eventId })) };
     const props = { selectedEventId: "event-1", expandedGroupKeys: new Set<string>(),
       onSelect: vi.fn(), onEscapeDeepEvidence: vi.fn(), onRelationshipJump: vi.fn() };
+    let unmount: (() => void) | undefined;
     try {
       const view = render(<Trajectory {...props} events={fixture.slice(0, 41)} />);
+      unmount = view.unmount;
       const viewport = view.container.querySelector<HTMLElement>(".trajectory-viewport")!;
       viewport.scrollTop = viewport.scrollHeight - viewport.clientHeight;
       expect(viewport.scrollTop).toBeGreaterThan(Number.parseFloat(screen.getByRole("listbox").style.height));
@@ -205,7 +216,7 @@ describe("virtualized execution trajectory", () => {
       expect(screen.getByRole("button", { name: "1 new event" })).toBeVisible();
       expect(screen.getByRole("option", { selected: true })).toHaveAttribute("data-event-id", "event-1");
       expect(props.onSelect).not.toHaveBeenCalled();
-    } finally { geometry.restore(); }
+    } finally { unmount?.(); geometry.restore(); }
   });
 
   it("shares dense relationship labels without hiding exact paths or boundary distinctions", () => {
