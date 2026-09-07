@@ -11,11 +11,12 @@
 
 <p align="center">
   <img alt="Status: early development" src="https://img.shields.io/badge/status-early_development-151a1e?style=flat-square">
-  <img alt="Node.js 22 or newer" src="https://img.shields.io/badge/node-%E2%89%A522-3c873a?style=flat-square&logo=nodedotjs&logoColor=white">
+  <img alt="Node.js 22.12 or newer" src="https://img.shields.io/badge/node-%E2%89%A522.12-3c873a?style=flat-square&logo=nodedotjs&logoColor=white">
   <img alt="Local-first" src="https://img.shields.io/badge/storage-local--first-3c5963?style=flat-square">
 </p>
 
 <p align="center">
+  <a href="#desktop-app">Desktop app</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#evidence-not-interpretation">Evidence model</a> ·
   <a href="#architecture">Architecture</a> ·
@@ -39,9 +40,24 @@ A final diff shows **what changed**. AgentLens preserves how the run unfolded—
 
 ## Product direction
 
-*UI concept preview. This mock-data prototype is a design reference only; the image is not production UI or real product telemetry. The implemented loopback UI is a separate, evidence-backed local interface.*
+The desktop comparison app now lives in this repository under **apps/desktop**. Its saved C01 example compares two actual coding attempts on the same historical task. Setup and task-library flows still use sample data; the desktop is a source-run preview, not a packaged release.
 
-![AgentLens trajectory concept showing separate observed, derived, Git, recorder, and human evidence](./docs/assets/agentlens-trajectory-concept.jpg)
+![AgentLens desktop showing the saved Sol and Terra comparison](./apps/desktop/qa/real-run/comparison-C01/findings/overview-1440.png)
+
+## Desktop app
+
+From the repository root:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm desktop
+```
+
+The Electron app includes recorded-attempt inspection, paired evidence, comparison setup, and a configurable OpenAI-compatible insight engine. Provider keys are encrypted locally; generation requires an explicit evidence review. Live full-comparison insight generation is still being evaluated: the latest TokenRouter GLM-5.3 tests returned incomplete outputs, which the app withheld.
+
+`pnpm dev:desktop` opens the browser development surface at http://127.0.0.1:5177. Configuration, comparison import and AI generation require Electron.
+
+Recordings and provider settings are private runtime data, excluded from Git. A fresh checkout opens the sample workspace; real comparisons require local evidence or an imported comparison bundle. See the [desktop guide](./apps/desktop/README.md), [endpoint setup](./apps/desktop/docs/insight-compatible-endpoints.md), and [migration notes](./apps/desktop/docs/repository-migration.md).
 
 ## Evidence, not interpretation
 
@@ -81,6 +97,7 @@ Implemented in the current source tree:
 - **Explicit human assessment** with `success`, `partial`, `failure`, or `unreviewed` verdicts kept separate from task-completion judgment.
 - **Read-only diagnostics** through `doctor`.
 - **Loopback run UI** through `ui`, with bounded trajectories, an evidence inspector, retryable active-snapshot recovery, and a single final-page auto-fill when a completed run has at most one page remaining.
+- **Desktop comparison preview** through `pnpm desktop`, with paired evidence, recorded-run inspection, saved-comparison imports and explicit provider-backed analysis jobs.
 - **Lifecycle hardening** for interruption, process-group cleanup, abandoned-run recovery, bounded stream ingestion, and crash-gap derivation repair.
 
 ## Quick start
@@ -89,7 +106,7 @@ AgentLens is currently source-first; no published package is claimed here.
 
 ### Prerequisites
 
-- Node.js 22 or newer
+- Node.js 22.12 or newer (required by the desktop toolchain)
 - `pnpm`
 - an installed and authenticated Codex CLI
 - a clean Git repository for the run you want to record
@@ -217,7 +234,7 @@ Other intentional boundaries:
 | Evidence, Git, derivation, and assessment CLI | **Available** | `runs` and `inspect` remain non-mutating; likely tests are evidence, not grading. |
 | Production local UI | **Available** | Loopback-only run ledger, trajectory, inspector, Git evidence, and assessment presentation; bounded local reads retain explicit availability limits. |
 | AGY / Claude adapters | **Planned** | No AGY or Claude capture adapter is implemented. |
-| Controlled comparisons / Insights | **Roadmap** | Benchmark Cases, comparison workflows, and the Insight Layer are not implemented. |
+| Desktop comparisons / Insights | **Source-run preview** | Saved C01 evidence, comparison imports, paired inspection and an insight engine are implemented. General live execution from setup and validated AI finding quality remain unfinished. |
 
 The production UI direction is documented in the [Task 7 design](./docs/superpowers/specs/2026-08-30-agentlens-task-7-design.md), with execution gated by its [implementation plan](./docs/superpowers/plans/2026-08-30-agentlens-task-7.md).
 
@@ -228,10 +245,10 @@ The long-term direction is staged so each layer earns the next one with real evi
 1. **Single-run observability and evaluation — current.** Record Codex runs, preserve provenance, derive conservative test evidence, and support explicit human review.
 2. **Local UI and dogfooding — current implementation.** The loopback-only run ledger, execution trajectory, evidence inspector, Git review, and assessment presentation are available for local runs.
 3. **Multi-provider capture.** Add Codex + AGY capture, then Claude, while exposing provider capabilities instead of forcing false feature parity.
-4. **Controlled same-task comparisons.** Compare providers only when task, repository state, capture conditions, and evidence semantics are controlled.
+4. **Controlled same-task comparisons — desktop preview.** One preserved controlled pair and imported comparisons can be inspected. General execution from the desktop setup flow remains planned.
 5. **Benchmark Case and repeated attempts.** Treat one task definition plus repeated runs as a durable case—not as a leaderboard shortcut.
 6. **Provider-capability-aware behavior features.** Extract comparable behaviors only where the provider evidence supports them; preserve unavailable states elsewhere.
-7. **Insight Layer.** Surface evidence-backed cross-run findings with traceable support, explicit uncertainty, and no invented causal story.
+7. **Insight Layer — engine implemented, quality evaluation pending.** Explicit provider requests, bounded evidence, validation and saved revisions are present. Evaluate useful findings across real tasks before claiming reliable cross-run judgment.
 
 ## Development
 
@@ -248,6 +265,8 @@ pnpm test
 pnpm typecheck
 ```
 
+These root checks include the desktop package. Build both web and desktop with `pnpm build`; use `pnpm test:desktop` and `pnpm build:desktop` for focused desktop checks.
+
 Run a focused workspace test directory when iterating:
 
 ```bash
@@ -258,6 +277,9 @@ pnpm vitest --run packages/derivations/test
 
 ```text
 apps/cli/                    CLI commands, recorder orchestration, Git and lifecycle handling
+apps/desktop/                Electron comparison UI, recorded readers, insight engine and desktop tests
+apps/server/                 loopback API over recorded evidence
+apps/web/                    existing browser run-review UI
 packages/core/               canonical events, capture policy, redaction, artifact storage
 packages/codex/              Codex JSONL decoding, normalization, capability declarations
 packages/storage/            SQLite schema, migrations, repositories, read-only access

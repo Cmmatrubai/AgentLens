@@ -1,0 +1,55 @@
+diff --git a/apps/cli/test/readCommands.integration.test.ts b/apps/cli/test/readCommands.integration.test.ts
+--- a/apps/cli/test/readCommands.integration.test.ts
++++ b/apps/cli/test/readCommands.integration.test.ts
+@@ -552,7 +552,7 @@ describe("runs and inspect", () => {
+     expect(nativeText.text()).toContain('native: {"type":"future.event","future":{"large":');
+   });
+ 
+-  it("returns bounded truncation metadata instead of parsing or emitting truncated native JSON", async () => {
++  it("discards a provider line above the source limit before native artifact truncation", async () => {
+     const context = await fixture();
+     const recorded = await recordRun(
+       {
+@@ -571,20 +571,30 @@ describe("runs and inspect", () => {
+       json: true,
+       native: true
+     }, { stdout: output.output });
+-    const unknown = inspected.events.find(({ kind }) => kind === "source.unknown");
++    const diagnostic = inspected.events.find(({ kind, normalizedPayload }) =>
++      kind === "recorder.stream_diagnostic" &&
++      (normalizedPayload as { reason?: unknown } | undefined)?.reason === "line_too_large"
++    );
+     const artifact = inspected.artifacts.find(({ kind }) => kind === "native-payload");
++    const payload = diagnostic?.normalizedPayload as {
++      stream?: unknown;
++      reason?: unknown;
++      limitBytes?: unknown;
++      observedBytes?: unknown;
++      observedByteLength?: unknown;
++    } | undefined;
++    const observedBytes = typeof payload?.observedBytes === "number"
++      ? payload.observedBytes
++      : payload?.observedByteLength;
+ 
+-    expect(artifact).toMatchObject({
+-      truncated: true,
+-      byteLength: 10 * 1024 * 1024,
+-      originalByteLength: expect.any(Number)
++    expect(payload).toMatchObject({
++      stream: "stdout",
++      reason: "line_too_large",
++      limitBytes: 1_048_576
+     });
+-    expect(artifact!.originalByteLength).toBeGreaterThan(artifact!.byteLength);
+-    expect(unknown?.nativeContent).toEqual({
+-      state: "truncated",
+-      truncated: true,
+-      storedByteLength: artifact!.byteLength,
+-      originalByteLength: artifact!.originalByteLength
+-    });
++    expect(typeof observedBytes).toBe("number");
++    if (typeof observedBytes !== "number") throw new Error("Oversized diagnostic omitted observed bytes.");
++    expect(observedBytes).toBeGreaterThan(10 * 1024 * 1024);
++    expect(artifact).toBeUndefined();
+     expect(output.text().length).toBeLessThan(100_000);
+   });

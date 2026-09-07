@@ -1,0 +1,20 @@
+{
+  "status": "completed_and_independently_evaluated",
+  "baseline": {
+    "model": "gpt-5.6-sol",
+    "reasoningEffort": "high"
+  },
+  "candidate": {
+    "model": "gpt-5.6-terra",
+    "reasoningEffort": "high"
+  },
+  "source": "User request on September 6, 2026",
+  "controls": [
+    "Same task and independent checks",
+    "Same starting revision",
+    "Separate clean workspaces",
+    "Same tools and time limit",
+    "Recorded model and reasoning settings"
+  ],
+  "comparisonId": "C01-20260906-sol-terra-high"
+}

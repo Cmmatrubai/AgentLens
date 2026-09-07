@@ -3,15 +3,20 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12.0"
   },
   "scripts": {
     "agentlens": "tsx --conditions=development apps/cli/src/developmentEntry.ts",
-    "build": "tsc -b --pretty false && pnpm --filter @agentlens/web build",
+    "build": "tsc -b --pretty false && pnpm --filter @agentlens/web build && pnpm build:desktop",
     "build:web": "pnpm --filter @agentlens/web build",
-    "test": "vitest --run",
+    "test": "vitest --run && pnpm test:desktop",
     "test:e2e": "playwright test --config apps/web/playwright.config.ts",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false && pnpm --filter @agentlens/desktop typecheck",
+    "desktop": "pnpm --filter @agentlens/desktop desktop",
+    "dev:desktop": "pnpm --filter @agentlens/desktop dev",
+    "preview:desktop": "pnpm --filter @agentlens/desktop preview",
+    "build:desktop": "pnpm --filter @agentlens/desktop build",
+    "test:desktop": "pnpm --filter @agentlens/desktop test"
   },
   "dependencies": {
     "zod": "^3.23.8"
