@@ -27,3 +27,13 @@ Validation ran on Node 26.7.0 with pnpm 11.25.0; Node 22.12 is the declared supp
 Local private data is connected through an ignored symbolic link to the original prototype's private directory. That directory remains necessary on this machine until explicitly relocated. No live provider request was made. Previously incomplete provider analyses remain incomplete; this migration does not validate insight quality, implement general model orchestration, or produce a signed installer.
 
 Run `pnpm desktop` from the repository root. The native app is left running, with a browser review preview at port 5178; documented development defaults use port 5177.
+
+## Main integration follow-up
+
+After the migration files were committed, the existing fresh-checkout packaging tests exposed a React type-resolution conflict. Their fixture copies Git-tracked files, so the pre-commit run had not included the then-untracked desktop package. A standalone tracked-file copy with an offline frozen install reproduced the React 18/19 JSX errors in the existing web app.
+
+Router 6 imports React types without declaring them as a dependency. Workspace package extensions now bind both router packages to the web app's React 18 types, while the desktop retains React 19. The five packaging tests passed after this change, including the fresh offline install and compiled UI checks. No test assertions were weakened.
+
+The full post-fix suite passed: 1,519 existing tests and 85 desktop tests; type checks and both production builds also passed. The browser run exposed a separate sequencing race in the existing run-list journey: applying filters before the initial fetch completed cancelled that request and tripped the strict browser guard. The journey now waits for and asserts successful completion of the initial request before applying filters; browser guard assertions remain intact.
+
+The final browser suite passed all 12 tests after the sequencing correction.

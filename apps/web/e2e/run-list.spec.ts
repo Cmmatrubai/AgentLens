@@ -5,7 +5,16 @@ test("one-use bootstrap opens the evidence ledger, filters it, and expires on re
   productionUi,
   requestLifecycle
 }) => {
+  const initialCheckpoint = requestLifecycle.checkpoint();
   await openBootstrapped(page, productionUi);
+  // Let the initial ledger load before this journey replaces its query.
+  const initialRequest = await requestLifecycle.waitForTerminal(initialCheckpoint, {
+    method: "GET",
+    origin: productionUi.origin,
+    pathname: "/api/v1/runs",
+    search: "?limit=50"
+  });
+  expect(initialRequest.terminal.state).toBe("finished");
   await page.getByLabel("Run status").selectOption("completed");
   const checkpoint = requestLifecycle.checkpoint();
   await page.getByRole("button", { name: "Apply filters" }).click();

@@ -6,3 +6,13 @@ allowBuilds:
   better-sqlite3: true
   esbuild: true
   electron: true
+
+# Router 6 declarations import React types without declaring that dependency.
+# Bind them to the web app's React 18 types instead of the desktop's hoisted types.
+packageExtensions:
+  "react-router@6":
+    peerDependencies:
+      "@types/react": "^18.3.0"
+  "react-router-dom@6":
+    peerDependencies:
+      "@types/react": "^18.3.0"
