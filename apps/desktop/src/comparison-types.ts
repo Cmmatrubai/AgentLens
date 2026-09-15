@@ -35,6 +35,9 @@ export type RealComparison = {
   timeoutMs?: number;
   taskPrompt?: string;
   imported?: boolean;
+  desktopRecorded?: boolean;
+  verificationKind?: "command";
+  verificationError?: string;
   promptHash: string;
   checkBundleHash?: string;
   attempts: RealAttempt[];

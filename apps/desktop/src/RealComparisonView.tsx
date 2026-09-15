@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import {
   ArrowLeft,
@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import { Button, Modal } from "./ui";
+import { MissingCheckResults } from "./ComparisonStates";
 import type {
   ComparisonResponse,
   IndependentCheck,
@@ -28,7 +29,10 @@ import {
   ComparisonFindings,
   FindingEvidenceDialog,
 } from "./ComparisonFindings";
-import { InsightPanel } from "./InsightPanel";
+import { publicDemo as publicDemoBuild } from './app-capabilities';
+import { loadPublicComparison } from './public-demo-data';
+import { readComparisonData } from './comparison-data';
+const InsightPanel = import.meta.env.MODE === 'demo' ? null : lazy(() => import('./InsightPanel').then(m => ({default: m.InsightPanel})));
 const model = (a: RealAttempt) =>
   (a.model || a.key).replace(
     /^gpt-(.+)-(sol|terra)$/i,
@@ -63,14 +67,28 @@ type Selection =
   | { kind: "run"; attempt: RealAttempt }
   | { kind: "event"; attempt: RealAttempt; event: RecordedEvent }
   | { kind: "file"; attempt: RealAttempt; index: number };
-export function RealComparisonView() {
+export function RealComparisonView({ publicView = 'case', bundledExample = false }: { publicView?: 'case' | 'evidence'; bundledExample?: boolean } = {}) {
+  const publicDemo = publicDemoBuild || bundledExample;
   const [data, setData] = useState<RealComparison | null>(null),
     [busy, setBusy] = useState(true),
     [error, setError] = useState(false),
+    [notSelected, setNotSelected] = useState(false),
     [importError, setImportError] = useState<string | null>(null),
     [selection, setSelection] = useState<Selection | null>(null),
     [findingId, setFindingId] = useState<string | null>(null),
     [sources, setSources] = useState(false);
+  const overviewRef = useRef<HTMLElement>(null);
+  const findingsRef = useRef<HTMLDivElement>(null);
+  const attemptsRef = useRef<HTMLDivElement>(null);
+  const checksRef = useRef<HTMLElement>(null);
+  const jumpTo = (section: HTMLElement | null) => {
+    if (!section) return;
+    section.focus({ preventScroll: true });
+    section.scrollIntoView({
+      block: "start",
+      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth",
+    });
+  };
   const generation = useRef(0),
     poll = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const read = useCallback(async () => {
@@ -78,13 +96,15 @@ export function RealComparisonView() {
     clearTimeout(poll.current);
     setBusy(true);
     try {
-      const r: ComparisonResponse = window.agentlens
-        ? await window.agentlens.readComparison()
-        : await fetch("/api/comparison", {
-            headers: { "X-AgentLens-Read": "1" },
-            cache: "no-store",
-          }).then((r) => r.json());
+      const r: ComparisonResponse = bundledExample
+        ? await loadPublicComparison(import.meta.env.BASE_URL)
+        : await readComparisonData();
       if (id !== generation.current) return;
+      if (!r.ok && r.error === "comparison_not_selected") {
+        setData(null); setSelection(null); setFindingId(null); setSources(false);
+        setError(false); setNotSelected(true); return;
+      }
+      setNotSelected(false);
       if (
         !r.ok ||
         r.comparison.schemaVersion !== 1 ||
@@ -126,13 +146,14 @@ export function RealComparisonView() {
         (attempt) => attempt.run?.status === "completed",
       );
       if (
-        !r.comparison.imported &&
+        !publicDemo && !r.comparison.imported &&
         (!recordingsComplete ||
           (!!r.comparison.checks.length && !r.comparison.ready))
       )
         poll.current = setTimeout(() => void read(), 10000);
     } catch {
       if (id === generation.current) {
+        setNotSelected(false);
         setData(null);
         setSelection(null);
         setFindingId(null);
@@ -142,7 +163,7 @@ export function RealComparisonView() {
     } finally {
       if (id === generation.current) setBusy(false);
     }
-  }, []);
+  }, [bundledExample, publicDemo]);
   useEffect(() => {
     void read();
     return () => {
@@ -150,20 +171,22 @@ export function RealComparisonView() {
       clearTimeout(poll.current);
     };
   }, [read]);
-  const openPair = async () => {
-    if (!window.agentlens || busy) return;
+  const openPair = async (requireChecks = false) => {
+    if (publicDemo || !window.agentlens || busy) return;
     const id = ++generation.current;
     clearTimeout(poll.current);
     setBusy(true);
     setImportError(null);
     try {
-      const result = await window.agentlens.openInsightPair();
+      const result = await window.agentlens.openInsightPair({ requireChecks });
       if (id !== generation.current) return;
-      if (!result.ok) throw new Error("Import failed");
+      if (!result.ok) throw new Error(result.error);
       if (!result.cancelled) await read();
-    } catch {
+    } catch (error) {
       if (id === generation.current)
-        setImportError("The file could not be opened as a saved comparison.");
+        setImportError(error instanceof Error && error.message === "evaluation_missing"
+          ? "That file has no evaluated check results. Your current comparison is unchanged."
+          : "The file could not be opened as a saved comparison. Your current comparison is unchanged.");
     } finally {
       if (id === generation.current) setBusy(false);
     }
@@ -209,9 +232,9 @@ export function RealComparisonView() {
     <div className="page recorded-page real-comparison-page">
       <div className="recorded-topline">
         <span className="recorded-badge">
-          <span /> REAL COMPARISON · {data?.imported ? "IMPORTED" : "C01"}
+          <span /> {publicDemo ? 'RECORDED CASE STUDY · EXAMPLE' : data?.imported ? 'YOUR COMPARISON · IMPORTED' : 'YOUR COMPARISON'}
         </span>
-        <Button
+        {(!publicDemo || error) && <Button
           small
           variant="ghost"
           onClick={() => void read()}
@@ -219,32 +242,36 @@ export function RealComparisonView() {
         >
           <RefreshCw size={13} className={busy ? "spin" : ""} />
           Refresh comparison
-        </Button>
+        </Button>}
       </div>
       {!data ? (
         <div className="recorded-loading" role={error ? "alert" : "status"}>
-          {error ? (
+          {error || notSelected ? (
             <Info size={26} />
           ) : (
             <LoaderCircle size={26} className="spin" />
           )}
           <h1>
-            {error
+            {notSelected ? "No comparison selected yet." : error
               ? "Comparison evidence is unavailable."
-              : "Opening the controlled comparison."}
+              : "Opening your comparison."}
           </h1>
           <p>
-            {error
-              ? window.agentlens
+            {notSelected ? "Start with your own task, or open a saved comparison. The recorded example is available separately." : error
+              ? publicDemo ? "The bundled case could not be loaded or its integrity check failed. Try loading it again." : window.agentlens
                 ? "Open a saved comparison, or try reading the local evidence again."
                 : "The local reader could not validate the comparison. Open the desktop app to import saved evidence."
               : "Checking the frozen task and recorded attempt identities."}
           </p>
-          {error && window.agentlens && (
+          {(error || notSelected) && !publicDemo && window.agentlens && (
             <Button onClick={() => void openPair()} disabled={busy}>
               <FileInput size={15} /> Open saved comparison
             </Button>
           )}
+          {notSelected && <div className="comparison-empty-actions">
+            <Button variant="primary" onClick={() => { window.location.hash = "/import"; }}>Start a comparison <ArrowRight size={15} /></Button>
+            <Button variant="ghost" onClick={() => { window.location.hash = "/example"; }}>Explore the recorded example</Button>
+          </div>}
           {error && (
             <Button variant="ghost" onClick={() => void read()} disabled={busy}>
               Try again
@@ -258,9 +285,9 @@ export function RealComparisonView() {
             <div className="eyebrow">
               ONE TASK / TWO {data.imported ? "SAVED" : "CONTROLLED"} ATTEMPTS
             </div>
-            <h1>{data.title}</h1>
-            <p>
-              {data.imported
+            <h1>{publicDemo && publicView === 'evidence' ? 'Follow the evidence.' : data.desktopRecorded ? 'Compare the approaches' : data.title}</h1>
+            <p className={data.desktopRecorded ? "real-task-preview" : undefined}>
+              {publicDemo && publicView === 'evidence' ? 'Inspect the selected recorded work and the checks run independently on both submissions.' : data.desktopRecorded ? (data.taskPrompt || data.title) : data.imported
                 ? "Compare two recorded approaches to the same task. Open the details for the full request."
                 : "Can an agent keep a malformed 64 MiB record from overwhelming the recorder?"}
             </p>
@@ -272,7 +299,7 @@ export function RealComparisonView() {
               <span>
                 <ShieldCheck size={13} />
                 {data.checks.length
-                  ? `${data.checks.length} independent ${data.checks.length === 1 ? "check" : "checks"}`
+                  ? `${data.checks.length} ${data.verificationKind === "command" ? "command" : "independent"} ${data.checks.length === 1 ? "check" : "checks"}`
                   : "No independent checks supplied"}
               </span>
               {!!data.timeoutMs && (
@@ -287,19 +314,27 @@ export function RealComparisonView() {
               </button>
             </div>
           </div>
-          <section className="real-verdict">
+          {!publicDemo && <nav className="comparison-section-nav" aria-label="Jump to comparison section">
+            <button type="button" aria-controls="comparison-overview" onClick={() => jumpTo(overviewRef.current)}>Overview</button>
+            <button type="button" aria-controls="comparison-findings" onClick={() => jumpTo(findingsRef.current)}>Findings</button>
+            <button type="button" aria-controls="comparison-attempts" onClick={() => jumpTo(attemptsRef.current)}>Attempts</button>
+            <button type="button" aria-controls="comparison-checks" onClick={() => jumpTo(checksRef.current)}>Checks</button>
+          </nav>}
+          {(!publicDemo || publicView === 'case') && <section className="real-verdict comparison-jump-target" id="comparison-overview" ref={overviewRef} tabIndex={-1} aria-label="Comparison overview">
             <span className="real-verdict-kicker">
               {complete
                 ? data.review?.state === "available"
                   ? "COMPARISON OVERVIEW"
                   : checksReady
-                    ? "INDEPENDENT EVALUATION"
+                    ? data.verificationKind === "command" ? "COMMAND VERIFICATION" : "INDEPENDENT EVALUATION"
                     : "RECORDED EVIDENCE"
                 : "COMPARISON IN PROGRESS"}
             </span>
             <h2>
               {!complete
                 ? "The evidence is coming together."
+                : data.verificationKind === "command"
+                  ? inconclusive ? "Some command results remain unknown." : bothPass ? "The check command passed on both attempts." : different ? "Same check command. Different results." : "The check command failed on both attempts."
                 : !hasChecks
                   ? "Independent correctness is unknown."
                   : !checksReady
@@ -319,6 +354,8 @@ export function RealComparisonView() {
             <p>
               {!complete
                 ? "Each model works in its own clean repository. Independent checks follow the recorded attempt."
+                : data.verificationKind === "command"
+                  ? "Your command ran separately on fresh copies of both saved attempts. A pass means it exited successfully; the command and its assertions determine what that proves. Open a result to inspect its output."
                 : !hasChecks
                   ? "Both completed recordings can support workflow analysis, but this pair supplies no independent check outcomes."
                   : !checksReady
@@ -331,24 +368,31 @@ export function RealComparisonView() {
                         ? "Review how they built and tested the solution, with evidence from both attempts."
                         : "The checks below show where each recorded attempt holds up and where more work is needed."}
             </p>
-          </section>
-          <InsightPanel comparison={data} onComparisonChange={read} />
-          {!data.imported && data.review?.state === "available" && (
+            {publicDemo && <div className="demo-result-pair">{data.attempts.map(a => <div key={a.key}><span>{model(a)} · {reasoning(a)}</span><strong>{a.passed} / {a.checks.length}<small> independent checks passed</small></strong></div>)}</div>}
+          </section>}
+          {!publicDemo && InsightPanel && <div className="comparison-jump-target" id="comparison-findings" ref={findingsRef} tabIndex={-1} role="region" aria-label="Generated findings">
+            <Suspense fallback={<p role="status">Opening insight engine…</p>}><InsightPanel comparison={data} onComparisonChange={read} /></Suspense>
+          </div>}
+          {publicDemo && publicView === 'case' && <>
+            <ComparisonFindings review={data.review} onSelect={setFindingId} variant="authored" />
+            <div className="demo-evidence-next"><div><h2>Check the result for yourself.</h2><p>Open the recorded work and independent test results for each attempt.</p></div><a href="#/evidence">Explore evidence <ArrowRight size={16}/></a></div>
+          </>}
+          {!publicDemo && !data.imported && data.review?.state === "available" && (
             <details className="example-analysis">
               <summary>
-                Example analysis
+                Case study notes
                 <span>
-                  Authored demonstration for C01 · not newly generated
+                  Authored for C01 · separate from the AI draft
                 </span>
               </summary>
               <ComparisonFindings
                 review={data.review}
                 onSelect={setFindingId}
-                variant="example"
+                variant="authored"
               />
             </details>
           )}
-          <div className="real-attempts">
+          {(!publicDemo || publicView === 'evidence') && <><div className="real-attempts comparison-jump-target" id="comparison-attempts" ref={attemptsRef} tabIndex={-1} role="region" aria-label="Model attempts">
             {data.attempts.map((a, index) => (
               <motion.section
                 className={`real-attempt side-${index} ${a.failed ? "has-failure" : ""}`}
@@ -383,7 +427,7 @@ export function RealComparisonView() {
                     )}
                     <small>
                       {a.checks.length
-                        ? "independent checks passed"
+                        ? data.verificationKind === "command" ? "check commands passed" : "independent checks passed"
                         : "independent checks unavailable"}
                     </small>
                   </div>
@@ -407,19 +451,19 @@ export function RealComparisonView() {
                     disabled={!a.run}
                     onClick={() => setSelection({ kind: "run", attempt: a })}
                   >
-                    Inspect attempt
+                    See recorded work
                     <ArrowRight size={13} />
                   </Button>
                 </div>
               </motion.section>
             ))}
           </div>
-          <section className="real-checks">
+          <section className="real-checks comparison-jump-target" id="comparison-checks" ref={checksRef} tabIndex={-1} aria-label={data.verificationKind === "command" ? "Command verification" : "Independent checks"}>
             <div className="recorded-section-heading">
-              <h2>What counts as success</h2>
+              <h2>{data.verificationKind === "command" ? "What your command checked" : "What counts as success"}</h2>
               <span>
                 {data.checks.length
-                  ? data.imported
+                  ? data.verificationKind === "command" ? "User-defined command · run on both copies" : data.imported
                     ? "Check definitions · supplied with this pair"
                     : "Check definitions · frozen before execution"
                   : "No independent evaluation supplied"}
@@ -429,7 +473,7 @@ export function RealComparisonView() {
               <div
                 className="real-check-table"
                 role="table"
-                aria-label="Independent comparison results"
+                aria-label={data.verificationKind === "command" ? "Command verification results" : "Independent comparison results"}
               >
                 <div role="row" className="real-check-row real-check-header">
                   <span role="columnheader">Condition</span>
@@ -487,39 +531,35 @@ export function RealComparisonView() {
                 ))}
               </div>
             ) : (
-              <div className="findings-unavailable">
-                <Info size={16} />
-                <p>
-                  The recordings remain inspectable, but no independent check
-                  results were supplied for this comparison.
-                </p>
-              </div>
+              <><MissingCheckResults canImport={!publicDemo && !!window.agentlens} busy={busy} onImport={() => void openPair(true)} onVerify={!publicDemo && data.desktopRecorded && /^[a-f0-9-]{36}$/.test(data.id) ? () => { window.location.hash = `/workspace/${data.id}`; } : undefined} />{data.verificationError && <p className="first-use-error" role="alert">Saved check evidence is unavailable. The original recordings remain inspectable; reopen the workspace to review the check status.</p>}</>
             )}
-          </section>
+          {importError && <p className="first-use-error" role="alert">{importError}</p>}
+          </section></>}
           <div className="real-scope">
             <Info size={15} />
             <p>
-              {data.imported
+              {data.desktopRecorded
+                ? "These two attempts were recorded in separate working copies at the same starting revision. Their results describe this task and these runs; they do not establish a general model ranking."
+                : data.imported
                 ? "This imported pair reflects identities and provenance supplied by its author. AgentLens validated its structure and local source associations, not the original recording process. It does not establish a general model ranking."
                 : "This is one controlled pair on a historical task. It shows these attempts, not a general model ranking. The inherited regression suite includes one declared correction to a test that conflicted with the requested size limit."}
             </p>
           </div>
           <div className="recorded-read-stamp">
             <span>
-              Read from preserved local evidence ·{" "}
-              {new Date(data.fetchedAt).toLocaleTimeString([], {
+              {publicDemo ? 'Selected public evidence · local paths replaced' : <>Read from preserved local evidence · {new Date(data.fetchedAt).toLocaleTimeString([], {
                 hour: "numeric",
                 minute: "2-digit",
-              })}
+              })}</>}
             </span>
-            <span>Agent claims and independent checks stay separate.</span>
+            <span>{data.verificationKind === "command" ? "Agent claims and command verification stay separate." : "Agent claims and independent checks stay separate."}</span>
           </div>
         </>
       )}
       <FindingEvidenceDialog
         finding={data?.review?.findings.find((f) => f.id === findingId) ?? null}
         onClose={() => setFindingId(null)}
-        analysisLabel="Example analysis"
+        analysisLabel="Authored case study notes"
       />
       <Modal
         open={!!selection}
@@ -528,7 +568,7 @@ export function RealComparisonView() {
         }}
         title={
           selection?.kind === "check"
-            ? "Independent check evidence"
+            ? data?.verificationKind === "command" ? "Command verification evidence" : "Independent check evidence"
             : selection?.kind === "file"
               ? "Final Git changes"
               : "Recorded attempt evidence"
@@ -547,31 +587,37 @@ export function RealComparisonView() {
               {selection.kind === "check" ? (
                 <>
                   <div className="recorded-code-label">
-                    EXTERNAL EVALUATOR · {selection.check.outcome.toUpperCase()}
+                    {data?.verificationKind === "command" ? "COMMAND VERIFICATION" : "EXTERNAL EVALUATOR"} · {selection.check.outcome.toUpperCase()}
                   </div>
                   <h2>{selection.check.title}</h2>
                   <p className="recorded-content-note">
-                    {data?.imported
+                    {data?.verificationKind === "command" ? "The same user-defined command ran in a fresh copy of each saved workspace. A pass means exit code zero; this does not independently establish that the whole task is correct. Snapshots capture the workspaces at verification time, including any later edits." : data?.imported
                       ? "This independent check result was supplied with the imported pair. It remains separate from the agent’s self-reported validation."
                       : "These results come from a separate evaluator checkout. They are not the agent’s self-reported validation."}
                   </p>
                   {selection.check.command && (
-                    <pre className="recorded-command-code">
-                      {selection.check.command}
-                    </pre>
+                    <details className="recorded-source-details">
+                      <summary>View check command</summary>
+                      <pre className="recorded-command-code">
+                        {selection.check.command}
+                      </pre>
+                    </details>
                   )}
                   <pre className="recorded-output-code">
-                    {selection.check.output}
+                    {data?.verificationKind === "command" && selection.check.output.startsWith(`Command: ${selection.check.command}\n`)
+                      ? selection.check.output.slice(`Command: ${selection.check.command}\n`.length)
+                      : selection.check.output}
                   </pre>
                   {selection.check.outputTruncated && (
                     <p className="recorded-content-note">
-                      {data?.imported
+                      {data?.verificationKind === "command" ? "Only the first 16 KiB of command output was saved. The artifact hash identifies that saved excerpt." : data?.imported
                         ? "The supplied independent check output is truncated."
                         : "Display truncated to 180,000 characters. The full output remains in the hashed local artifact."}
                     </p>
                   )}
                   <details className="recorded-source-details">
                     <summary>Check source identity</summary>
+                    {data?.verificationKind === "command" && <p>The saved artifact includes the command shown separately above and the execution output below.</p>}
                     <dl>
                       <dt>Artifact SHA-256</dt>
                       <dd>
@@ -586,6 +632,7 @@ export function RealComparisonView() {
                       <dt>Check ID</dt>
                       <dd>{selection.check.id}</dd>
                     </dl>
+                    {data?.verificationKind === "command" && <pre className="recorded-output-code">{selection.check.output}</pre>}
                   </details>
                 </>
               ) : selection.kind === "run" ? (
@@ -601,6 +648,7 @@ export function RealComparisonView() {
                     Recorded command outcomes are separate from independent
                     evaluation.
                   </p>
+                  {publicDemo && <p className="recorded-boundary">This public selection includes {selection.attempt.run?.events.length} events and {selection.attempt.run?.git.files.length} changed files. The totals above describe the full original recording. Local paths are replaced; the original archive is not included.</p>}
                   {!!selection.attempt.controlNotes.length && (
                     <div className="recorded-boundary">
                       <Info size={14} />
@@ -666,7 +714,9 @@ export function RealComparisonView() {
                       <dd>{selection.attempt.run?.status}</dd>
                       <dt>Model source</dt>
                       <dd>
-                        {data?.imported
+                        {data?.desktopRecorded
+                          ? "Requested model from the frozen AgentLens launch settings"
+                          : data?.imported
                           ? "Supplied by the imported comparison author"
                           : "Frozen launch configuration, verified against recorded invocation"}
                       </dd>
@@ -818,17 +868,18 @@ export function RealComparisonView() {
                 <dt>Starting revision</dt>
                 <dd>{data.baseCommit}</dd>
                 <dt>
-                  {data.imported ? "Manifest identity" : "Frozen manifest"}
+                  {publicDemo ? "Original frozen manifest" : data.imported ? "Manifest identity" : "Frozen manifest"}
                 </dt>
                 <dd>{data.manifestHash}</dd>
                 <dt>Prompt SHA-256</dt>
                 <dd>{data.promptHash}</dd>
                 <dt>Independent check bundle</dt>
                 <dd>{data.checkBundleHash || "Not supplied"}</dd>
-                <dt>Execution order</dt>
+                <dt>{data.desktopRecorded ? "Execution" : "Execution order"}</dt>
                 <dd>
-                  {data.attempts.map(attemptLabel).join(", then ")}
-                  {data.imported
+                  {data.attempts.map(attemptLabel).join(data.desktopRecorded ? " and " : ", then ")}
+                  {data.desktopRecorded ? " · concurrent recorded attempts" :
+                  data.imported
                     ? " · supplied order"
                     : " · one intended attempt each"}
                 </dd>
@@ -840,12 +891,12 @@ export function RealComparisonView() {
                 </dd>
               </dl>
               <p className="recorded-content-note">
-                {data.imported
+                {publicDemo ? "This browser view loads a selected public snapshot and verifies it against the bundled content manifest. Local paths were replaced and exported text has new hashes. Original identifiers refer to the preserved recording, which is not bundled here." : data.desktopRecorded ? "AgentLens recorded both attempts locally and validated their saved result structure and matching starting revisions. Viewing this comparison does not execute a model." : data.imported
                   ? "The pair author supplied the identities and provenance. AgentLens validated the bundle structure and local source associations. Viewing it does not execute a model."
                   : "Completed recorder evidence was validated by AgentLens and preserved locally. Each read verifies its saved byte hashes. Viewing this comparison does not execute a model."}
               </p>
               <p className="recorded-content-note">
-                {data.imported
+                {data.verificationKind === "command" ? "The user-defined command ran separately on fresh copies of the saved workspaces at verification time. Its exit code and bounded output are preserved. This does not guarantee independently authored assertions, exhaustive task correctness, or a model-wide ranking." : data.desktopRecorded ? "No independent evaluator was run for this pair. Agent reports and recorded command outcomes can inform analysis, but they do not establish that the requested task was completed correctly." : data.imported
                   ? "Independent check results are shown exactly as supplied and remain separate from recorded commands and agent reports. Their coverage is not exhaustive or a model-wide score."
                   : "The evaluator runs separately with restored original test assertions and one disclosed historical boundary correction. Passing these checks is bounded evidence; it is not exhaustive verification or a model-wide score."}
               </p>

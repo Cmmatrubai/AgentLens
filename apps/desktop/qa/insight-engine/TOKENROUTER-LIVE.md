@@ -38,10 +38,35 @@ The next bounded diagnostic increases max_tokens to 12,000 and allows 210 second
 
 That request returned finish_reason length after 127.058 seconds: 12,000 completion tokens, including 11,999 reasoning tokens, and zero final-content characters. No findings passed validation or were published. Testing stopped after this result; no larger-budget requests were sent.
 
-Final state: TokenRouter and z-ai/glm-5.3 remain selected in the desktop with the existing encrypted key. The app's 6,000-token allowance and 90-second timeout remain unchanged; higher allowance and low reasoning were diagnostic overrides only. Authentication and a small structured completion succeeded, but full C01 insight generation did not. A semantic quality score cannot be assigned without a completed output.
+State after the initial diagnostics: TokenRouter and z-ai/glm-5.3 remain selected in the desktop with the existing encrypted key. The app's 6,000-token allowance and 90-second timeout remain unchanged; higher allowance and low reasoning were diagnostic overrides only. Authentication and a small structured completion succeeded, but full C01 insight generation did not. A semantic quality score cannot be assigned without a completed output.
 
 The [Z.ai Chat Completions reference](https://docs.z.ai/api-reference/llm/chat-completion), fetched September 7, documents GLM-5.3 reasoning as enabled with low/high/max effort levels and max as the default. These are upstream semantics, not independently verified TokenRouter routing behavior.
 
 ## Scope
 
 Original recordings, Sol/Terra outcomes and canonical repository source were not changed. A held-out real task, attempt-order reversal, repeatability and semantic finding quality remain outside the completed checks above. No general provider speed, cost, model ranking or insight quality claim follows from this test.
+
+## Completion-controls follow-up
+
+After migration to the canonical repository, the user requested continued development. Two further explicit requests used the same previously reviewed C01 evidence and input hash; no new source excerpts or authored findings were added.
+
+1. JSON object / low reasoning / 6,000 output tokens / 90 seconds: incomplete after 65.726 seconds. Provider reported 19,580 input tokens and 6,000 output tokens, including 5,994 reasoning tokens; no answer text. Changing JSON mode alone did not establish a solution. This remains a separate diagnostic record.
+2. Production insight service, Prompted JSON / low reasoning / 24,000 output tokens / 300 seconds: job `51dcb157-6150-41ad-a625-7130075ed530` completed in **206.406 seconds** (the polling harness observed it at 206.76 seconds). Provider reported 19,580 input tokens, 21,710 output tokens, 41,290 total tokens and 19,874 reasoning tokens. The answer contained 8,369 characters and three findings. `finish_reason` was `stop`; output shape and all source associations passed the existing validator.
+
+The second request used the production settings, consent identity, credential boundary, provider adapter, validation and job persistence. The test orchestrator reviewed the existing evidence hash and initiated one request under the user's prior test authorization. The original failed requests remain unchanged in local history. Credentials and raw provider reasoning were never printed or saved in this report.
+
+These requests changed multiple controls; they do not isolate whether allowance, JSON mode or their combination enabled completion. GLM-5.3 always uses reasoning according to [Z.ai's current model documentation](https://docs.z.ai/guides/llm/glm-5.3), but this does not independently prove how TokenRouter routes or applies effort settings.
+
+One agent reviewer assessed the completed output against its cited excerpts, without consulting authored C01 findings. All 15 citation references resolved correctly. One finding was supported and two were partly supported; all three underlying differences were useful. The original generated result is retained unchanged. See [review qualifications](COMPLETION-CONTROLS.md). This is not a held-out, repeated or attempt-order-reversed quality evaluation.
+
+## Concise-findings follow-up
+
+One further production-service request used the same C01 evidence and response controls with `comparison-rubric-v3`. It completed in 182.061 seconds and saved three shorter findings. All 12 citation associations and the new text bounds passed; claim-level review still found overstatements in all three. The [full follow-up report](CONCISE-FINDINGS.md) preserves timings, usage, source references, review qualifications and original-record integrity. This is a brevity improvement on one case, not a semantic-quality or general speed claim.
+
+## Evidence-support review follow-up
+
+Two separately requested support reviews used the unchanged v3 draft and selected C01 evidence. The first completed but incorrectly approved all three known problematic findings. A revised protocol required a separate assessment for every text section; its request reached the 24,000-token output limit with zero answer characters after 248.648 seconds. It failed without promoting findings or modifying the draft. No automatic retries or further live calls followed. See [the support-review evaluation](SUPPORT-REVIEW.md) for versions, usage, failure evidence and offline acceptance.
+
+## Model-selection follow-up
+
+After the user removed the model restriction and authorized further testing, seven separate candidate requests used the same original draft and evidence. Three configurations completed with structurally valid reviews, but none passed the frozen semantic gate. Terra/medium is the most promising configuration to develop further: 44.330 seconds and an uncached list-price estimate of $0.093388, with one of three target overclaims detected and six of six control labels retained. No benchmark result was promoted into the application. The [model-selection report](MODEL-SELECTION.md) retains all failures, actual usage, price sources, plans and scoring limitations.

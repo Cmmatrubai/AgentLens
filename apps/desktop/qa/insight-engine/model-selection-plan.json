@@ -1,0 +1,9 @@
+{
+  "endpoint": "https://api.tokenrouter.com/v1",
+  "candidates": [
+    { "model": "z-ai/glm-5.3-flash", "apiFormat": "chat_completions", "reasoningEffort": "low", "maxOutputTokens": 8000, "timeoutSeconds": 120 },
+    { "model": "qwen/qwen3.5-9b", "apiFormat": "chat_completions", "reasoningEffort": "low", "maxOutputTokens": 8000, "timeoutSeconds": 120 },
+    { "model": "qwen/qwen3.8-flash", "apiFormat": "chat_completions", "reasoningEffort": "low", "maxOutputTokens": 8000, "timeoutSeconds": 120 },
+    { "model": "openai/gpt-5.6-luna", "apiFormat": "responses", "reasoningEffort": "low", "maxOutputTokens": 8000, "timeoutSeconds": 120 }
+  ]
+}

@@ -26,6 +26,20 @@ export function parseComparisonBundle(text) {
     c.attempts.length !== 2
   )
     throw Error("invalid_comparison_bundle");
+  const planned = c.checks ?? [];
+  if (
+    !Array.isArray(planned) ||
+    planned.some(
+      (check) =>
+        !check ||
+        typeof check.id !== "string" ||
+        !check.id.trim() ||
+        typeof check.title !== "string" ||
+        !check.title.trim(),
+    ) ||
+    new Set(planned.map((check) => check.id)).size !== planned.length
+  )
+    throw Error("invalid_check_plan");
   const bundle = buildInsightBundle(c);
   if (!bundle.eligible) throw Error("ineligible_comparison_bundle");
   const attempts = c.attempts.map((a) => {
@@ -37,6 +51,8 @@ export function parseComparisonBundle(text) {
       throw Error("invalid_comparison_bundle");
     const checks = a.checks.map((x) => {
       if (
+        (x.outputAvailable !== undefined &&
+          typeof x.outputAvailable !== "boolean") ||
         !["pass", "fail", "unknown"].includes(x.outcome) ||
         typeof x.title !== "string" ||
         typeof x.output !== "string"
@@ -67,21 +83,47 @@ export function parseComparisonBundle(text) {
   });
   const checks = [
     ...new Map(
-      attempts
-        .flatMap((a) => a.checks)
-        .map((c) => [c.id, { id: c.id, title: c.title }]),
+      [...attempts.flatMap((a) => a.checks), ...planned].map((c) => [
+        c.id,
+        { id: c.id, title: c.title },
+      ]),
     ).values(),
   ];
   return {
     ...c,
-    attempts,
+    attempts: attempts.map((attempt) => ({
+      ...attempt,
+      unknown:
+        attempt.unknown +
+        checks.filter(
+          (check) => !attempt.checks.some((saved) => saved.id === check.id),
+        ).length,
+    })),
     checks,
     imported: true,
     ready: attempts.every(
-      (a) => a.checks.length > 0 && Number.isFinite(a.evaluatedAt),
+      (a) =>
+        a.checks.length > 0 &&
+        Number.isFinite(a.evaluatedAt) &&
+        checks.every((check) =>
+          a.checks.some((saved) => saved.id === check.id),
+        ),
     ),
     startupFailures: [],
     fetchedAt: Date.now(),
     review: { state: "unavailable", findings: [] },
   };
+}
+
+export function parseEvaluatedComparisonBundle(text) {
+  const comparison = parseComparisonBundle(text);
+  if (
+    !comparison.checks.length ||
+    !comparison.attempts.some(
+      (attempt) =>
+        Number.isFinite(attempt.evaluatedAt) && attempt.checks.length > 0,
+    )
+  )
+    throw Error("evaluation_missing");
+  return comparison;
 }

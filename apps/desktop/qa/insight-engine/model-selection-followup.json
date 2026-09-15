@@ -1,0 +1,7 @@
+{
+  "endpoint": "https://api.tokenrouter.com/v1",
+  "candidates": [
+    { "model": "deepseek/deepseek-v4-flash", "apiFormat": "chat_completions", "outputFormat": "prompted_json", "reasoningEffort": "low", "maxOutputTokens": 8000, "timeoutSeconds": 120 },
+    { "model": "openai/gpt-5.6-terra", "apiFormat": "responses", "outputFormat": "json_schema", "reasoningEffort": "medium", "maxOutputTokens": 8000, "timeoutSeconds": 120 }
+  ]
+}

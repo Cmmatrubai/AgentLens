@@ -1,0 +1,6 @@
+{
+  "endpoint": "https://api.tokenrouter.com/v1",
+  "candidates": [
+    { "model": "openai/gpt-5.6-sol", "apiFormat": "responses", "outputFormat": "json_schema", "reasoningEffort": "medium", "maxOutputTokens": 8000, "timeoutSeconds": 120 }
+  ]
+}

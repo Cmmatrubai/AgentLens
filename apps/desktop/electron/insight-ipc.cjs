@@ -38,13 +38,19 @@ function installInsightIPC({ ipcMain, safeStorage, dialog, BrowserWindow }) {
   handle("read", ({ service }) => service.read());
   handle("configure", ({ service }, payload) => service.configure(payload));
   handle("generate", ({ service }, payload) => service.generate(payload));
+  handle("review-support", ({ service }, payload) =>
+    service.reviewSupport(payload),
+  );
   handle("forget-key", ({ service }) => service.forgetKey());
   handle("use-c01", ({ runtime }) => runtime.useOriginalComparison());
-  handle("open-pair", async ({ runtime }, _payload, event) => {
+  handle("open-pair", async ({ runtime }, payload, event) => {
     const selected = await dialog.showOpenDialog(
       BrowserWindow.fromWebContents(event.sender),
       {
-        title: "Open a saved comparison bundle",
+        title:
+          payload?.requireChecks === true
+            ? "Open an evaluated comparison"
+            : "Open a saved comparison bundle",
         properties: ["openFile"],
         filters: [{ name: "AgentLens comparison", extensions: ["json"] }],
       },
@@ -59,7 +65,15 @@ function installInsightIPC({ ipcMain, safeStorage, dialog, BrowserWindow }) {
       const stat = await file.stat();
       if (!stat.isFile() || stat.size > 16 * 1024 * 1024)
         return { ok: false, error: "invalid_comparison_bundle" };
-      return await runtime.selectComparison(await file.readFile("utf8"));
+      try {
+        return await runtime.selectComparison(await file.readFile("utf8"), {
+          requireChecks: payload?.requireChecks === true,
+        });
+      } catch (error) {
+        if (error?.message === "evaluation_missing")
+          return { ok: false, error: "evaluation_missing" };
+        throw error;
+      }
     } finally {
       await file.close();
     }

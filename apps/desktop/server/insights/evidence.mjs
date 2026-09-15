@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import {
+  buildRecordedFacts,
+  RECORDED_FACTS_VERSION,
+} from "./recorded-facts.mjs";
 import { INSIGHT_VERSION } from "./schema.mjs";
 
 export { INSIGHT_VERSION, validateInsightOutput } from "./schema.mjs";
@@ -6,10 +10,12 @@ export { INSIGHT_VERSION, validateInsightOutput } from "./schema.mjs";
 const DEFAULT_MAX_CHARACTERS = 60000;
 const DEFAULT_MAX_SOURCES = 24;
 const MAX_SOURCE_CHARACTERS = 6000;
-const SELECTION_VERSION = "balanced-evidence-v3";
+const SELECTION_VERSION = "balanced-evidence-v4";
 const sha256 = (value) =>
   createHash("sha256").update(String(value)).digest("hex");
 const text = (value) => (typeof value === "string" ? value : "");
+const outputAvailability = (value) =>
+  typeof value === "boolean" ? value : null;
 const finite = (value) =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
 
@@ -39,6 +45,7 @@ function normalizedHashInput(comparison) {
                   title: text(check?.title),
                   outcome: text(check?.outcome),
                   output: text(check?.output),
+                  outputAvailable: outputAvailability(check?.outputAvailable),
                   artifactSha256:
                     typeof check?.artifactSha256 === "string"
                       ? check.artifactSha256
@@ -244,7 +251,13 @@ function checkFacts(attempt) {
     .map((check) => ({
       id: text(check?.id),
       title: text(check?.title),
+      hasIdentifiedOutput: !!(
+        outputAvailability(check?.outputAvailable) !== false &&
+        text(check?.output).trim() &&
+        text(check?.artifactSha256).trim()
+      ),
       outcome:
+        outputAvailability(check?.outputAvailable) !== false &&
         ["pass", "fail", "unknown"].includes(check?.outcome) &&
         text(check?.output).trim() &&
         text(check?.artifactSha256).trim()
@@ -282,12 +295,14 @@ function candidatesForAttempt(attempt, limits) {
     if (existing) {
       existing.label += `; ${text(check.title) || text(check.id)}`;
       existing.identity += `;${text(check.id)}`;
+      existing.checkIds.push(text(check.id));
       continue;
     }
     const candidate = {
       priority: 0,
       order: text(check?.id),
       kind: "check",
+      checkIds: [text(check.id)],
       label: text(check?.title) || text(check?.id) || "Independent check",
       path: null,
       identity: `check:${text(check?.id)}:${text(check?.artifactSha256) || "unavailable"}`,
@@ -453,6 +468,7 @@ function sourceFromCandidate(attempt, candidate, maximum, limits) {
   return {
     id,
     kind: candidate.kind,
+    ...(candidate.checkIds ? { checkIds: candidate.checkIds } : {}),
     label: candidate.label,
     path: candidate.path,
     identity: candidate.identity,
@@ -580,13 +596,14 @@ export function buildInsightBundle(comparison, options = {}) {
       `${candidates.length - sources.length} evidence source(s) were omitted by the insight source or character limit.`,
     );
 
-  return {
+  const bundle = {
     schemaVersion: 1,
     comparisonId: text(comparison?.id),
     inputHash: sha256(
       stableJson({
         input: normalizedHashInput(comparison),
         selectionVersion: SELECTION_VERSION,
+        recordedFactsVersion: RECORDED_FACTS_VERSION,
         maxCharacters,
         maxSources,
       }),
@@ -595,6 +612,12 @@ export function buildInsightBundle(comparison, options = {}) {
     eligible: !reason,
     reason,
     task: {
+      expectedChecks: (Array.isArray(comparison?.checks)
+        ? comparison.checks
+        : []
+      )
+        .map((check) => ({ id: text(check.id), title: text(check.title) }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
       title: text(comparison?.title),
       prompt: text(comparison?.taskPrompt),
       baseCommit: text(comparison?.baseCommit),
@@ -627,4 +650,5 @@ export function buildInsightBundle(comparison, options = {}) {
       limits: [...new Set(limits)],
     },
   };
+  return { ...bundle, recordedFacts: buildRecordedFacts(bundle) };
 }

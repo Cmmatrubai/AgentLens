@@ -12,6 +12,16 @@ const LIMITS = {
   sourceId: 200,
   abstentionReason: 1200,
 };
+const CONCISE_LIMITS = {
+  ...LIMITS,
+  title: 80,
+  category: 40,
+  summary: 280,
+  interpretation: 600,
+  limitations: 400,
+  observation: 500,
+  abstentionReason: 400,
+};
 
 const boundedString = (maximum, minimum = 1) => ({
   type: "string",
@@ -19,63 +29,68 @@ const boundedString = (maximum, minimum = 1) => ({
   maxLength: maximum,
 });
 
-const sideSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["attemptKey", "observation", "sourceIds"],
-  properties: {
-    attemptKey: boundedString(LIMITS.attemptKey),
-    observation: boundedString(LIMITS.observation),
-    sourceIds: {
-      type: "array",
-      minItems: 1,
-      maxItems: 12,
-      items: boundedString(LIMITS.sourceId),
+function createOutputSchema(limits) {
+  const sideSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["attemptKey", "observation", "sourceIds"],
+    properties: {
+      attemptKey: boundedString(limits.attemptKey),
+      observation: boundedString(limits.observation),
+      sourceIds: {
+        type: "array",
+        minItems: 1,
+        maxItems: 12,
+        items: boundedString(limits.sourceId),
+      },
     },
-  },
-};
+  };
 
-const findingSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: [
-    "id",
-    "category",
-    "title",
-    "summary",
-    "interpretation",
-    "limitations",
-    "sides",
-  ],
-  properties: {
-    id: boundedString(LIMITS.id),
-    category: boundedString(LIMITS.category),
-    title: boundedString(LIMITS.title),
-    summary: boundedString(LIMITS.summary),
-    interpretation: boundedString(LIMITS.interpretation),
-    limitations: boundedString(LIMITS.limitations),
-    sides: {
-      type: "array",
-      minItems: 2,
-      maxItems: 2,
-      items: sideSchema,
+  const findingSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "id",
+      "category",
+      "title",
+      "summary",
+      "interpretation",
+      "limitations",
+      "sides",
+    ],
+    properties: {
+      id: boundedString(limits.id),
+      category: boundedString(limits.category),
+      title: boundedString(limits.title),
+      summary: boundedString(limits.summary),
+      interpretation: boundedString(limits.interpretation),
+      limitations: boundedString(limits.limitations),
+      sides: {
+        type: "array",
+        minItems: 2,
+        maxItems: 2,
+        items: sideSchema,
+      },
     },
-  },
-};
+  };
 
-export const insightOutputSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["findings", "abstentionReason"],
-  properties: {
-    findings: {
-      type: "array",
-      maxItems: 3,
-      items: findingSchema,
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["findings", "abstentionReason"],
+    properties: {
+      findings: {
+        type: "array",
+        maxItems: 3,
+        items: findingSchema,
+      },
+      abstentionReason: boundedString(limits.abstentionReason, 0),
     },
-    abstentionReason: boundedString(LIMITS.abstentionReason, 0),
-  },
-};
+  };
+}
+
+export const insightOutputSchema = createOutputSchema(LIMITS);
+export const conciseInsightOutputSchema = createOutputSchema(CONCISE_LIMITS);
 
 const plainObject = (value) =>
   !!value &&
@@ -126,7 +141,10 @@ function validateBundle(bundle) {
     throw new Error("The insight bundle has invalid source identities");
 }
 
-export function validateInsightOutput(bundle, output) {
+export function validateInsightOutput(bundle, output, { profile = "legacy" } = {}) {
+  if (profile !== "legacy" && profile !== "concise")
+    throw new Error("Unknown insight validation profile");
+  const limits = profile === "concise" ? CONCISE_LIMITS : LIMITS;
   validateBundle(bundle);
   exactKeys(output, ["findings", "abstentionReason"], "Insight output");
   if (!Array.isArray(output.findings))
@@ -136,7 +154,7 @@ export function validateInsightOutput(bundle, output) {
   const abstentionReason = boundedText(
     output.abstentionReason,
     "abstentionReason",
-    LIMITS.abstentionReason,
+    limits.abstentionReason,
     true,
   );
   if (output.findings.length === 0 && !abstentionReason.trim())
@@ -164,19 +182,19 @@ export function validateInsightOutput(bundle, output) {
       `Finding ${findingIndex + 1}`,
     );
     const common = {
-      id: boundedText(finding.id, "finding id", LIMITS.id),
-      category: boundedText(finding.category, "category", LIMITS.category),
-      title: boundedText(finding.title, "title", LIMITS.title),
-      summary: boundedText(finding.summary, "summary", LIMITS.summary),
+      id: boundedText(finding.id, "finding id", limits.id),
+      category: boundedText(finding.category, "category", limits.category),
+      title: boundedText(finding.title, "title", limits.title),
+      summary: boundedText(finding.summary, "summary", limits.summary),
       interpretation: boundedText(
         finding.interpretation,
         "interpretation",
-        LIMITS.interpretation,
+        limits.interpretation,
       ),
       limitations: boundedText(
         finding.limitations,
         "limitations",
-        LIMITS.limitations,
+        limits.limitations,
       ),
     };
     if (!Array.isArray(finding.sides) || finding.sides.length !== 2)
@@ -199,12 +217,12 @@ export function validateInsightOutput(bundle, output) {
         const attemptKey = boundedText(
           side.attemptKey,
           "attemptKey",
-          LIMITS.attemptKey,
+          limits.attemptKey,
         );
         const observation = boundedText(
           side.observation,
           "observation",
-          LIMITS.observation,
+          limits.observation,
         );
         if (
           !Array.isArray(side.sourceIds) ||
@@ -215,7 +233,7 @@ export function validateInsightOutput(bundle, output) {
         if (new Set(side.sourceIds).size !== side.sourceIds.length)
           throw new Error("Duplicate source IDs are not allowed within a side");
         const resolved = side.sourceIds.map((sourceId) => {
-          boundedText(sourceId, "source ID", LIMITS.sourceId);
+          boundedText(sourceId, "source ID", limits.sourceId);
           const source = sources.get(sourceId);
           if (!source)
             throw new Error(`Finding references foreign source ${sourceId}`);

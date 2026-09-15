@@ -72,7 +72,7 @@ export interface RecordRunDependencies {
   readonly onFinalGitPersisted?: () => void | Promise<void>;
   readonly onRecoveryAppended?: () => void | Promise<void>;
   readonly onObservedEventPersisted?: (
-    observation: Readonly<{ runId: string; eventId: string }>
+    observation: Readonly<{ runId: string; eventId: string; event: TraceEventV1 }>
   ) => void | Promise<void>;
   readonly derivePersistedTerminalCommand?: typeof derivePersistedTerminalCommand;
   readonly ensureTestDerivationsForRun?: typeof ensureTestDerivationsForRun;
@@ -721,7 +721,7 @@ export async function recordRun(
             receivedAt: () => receivedAtIso
           });
           if (persisted.provenance === "observed") {
-            await dependencies.onObservedEventPersisted?.({ runId, eventId: persisted.id });
+            await dependencies.onObservedEventPersisted?.({ runId, eventId: persisted.id, event: persisted });
           }
           if (isEligibleTerminalObservedCommand(persisted) && !hasEagerDerivationFailure) {
             try {

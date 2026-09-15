@@ -1,45 +1,46 @@
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { readFile } from "node:fs/promises";
-import { readComparison } from "../comparison-reader.mjs";
-import { privateRead, privateWrite, privateRemove } from "./private-files.mjs";
-import { parseComparisonBundle } from "./import-pair.mjs";
+import { privateRead, privateWrite } from "./private-files.mjs";
+import {
+  parseComparisonBundle,
+  parseEvaluatedComparisonBundle,
+} from "./import-pair.mjs";
 import { createInsightService } from "./service.mjs";
 import { DEFAULT_BASE_URL } from "./endpoint.mjs";
+import { parseSelectedComparison } from "../live/selection.mjs";
 export const prototypeRoot = fileURLToPath(new URL("../../", import.meta.url));
 export const insightRoot = join(prototypeRoot, ".local/insight-engine");
-export async function readActiveComparison() {
+export async function readSelectedComparison(root) {
   try {
-    const imported = await privateRead(insightRoot, "selected-pair.json");
-    if (imported)
-      return {
-        ok: true,
-        comparison: parseComparisonBundle(JSON.stringify(imported)),
-      };
-    const result = await readComparison();
-    if (!result.ok) return result;
-    return {
-      ok: true,
-      comparison: {
-        ...result.comparison,
-        taskPrompt: await readFile(
-          join(prototypeRoot, "experiments/C01/prompt.md"),
-          "utf8",
-        ),
-      },
-    };
+    const selected = await privateRead(root, "selected-pair.json");
+    if (!selected) return { ok: false, error: "comparison_not_selected" };
+    return { ok: true, comparison: parseSelectedComparison(selected) };
   } catch {
     return { ok: false, error: "comparison_unavailable" };
   }
 }
-export async function selectComparison(text) {
-  const comparison = parseComparisonBundle(text);
-  await privateWrite(insightRoot, "selected-pair.json", comparison);
+export async function readActiveComparison() {
+  return readSelectedComparison(insightRoot);
+}
+export async function selectComparison(
+  text,
+  { requireChecks = false, root = insightRoot } = {},
+) {
+  const comparison = requireChecks
+    ? parseEvaluatedComparisonBundle(text)
+    : parseComparisonBundle(text);
+  await privateWrite(root, "selected-pair.json", comparison);
+  return { ok: true };
+}
+export async function selectRecordedComparison(comparison) {
+  const selected = { source: "desktop-recording", comparison };
+  parseSelectedComparison(selected);
+  await privateWrite(insightRoot, "selected-pair.json", selected);
   return { ok: true };
 }
 export async function useOriginalComparison() {
-  await privateRemove(insightRoot, "selected-pair.json");
-  return { ok: true };
+  // Older renderers must not clear personal evidence to reveal a fallback case.
+  return { ok: false, error: "example_separate" };
 }
 export function createRuntime(credentialStore) {
   return createInsightService({

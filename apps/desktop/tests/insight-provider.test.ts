@@ -106,3 +106,69 @@ test("large source metadata is bounded before any network request", async () => 
   );
   assert.equal(calls, 0);
 });
+
+test("every provider mode requests short findings without changing selected evidence", async () => {
+  for (const apiFormat of ["responses", "chat_completions"]) {
+    for (const outputFormat of [
+      "json_schema",
+      "json_object",
+      "prompted_json",
+    ]) {
+      let sentBody;
+      await analyzeOpenAI({
+        bundle,
+        model: "user-model",
+        apiFormat,
+        outputFormat,
+        fetchImpl: async (_url, opts) => {
+          sentBody = JSON.parse(opts.body);
+          const isChat = apiFormat === "chat_completions";
+          const answer =
+            '{"findings":[],"abstentionReason":"No supported differences."}';
+          return new Response(
+            JSON.stringify(
+              isChat
+                ? {
+                    choices: [
+                      { finish_reason: "stop", message: { content: answer } },
+                    ],
+                  }
+                : {
+                    status: "completed",
+                    output: [
+                      {
+                        type: "message",
+                        content: [{ type: "output_text", text: answer }],
+                      },
+                    ],
+                  },
+            ),
+          );
+        },
+      });
+      const isChat = apiFormat === "chat_completions";
+      const instructions = isChat
+        ? sentBody.messages[0].content
+        : sentBody.instructions;
+      const suppliedSchema =
+        outputFormat === "json_schema"
+          ? isChat
+            ? sentBody.response_format.json_schema.schema
+            : sentBody.text.format.schema
+          : JSON.parse(
+              instructions.slice(instructions.indexOf('{"type":"object"')),
+            );
+      assert.equal(
+        suppliedSchema.properties.findings.items.properties.summary.maxLength,
+        280,
+      );
+      const evidence = JSON.parse(
+        isChat ? sentBody.messages[1].content : sentBody.input[0].content,
+      );
+      assert.deepEqual(evidence.sources, [
+        { id: "ev-1", excerpt: "safe selected excerpt" },
+      ]);
+      assert.equal(evidence.inputHash, bundle.inputHash);
+    }
+  }
+});

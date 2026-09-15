@@ -20,7 +20,7 @@ export function ComparisonFindings({
 }: {
   review: RealComparison["review"];
   onSelect: (id: string) => void;
-  variant?: "generated" | "example";
+  variant?: "generated" | "example" | "authored";
 }) {
   const headingId = useId();
   if (!review || review.state !== "available")
@@ -39,12 +39,12 @@ export function ComparisonFindings({
         <div>
           <h2 id={headingId}>Where the attempts differ</h2>
           <p>
-            {review.findings.length} evidence-grounded{" "}
-            {review.findings.length === 1 ? "finding" : "findings"}.
+            {review.findings.length}{" "}
+            {review.findings.length === 1 ? "finding" : "findings"} with linked evidence.
           </p>
         </div>
         <span>
-          {variant === "example"
+          {variant === "authored" ? "Authored case study · Evidence linked" : variant === "example"
             ? "Example analysis · Authored for C01"
             : "Generated analysis · This saved revision"}
         </span>

@@ -209,8 +209,7 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
     void processGroupTermination.catch(() => undefined);
     return processGroupTermination;
   };
-  const forceTerminate = (): void => {
-    explicitlyInterrupted = true;
+  const forceCleanup = (): void => {
     if (terminationTimer !== undefined) {
       clearTimeout(terminationTimer);
       terminationTimer = undefined;
@@ -224,6 +223,10 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
       if (signalOwnedProcessGroup("SIGKILL")) groupEscalationSignal = "SIGKILL";
     }
     void startProcessGroupMonitor();
+  };
+  const forceTerminate = (): void => {
+    explicitlyInterrupted = true;
+    forceCleanup();
   };
   const abort = (): void => {
     explicitlyInterrupted = true;
@@ -245,6 +248,16 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
   if (input.signal?.aborted) abort();
   if (input.forceTerminationSignal?.aborted) forceTerminate();
 
+  const cleanupAfterLeaderExit = (): void => {
+    // `close` can wait on inherited stdout/stderr held by a background child.
+    // Begin cleanup at leader exit, then let close and the consumers drain.
+    if (usesProcessGroup && processGroupTermination === undefined && inspectOwnedProcessGroup() !== "gone") {
+      if (signalOwnedProcessGroup("SIGTERM")) initialGroupSignal = "SIGTERM";
+      void startProcessGroupMonitor();
+      terminationTimer = setTimeout(forceCleanup, terminationGraceMs);
+    }
+  };
+  child.once("exit", cleanupAfterLeaderExit);
   const close = new Promise<Readonly<{ code: number | null; signal: NodeJS.Signals | null }>>(
     (resolve) => child.once("close", (code, signal) => resolve({ code, signal }))
   );
@@ -270,12 +283,20 @@ export async function runChildProcess(input: ProcessRunnerInput): Promise<ChildP
       sourceConsumer(child.stdout, "stdout", input.onLine, input.onDiagnostic, input.now ?? Date.now),
       sourceConsumer(child.stderr, "stderr", input.onLine, input.onDiagnostic, input.now ?? Date.now)
     ]);
-    if (input.promptInput.mode === "buffered") {
-      if (!child.stdin) throw new Error("Buffered Codex stdin pipe was not created.");
-      await writeBufferedInput(child.stdin, input.promptInput.bytes);
-    }
-
-    const result = await close;
+    const execution = (async () => {
+      if (input.promptInput.mode === "buffered") {
+        if (!child.stdin) throw new Error("Buffered Codex stdin pipe was not created.");
+        await writeBufferedInput(child.stdin, input.promptInput.bytes);
+      }
+      return close;
+    })();
+    // Storage/consumer failure must enter cleanup while the child is still alive.
+    // Handling streams only after close can leave a detached process orphaned.
+    const result = await Promise.race([execution, streams.then(() => execution)]);
+    // A successful leader can leave background work behind. Final Git evidence
+    // must wait until the owned group is gone, without relabeling provider success
+    // as a user interruption merely because background cleanup was needed.
+    cleanupAfterLeaderExit();
     const groupTermination = processGroupTermination === undefined
       ? null
       : await processGroupTermination;

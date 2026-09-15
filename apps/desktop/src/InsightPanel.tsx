@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RecordedFacts } from "./RecordedFacts";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   ArrowRight,
@@ -13,7 +14,6 @@ import {
   Sparkles,
 } from "lucide-react";
 import {
-  ComparisonFindings,
   FindingEvidenceDialog,
 } from "./ComparisonFindings";
 import type { ComparisonFinding, RealComparison } from "./comparison-types";
@@ -22,13 +22,21 @@ import type {
   InsightResponse,
   InsightState,
   InsightSettings,
+  InsightDiagnostics,
+  InsightReviewSupportInput,
 } from "./insight-types";
 import { Button, Modal } from "./ui";
+import { describeInsightFailure, describeAnalysisAction } from "./insight-presentation";
+import { SupportReview } from "./SupportReview";
+import { isCurrentSupportConsent } from "./insight-support-presentation";
 import "./insights.css";
 
 const POLL_MS = 1600;
 
 const errorText: Record<string, string> = {
+  support_validation_failed: "The support review could not be tied safely to the saved draft and evidence. The original draft is preserved.",
+  support_changed: "The draft or review settings changed. Review the current draft and destination before starting again.",
+  support_not_available: "Generate a current draft before requesting an evidence-support review.",
   analysis_not_configured:
     "Save a model ID, API key, and remote-analysis consent first.",
   analysis_start_failed: "The analysis job could not be started.",
@@ -54,7 +62,7 @@ const errorText: Record<string, string> = {
   settings_changed:
     "The analysis destination or settings changed. Review the current destination before generating.",
   provider_unsupported_request:
-    "The endpoint rejected this request format or model. Check the base URL and model, or choose a different compatibility format in Settings.",
+    "The endpoint rejected this request format or model. Check the model, compatibility format and supported reasoning effort in Settings.",
   invalid_comparison_bundle:
     "The selected file is not a supported comparison bundle.",
   ineligible_comparison_bundle:
@@ -65,7 +73,7 @@ const errorText: Record<string, string> = {
     "The selected evidence and metadata exceed the request size limit. No provider call was made.",
   invalid_request:
     "The generation request was rejected before a provider call.",
-  invalid_settings: "Enter a valid provider model ID.",
+  invalid_settings: "Check the model ID, response limits and compatibility settings.",
   provider_authentication: "The provider rejected the saved API key.",
   provider_error: "The provider could not complete this analysis.",
   provider_incomplete: "The provider returned an incomplete analysis.",
@@ -99,6 +107,27 @@ const formatElapsed = (milliseconds: number | null) =>
     ? "Elapsed unavailable"
     : `${Math.floor(milliseconds / 60000)}m ${Math.floor((milliseconds % 60000) / 1000)}s elapsed`;
 
+function ProviderDiagnostics({ diagnostics }: { diagnostics?: InsightDiagnostics | null }) {
+  if (!diagnostics) return null;
+  const counters = [
+    ["Input tokens", diagnostics.inputTokens],
+    ["Output tokens", diagnostics.outputTokens],
+    ["Reasoning tokens", diagnostics.reasoningTokens],
+    ["Answer characters", diagnostics.answerCharacters],
+  ] as const;
+  const visible = counters.filter(([, count]) => Number.isSafeInteger(count) && (count ?? -1) >= 0);
+  if (!visible.length) return null;
+  return (
+    <details className="insight-diagnostics">
+      <summary>Provider response details</summary>
+      <p>Token counts are reported by the provider. Answer characters count the returned answer text.</p>
+      <dl>{visible.map(([label, count]) => (
+        <div key={label}><dt>{label}</dt><dd>{count!.toLocaleString()}</dd></div>
+      ))}</dl>
+    </details>
+  );
+}
+
 function AnalysisMetadata({ insight }: { insight: InsightReadSuccess }) {
   const analysis = insight.analysis;
   if (!analysis) return null;
@@ -123,6 +152,8 @@ function AnalysisMetadata({ insight }: { insight: InsightReadSuccess }) {
           {analysis.apiFormat || "Responses"} ·{" "}
           {analysis.outputFormat || "JSON schema"}
         </dd>
+        <dt>Response limits</dt>
+        <dd>{(analysis.maxOutputTokens ?? 6000).toLocaleString()} tokens · {analysis.timeoutSeconds ?? 90}s · reasoning {analysis.reasoningEffort ?? "default"}</dd>
         <dt>Created</dt>
         <dd>{formatDate(analysis.createdAt)}</dd>
         <dt>Evidence digest</dt>
@@ -154,6 +185,12 @@ function RevisionHistory({ insight }: { insight: InsightReadSuccess }) {
             <time dateTime={new Date(revision.createdAt).toISOString()}>
               {formatDate(revision.createdAt)}
             </time>
+            {revision.state === "failed" && (
+              <div className="insight-history-detail">
+                <p>{describeInsightFailure(revision.error, revision.diagnostics)?.description ?? explainError(revision.error)}</p>
+                <ProviderDiagnostics diagnostics={revision.diagnostics} />
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -161,29 +198,32 @@ function RevisionHistory({ insight }: { insight: InsightReadSuccess }) {
   );
 }
 
-function CoverageLimits({ insight }: { insight: InsightReadSuccess }) {
+function CoverageLimits({ insight, expanded = false }: { insight: InsightReadSuccess; expanded?: boolean }) {
   if (
     !insight.input.coverage.limits.length &&
     !insight.input.coverage.omittedSources
   )
     return null;
   return (
-    <div className="insight-limits">
-      <Info size={14} />
-      <div>
-        <strong>Evidence limits</strong>
+    <details className="insight-coverage-details" open={expanded}>
+      <summary>
+        <span><Info size={14} aria-hidden="true" /> Evidence limits</span>
+        <span className="insight-coverage-summary">
+          {insight.input.coverage.omittedSources > 0
+            ? `${insight.input.coverage.omittedSources} of ${insight.input.coverage.totalSources} sources omitted`
+            : "Coverage notes"}
+          <span className="insight-coverage-toggle" aria-hidden="true" />
+        </span>
+      </summary>
+      <div className="insight-coverage-content">
         {insight.input.coverage.omittedSources > 0 && (
-          <p>
-            {insight.input.coverage.omittedSources} of{" "}
-            {insight.input.coverage.totalSources} candidate sources were omitted
-            by the source or character limit.
-          </p>
+          <p>The analysis uses selected excerpts. Some sources were left out because of size limits.</p>
         )}
         {insight.input.coverage.limits.map((limit) => (
           <p key={limit}>{limit}</p>
         ))}
       </div>
-    </div>
+    </details>
   );
 }
 
@@ -214,6 +254,9 @@ export function InsightPanel({
     useState<InsightSettings["outputFormat"]>("json_schema");
   const [authMode, setAuthMode] =
     useState<InsightSettings["authMode"]>("bearer");
+  const [reasoningEffort, setReasoningEffort] = useState<InsightSettings["reasoningEffort"]>("default");
+  const [maxOutputTokens, setMaxOutputTokens] = useState(6000);
+  const [timeoutSeconds, setTimeoutSeconds] = useState(90);
   const [apiKey, setApiKey] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [selectedFinding, setSelectedFinding] =
@@ -262,7 +305,7 @@ export function InsightPanel({
             }).then((result) => result.json());
         if (generation !== requestGeneration.current) return;
         const current = accept(response);
-        if (current.state === "running")
+        if (current.state === "running" || current.support?.state === "running")
           poll.current = setTimeout(() => void read(), POLL_MS);
       } catch (error) {
         if (generation !== requestGeneration.current) return;
@@ -306,6 +349,9 @@ export function InsightPanel({
     setApiFormat(insight?.settings.apiFormat ?? "responses");
     setOutputFormat(insight?.settings.outputFormat ?? "json_schema");
     setAuthMode(insight?.settings.authMode ?? "bearer");
+    setReasoningEffort(insight?.settings.reasoningEffort ?? "default");
+    setMaxOutputTokens(insight?.settings.maxOutputTokens ?? 6000);
+    setTimeoutSeconds(insight?.settings.timeoutSeconds ?? 90);
     setModelId(insight?.settings.model ?? "");
     setEnabled(insight?.settings.enabled ?? false);
     setApiKey("");
@@ -336,6 +382,9 @@ export function InsightPanel({
         apiFormat,
         outputFormat,
         authMode,
+        reasoningEffort,
+        maxOutputTokens,
+        timeoutSeconds,
         model: modelId.trim(),
         enabled,
         ...(apiKey && authMode === "bearer" ? { apiKey } : {}),
@@ -344,7 +393,7 @@ export function InsightPanel({
       const current = accept(response);
       requestGeneration.current += 1;
       clearTimeout(poll.current);
-      if (current.state === "running")
+      if (current.state === "running" || current.support?.state === "running")
         poll.current = setTimeout(() => void read(), POLL_MS);
       setApiKey("");
       setModelId(current.settings.model);
@@ -372,7 +421,7 @@ export function InsightPanel({
       const response = accept(result);
       requestGeneration.current += 1;
       clearTimeout(poll.current);
-      if (response.state === "running")
+      if (response.state === "running" || response.support?.state === "running")
         poll.current = setTimeout(() => void read(), POLL_MS);
       setApiKey("");
       setEnabled(response.settings.enabled);
@@ -386,14 +435,15 @@ export function InsightPanel({
     }
   };
 
-  const beginGeneration = (regenerate = false) => {
-    if (actionBusy) return;
+  const beginGeneration = (regenerate = false, previewRetry = false) => {
+    if (analysisAction.kind === "none" || (previewRetry && !analysisAction.canPreviewRetry)) return;
     setActionError(null);
     if (!insight || insight.settings.desktopRequired || !window.agentlens) {
       setActionError("Generation is available in the AgentLens desktop app.");
       return;
     }
     if (
+      (analysisAction.kind === "settings" && !previewRetry) ||
       !insight.settings.enabled ||
       (insight.settings.authMode !== "none" && !insight.settings.hasKey) ||
       !insight.settings.model
@@ -437,7 +487,7 @@ export function InsightPanel({
       clearTimeout(poll.current);
       setConsentOpen(false);
       setConsented(false);
-      if (current.state === "running")
+      if (current.state === "running" || current.support?.state === "running")
         poll.current = setTimeout(() => void read(), POLL_MS);
     } catch (error) {
       if (context !== comparisonEpoch.current) return;
@@ -456,14 +506,15 @@ export function InsightPanel({
   };
 
   const switchComparison = async (action: "open" | "original") => {
+    if (action === "original") {
+      window.location.hash = "/example";
+      return;
+    }
     if (!window.agentlens) return;
     setActionBusy(true);
     setActionError(null);
     try {
-      const response =
-        action === "open"
-          ? await window.agentlens.openInsightPair()
-          : await window.agentlens.useOriginalComparison();
+      const response = await window.agentlens.openInsightPair();
       if (!response.ok) throw new Error(response.error);
       if (response.cancelled) return;
       requestGeneration.current += 1;
@@ -483,42 +534,69 @@ export function InsightPanel({
     }
   };
 
-  const generatedReview = useMemo<RealComparison["review"] | null>(
-    () =>
-      insight?.analysis
-        ? {
-            state: "available",
-            id: insight.analysis.id,
-            method: "Generated analysis",
-            findings: insight.analysis.findings,
-          }
-        : null,
-    [insight?.analysis],
-  );
+  const reviewSupport = async (request: InsightReviewSupportInput) => {
+    if (!window.agentlens || !insight?.analysis || actionBusy) return;
+    const currentIdentity = insight.support?.reviewKey ? {
+      analysisId: insight.analysis.id,
+      inputHash: insight.input.hash,
+      settingsHash: insight.settingsHash,
+      reviewKey: insight.support.reviewKey,
+    } : null;
+    if (!isCurrentSupportConsent(request, currentIdentity)) {
+      setActionError(explainError("support_changed"));
+      return;
+    }
+    const context = comparisonEpoch.current;
+    setActionBusy(true);
+    setActionError(null);
+    requestGeneration.current += 1;
+    clearTimeout(poll.current);
+    try {
+      const response = await window.agentlens.reviewInsightSupport(request);
+      if (context !== comparisonEpoch.current) return;
+      const current = accept(response);
+      requestGeneration.current += 1;
+      if (current.state === "running" || current.support?.state === "running")
+        poll.current = setTimeout(() => void read(), POLL_MS);
+    } catch (error) {
+      if (context !== comparisonEpoch.current) return;
+      setActionError(explainError(error instanceof Error ? error.message : null));
+      await read();
+    } finally {
+      if (context === comparisonEpoch.current) setActionBusy(false);
+    }
+  };
 
   const state: InsightState | "unavailable" = insight?.state ?? "unavailable";
   const desktopGeneration =
     !!window.agentlens && !insight?.settings.desktopRequired;
-  const canGenerate =
-    !!insight?.input.eligible &&
-    state !== "running" &&
-    desktopGeneration &&
-    !actionBusy;
+  const analysisAction = describeAnalysisAction({
+    state,
+    desktop: desktopGeneration,
+    eligible: !!insight?.input.eligible,
+    busy: actionBusy,
+    supportRunning: insight?.support?.state === "running",
+    settings: insight?.settings ?? { enabled: false, hasKey: false, authMode: "bearer", model: "" },
+    error: insight?.error,
+  });
+  const canGenerate = !!insight && analysisAction.kind !== "none";
 
   return (
     <section className="insight-panel" aria-labelledby="insight-heading">
       <div className="insight-panel-heading">
         <div>
           <span className="insight-kicker">
-            <Sparkles size={13} /> EVIDENCE-BOUND AI ANALYSIS
+            <Sparkles size={13} /> AI ANALYSIS
           </span>
-          <h2 id="insight-heading">Generated insights</h2>
+          <h2 id="insight-heading">Understand the differences</h2>
           <p>
-            Interpretation stays separate from recorded facts and independent
-            checks.
+            AI explanations link back to recorded evidence. They remain interpretations,
+            separate from your test results.
           </p>
         </div>
-        <div className="insight-heading-actions">
+        <details className="insight-workspace-options">
+          <summary>Analysis options</summary>
+          <div className="insight-heading-actions">
           {window.agentlens && (
             <Button
               small
@@ -526,7 +604,7 @@ export function InsightPanel({
               onClick={() => void switchComparison("open")}
               disabled={actionBusy}
             >
-              <FileInput size={13} /> Open pair
+              <FileInput size={13} /> Open saved comparison
             </Button>
           )}
           {window.agentlens && comparison.imported && (
@@ -536,21 +614,23 @@ export function InsightPanel({
               onClick={() => void switchComparison("original")}
               disabled={actionBusy}
             >
-              Use C01
+              Restore original comparison
             </Button>
           )}
           <Button small variant="ghost" onClick={openSettings}>
-            <Settings2 size={13} /> Settings
+            <Settings2 size={13} /> Provider settings
           </Button>
-        </div>
+          </div>
+        </details>
       </div>
+
 
       {loading && !insight ? (
         <div className="insight-state" role="status">
           <LoaderCircle className="spin" size={20} />
           <div>
             <h3>Reading saved analysis</h3>
-            <p>No provider request is made by this read.</p>
+            <p>Your recorded results remain available while the saved analysis loads.</p>
           </div>
         </div>
       ) : readError || !insight ? (
@@ -570,12 +650,12 @@ export function InsightPanel({
           <div>
             <h3>Analysis is running</h3>
             <p>
-              {insight.settings.model} is reviewing the selected bounded
-              excerpts. Recorded facts remain available below.
+              {insight.settings.model} is reviewing the selected evidence.
+              You can keep exploring the recorded work.
             </p>
           </div>
         </div>
-      ) : state === "available" && generatedReview ? (
+      ) : state === "available" && insight.analysis ? (
         <>
           <div className="insight-ready-line">
             <span>
@@ -586,20 +666,20 @@ export function InsightPanel({
               small
               variant="ghost"
               onClick={() => beginGeneration(true)}
-              disabled={!desktopGeneration}
+              disabled={!canGenerate}
             >
-              Regenerate
+              {analysisAction.label}
             </Button>
           </div>
-          <ComparisonFindings
-            review={generatedReview}
-            onSelect={(id) =>
-              setSelectedFinding(
-                insight.analysis?.findings.find(
-                  (finding) => finding.id === id,
-                ) ?? null,
-              )
-            }
+          <SupportReview
+            key={`${comparisonKey}:${insight.analysis.id}`}
+            insight={insight}
+            comparison={comparison}
+            canReview={desktopGeneration}
+            actionBusy={actionBusy}
+            onReview={reviewSupport}
+            onSettings={openSettings}
+            onSelect={setSelectedFinding}
           />
           <AnalysisMetadata insight={insight} />
           <CoverageLimits insight={insight} />
@@ -619,9 +699,9 @@ export function InsightPanel({
               small
               variant="ghost"
               onClick={() => beginGeneration(true)}
-              disabled={!desktopGeneration}
+              disabled={!canGenerate}
             >
-              Regenerate
+              {analysisAction.label}
             </Button>
           </div>
           <AnalysisMetadata insight={insight} />
@@ -642,10 +722,10 @@ export function InsightPanel({
         <div className="insight-state warning">
           <RefreshCw size={20} />
           <div>
-            <h3>The saved analysis is stale</h3>
+            <h3>This analysis needs updating</h3>
             <p>
-              The evidence or analysis model changed. The prior revision remains
-              in history; review the current sources before generating again.
+              The evidence or analysis settings have changed. The previous revision stays
+              in history. Review the current evidence before starting again.
             </p>
           </div>
           <Button
@@ -653,7 +733,7 @@ export function InsightPanel({
             onClick={() => beginGeneration(true)}
             disabled={!canGenerate}
           >
-            Generate current
+            {analysisAction.label}
           </Button>
         </div>
       ) : state === "failed" || state === "interrupted" ? (
@@ -663,30 +743,35 @@ export function InsightPanel({
             <h3>
               {state === "interrupted"
                 ? "Analysis was interrupted"
-                : "Analysis did not complete"}
+                : describeInsightFailure(insight.error, insight.diagnostics)?.title ?? "Analysis did not complete"}
             </h3>
             <p>
               {state === "interrupted"
-                ? "The saved job is no longer running. Starting again is a new explicit provider request."
-                : explainError(insight.error)}
+                ? "The previous analysis stopped. Your recorded results are still available. Review the evidence before starting a new request."
+                : describeInsightFailure(insight.error, insight.diagnostics)?.description ?? explainError(insight.error)}
             </p>
+            <ProviderDiagnostics diagnostics={insight.diagnostics} />
           </div>
+          <div className="insight-failure-actions">
+            {analysisAction.canPreviewRetry && <Button small variant="ghost" onClick={() => beginGeneration(true, true)}>Preview retry</Button>}
+            {analysisAction.kind === "preview" && <Button small variant="ghost" onClick={openSettings}>Adjust provider settings</Button>}
           <Button
             small
             onClick={() => beginGeneration(true)}
             disabled={!canGenerate}
           >
-            Retry
+            {analysisAction.label}
           </Button>
+          </div>
         </div>
       ) : (
         <div className="insight-state quiet">
           <Sparkles size={20} />
           <div>
-            <h3>This pair has not been analyzed</h3>
+            <h3>Ready to explore how the agents differ?</h3>
             <p>
               {desktopGeneration
-                ? "Review the evidence and destination before starting analysis."
+                ? "AI explanations use your configured OpenAI-compatible endpoint and API key, unless the endpoint requires no key. Review the evidence before sending it. Local evidence remains available without AI."
                 : "Open this comparison in AgentLens desktop to review evidence and generate insights."}
             </p>
           </div>
@@ -696,10 +781,14 @@ export function InsightPanel({
             onClick={() => beginGeneration(false)}
             disabled={!canGenerate}
           >
-            {desktopGeneration ? "Preview & generate" : "Desktop required"}
+            {analysisAction.label}
           </Button>
         </div>
       )}
+
+      {insight && state !== "running" && <p className="insight-next-step" role="status">{analysisAction.reason}</p>}
+
+      {insight && <RecordedFacts ledger={insight.input.recordedFacts} inputHash={insight.input.hash} sources={insight.input.sources} attempts={comparison.attempts}/>}
 
       {actionError && (
         <p className="insight-action-error" role="alert">
@@ -719,8 +808,8 @@ export function InsightPanel({
         onOpenChange={(open) =>
           open ? setSettingsOpen(true) : closeSettings()
         }
-        title="Insight settings"
-        description="API keys are encrypted locally with OS-backed protection."
+        title="AI analysis provider"
+        description="Choose where to send evidence for analysis. Saving settings makes no provider request."
         className="insight-settings-modal"
       >
         {insight?.settings.desktopRequired || !window.agentlens ? (
@@ -853,6 +942,30 @@ export function InsightPanel({
                   result and evidence link in all modes.
                 </p>
               </details>
+              <details className="insight-compatibility">
+                <summary>Response limits</summary>
+                <label>
+                  <span>Reasoning effort</span>
+                  <select value={reasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as InsightSettings["reasoningEffort"])}>
+                    <option value="default">Provider default</option>
+                    <option value="none">Off (if supported)</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                    <option value="max">Max</option>
+                  </select>
+                </label>
+                <label>
+                  <span>Output token limit</span>
+                  <input type="number" min={1000} max={32000} step={1} value={maxOutputTokens || ""} onChange={(event) => setMaxOutputTokens(Number(event.target.value))} />
+                </label>
+                <label>
+                  <span>Time limit (seconds)</span>
+                  <input type="number" min={30} max={300} step={1} value={timeoutSeconds || ""} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} />
+                </label>
+                <p>Allow 1,000–32,000 output tokens and 30–300 seconds. Reasoning may use part of the output allowance. Higher limits can increase waiting time and cost.</p>
+                <p>Provider default sends no reasoning override. Off explicitly requests no reasoning and requires model support. Failed requests are never retried automatically or switched to another effort.</p>
+              </details>
               <label className="insight-enable-row">
                 <input
                   type="checkbox"
@@ -863,7 +976,7 @@ export function InsightPanel({
                   <strong>Enable analysis at this endpoint</strong>
                   <small>
                     The task, recorded facts, and selected excerpts are sent
-                    only when you press Generate.
+                    only when you explicitly generate insights or start a support review.
                   </small>
                 </span>
               </label>
@@ -919,6 +1032,9 @@ export function InsightPanel({
         {insight && (
           <>
             <div className="insight-consent-body">
+              <p className="insight-request-limits">
+                This request: up to {(insight.settings.maxOutputTokens ?? 6000).toLocaleString()} output tokens · {insight.settings.timeoutSeconds ?? 90} seconds · reasoning {insight.settings.reasoningEffort ?? "default"}. Provider usage may still be charged if analysis fails.
+              </p>
               <section className="insight-task-preview">
                 <span>TASK PROVIDED TO THE ANALYZER</span>
                 <h3>{comparison.title}</h3>
@@ -1014,7 +1130,7 @@ export function InsightPanel({
                   </p>
                 )}
               </div>
-              <CoverageLimits insight={insight} />
+              <CoverageLimits insight={insight} expanded />
               <label className="insight-consent-check">
                 <input
                   type="checkbox"

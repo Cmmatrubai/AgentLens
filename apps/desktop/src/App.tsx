@@ -15,6 +15,9 @@ import {
 import * as Tooltip from "@radix-ui/react-tooltip";
 import {
   Activity,
+  House,
+  BookOpen,
+  FileInput,
   ArrowLeft,
   ArrowRight,
   Bookmark,
@@ -46,6 +49,9 @@ const RealComparisonView = lazy(() =>
     default: m.RealComparisonView,
   })),
 );
+import { Welcome, OwnComparison } from "./FirstUse";
+const LiveWorkspace = lazy(() => import("./LiveWorkspace").then(m => ({ default: m.LiveWorkspace })));
+const ExampleComparison = lazy(() => import("./ExampleComparison").then(m => ({ default: m.ExampleComparison })));
 import { RunSetup } from "./RunSetup";
 import { RunLive } from "./RunLive";
 import {
@@ -74,6 +80,10 @@ import { Button, IconButton, Logo, Modal, spring } from "./ui";
 
 type Route = {
   page:
+    | "welcome"
+    | "example"
+    | "import"
+    | "workspace"
     | "home"
     | "saved"
     | "activity"
@@ -121,6 +131,9 @@ function readCases(): SavedCase[] {
 function readRoute(): Route {
   const path = location.hash.replace(/^#\/?/, "");
   if (
+    path === "welcome" ||
+    path === "example" ||
+    path === "import" ||
     path === "comparison" ||
     path === "recorded" ||
     path === "saved" ||
@@ -131,11 +144,13 @@ function readRoute(): Route {
   )
     return { page: path };
   const taskId = path.split("/")[1];
+  if (path === "workspace" || (path.startsWith("workspace/") && /^[a-f0-9-]{36}$/.test(taskId))) return { page: "workspace", taskId };
   if (path.startsWith("task/") && tasks.some((t) => t.id === taskId))
     return { page: "detail", taskId };
-  return { page: "home" };
+  return { page: path === "tasks" ? "home" : "welcome" };
 }
 function routePath(route: Route) {
+  if (route.page === "workspace") return "workspace" + (route.taskId ? "/" + route.taskId : "");
   return route.page === "detail"
     ? "task/" + route.taskId
     : route.page === "home"
@@ -182,6 +197,7 @@ export default function App() {
     route.page === "result" && run?.status === "complete"
       ? comparisonFromRun(run, runTask)
       : (tasks.find((t) => t.id === route.taskId) ?? tasks[0]);
+  const guided = ["welcome", "example", "import", "workspace", "comparison", "recorded"].includes(route.page);
   const desktop = new URLSearchParams(location.search).has("desktop");
   const navigate = useCallback((next: Route) => {
     location.hash = "/" + routePath(next);
@@ -241,8 +257,13 @@ export default function App() {
   }, []);
   useEffect(() => {
     contentRef.current?.scrollTo({ top: 0 });
+    contentRef.current?.focus({ preventScroll: true });
     document.title =
-      (route.page === "comparison"
+      (route.page === "welcome" ? "Welcome"
+        : route.page === "example" ? "Explore an example"
+        : route.page === "import" ? "Your comparison"
+        : route.page === "workspace" ? "Live workspace"
+        : route.page === "comparison"
         ? "Controlled comparison"
         : route.page === "recorded"
           ? "Recorded run"
@@ -284,7 +305,7 @@ export default function App() {
   }, [toast]);
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if (!guided && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         if (
           !evidence &&
@@ -300,8 +321,13 @@ export default function App() {
     };
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [evidence, setup, seed, preferences, about, savedDetail, command]);
-  const navItems = [
+  }, [evidence, setup, seed, preferences, about, savedDetail, command, guided]);
+  const navItems = guided ? [
+    { id: "welcome" as const, label: "Start here", icon: House, count: undefined },
+    { id: "example" as const, label: "Explore an example", icon: BookOpen, count: undefined },
+    { id: "import" as const, label: "Your comparison", icon: FileInput, count: undefined },
+  ] : [
+    { id: "welcome" as const, label: "Start here", icon: House },
     { id: "comparison" as const, label: "Comparison", icon: GitCompareArrows },
     { id: "recorded" as const, label: "Recorded run", icon: Database },
     { id: "home" as const, label: "Tasks", icon: GitCompareArrows, count: 3 },
@@ -313,7 +339,7 @@ export default function App() {
     },
     { id: "activity" as const, label: "Activity", icon: Activity },
   ];
-  const activePage = ["detail", "setup", "run", "result"].includes(route.page)
+  const activePage = route.page === "comparison" || route.page === "recorded" || route.page === "workspace" ? "import" : ["detail", "setup", "run", "result"].includes(route.page)
     ? "home"
     : route.page;
   return (
@@ -345,17 +371,17 @@ export default function App() {
             </div>
             <div className="titlebar-right">
               <span className="local-indicator" />
-              Local preview
+              {desktop ? "On your device" : "Browser preview"}
             </div>
           </header>
           <div className="workspace-body">
             <motion.aside className="sidebar" layout>
               <button
                 className="workspace-picker"
-                onClick={() => setAbout(true)}
-                aria-label="About this workspace"
+                onClick={() => navigate({ page: "welcome" })}
+                aria-label="AgentLens start"
               >
-                <span className="workspace-avatar">C</span>
+                <span className="workspace-avatar"><Logo small /></span>
                 <span className="workspace-name">
                   <strong>My workspace</strong>
                   <span>Personal</span>
@@ -393,7 +419,7 @@ export default function App() {
                   </button>
                 ))}
               </nav>
-              {run && !["recorded", "comparison"].includes(route.page) && (
+              {run && !guided && (
                 <button
                   className={
                     "sidebar-run " + (run.status === "running" ? "active" : "")
@@ -417,7 +443,7 @@ export default function App() {
                   <ChevronRight size={12} />
                 </button>
               )}
-              {!["recorded", "comparison"].includes(route.page) && (
+              {!guided && (
                 <div className="sidebar-repositories">
                   <div className="sidebar-section-label">
                     REPOSITORIES <span>3</span>
@@ -460,12 +486,11 @@ export default function App() {
                 </button>
                 <button
                   className="nav-item"
-                  onClick={() => setAbout(true)}
-                  aria-label="About this prototype"
+                  onClick={() => guided ? navigate({ page: "welcome" }) : setAbout(true)}
+                  aria-label={guided ? "Getting started" : "About this prototype"}
                 >
                   <HelpCircle size={17} />
-                  <span>About this prototype</span>
-                  <span className="tiny-outline">05</span>
+                  <span>{guided ? "Getting started" : "About this prototype"}</span>
                 </button>
               </div>
             </motion.aside>
@@ -497,11 +522,14 @@ export default function App() {
                         ? "New comparison"
                         : route.page === "run"
                           ? "Live comparison"
+                          : route.page === "comparison" ? "Your comparison"
+                          : route.page === "recorded" ? "Recorded work"
+                          : route.page === "workspace" ? "Live workspace"
                           : navItems.find((n) => n.id === route.page)?.label}
                     </span>
                   )}
                 </div>
-                <div className="location-right">
+                {!guided && <div className="location-right">
                   <button
                     className="prototype-label"
                     onClick={() => setAbout(true)}
@@ -518,12 +546,13 @@ export default function App() {
                     <span>Search</span>
                     <kbd>⌘ K</kbd>
                   </button>
-                </div>
+                </div>}
               </div>
               <main
                 className="workspace-content"
                 ref={contentRef}
                 id="main-content"
+                tabIndex={-1}
               >
                 <AnimatePresence mode="wait">
                   <motion.div
@@ -534,6 +563,10 @@ export default function App() {
                     exit={{ opacity: 0, y: -3 }}
                     transition={{ duration: 0.18 }}
                   >
+                    {route.page === "welcome" && <Welcome onExample={() => navigate({ page: "example" })} onOwn={() => navigate({ page: "import" })} />}
+                    {route.page === "import" && <OwnComparison onExample={() => navigate({ page: "example" })} onOpen={() => navigate({ page: "comparison" })} onLive={id => navigate({ page: "workspace", taskId: id })} />}
+                    {route.page === "workspace" && <Suspense fallback={<p role="status">Opening live workspace…</p>}><LiveWorkspace id={route.taskId} onBack={() => navigate({ page: "import" })} onComparison={() => navigate({ page: "comparison" })} /></Suspense>}
+                    {route.page === "example" && <Suspense fallback={<p role="status">Opening the example…</p>}><ExampleComparison onOwn={() => navigate({ page: "import" })} /></Suspense>}
                     {route.page === "comparison" && (
                       <Suspense
                         fallback={
@@ -671,22 +704,22 @@ export default function App() {
             </section>
           </div>
           <footer className="statusbar">
-            <button onClick={() => setAbout(true)}>
+            <button onClick={() => guided ? navigate({ page: "welcome" }) : setAbout(true)}>
               <span className="status-light" />
               {["recorded", "comparison"].includes(route.page)
                 ? "Recorded evidence"
-                : "Demo workspace"}
+                : guided ? "AgentLens" : "Demo workspace"}
               <span className="status-divider">·</span>
               {["recorded", "comparison"].includes(route.page)
                 ? "Read-only connection"
-                : "Sample data"}
+                : route.page === "example" ? "Recorded example" : guided ? "Local workspace" : "Sample data"}
             </button>
             <span className="statusbar-center">
               A clearer view of agent work
             </span>
-            <button onClick={() => setCommand(true)}>
+            {!guided && <button onClick={() => setCommand(true)}>
               <Command size={11} />K<span>Quick navigation</span>
-            </button>
+            </button>}
           </footer>
         </div>
         <EvidenceDrawer

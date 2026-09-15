@@ -65,3 +65,31 @@ test("duplicate event identities are rejected before analysis", () => {
   assert.equal(buildInsightBundle(p).eligible, false);
   assert.throws(() => parseComparisonBundle(JSON.stringify(p)));
 });
+
+test("import keeps unrun planned checks visible instead of discarding the plan", () => {
+  const pair = makePair();
+  pair.checks.push({id:"unrun", title:"Unrun boundary"});
+  const imported = parseComparisonBundle(JSON.stringify(pair));
+  assert.equal(imported.checks.find(c => c.id === "unrun")?.title, "Unrun boundary");
+  assert.equal(imported.ready, false);
+  assert.deepEqual(imported.attempts.map(a => a.unknown), [1, 1]);
+  const facts = buildInsightBundle(imported).recordedFacts.facts.filter(f => f.kind === "independent_check" && f.checkId === "unrun");
+  assert.deepEqual(facts.map(f => f.outcome), ["unknown", "unknown"]);
+  assert.deepEqual(parseComparisonBundle(JSON.stringify(imported)).checks, imported.checks);
+});
+
+test("invalid or duplicated planned check identities are rejected on import", () => {
+  for (const checks of [{}, [{id:"",title:"blank"}], [{id:"planned",title:42}], [{id:"planned",title:"one"},{id:"planned",title:"two"}]]) {
+    const pair = makePair();
+    pair.checks = checks;
+    assert.throws(() => parseComparisonBundle(JSON.stringify(pair)));
+  }
+});
+
+test("import rejects malformed output availability metadata", () => {
+  for (const value of [null, "false", 0, {}]) {
+    const pair=makePair();
+    pair.attempts[0].checks[0].outputAvailable=value;
+    assert.throws(()=>parseComparisonBundle(JSON.stringify(pair)));
+  }
+});

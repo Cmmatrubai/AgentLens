@@ -1,10 +1,16 @@
 # AgentLens · Quiet Lab
 
+## Browser demo release candidate
+
+A standalone recorded C01 case is available as a static build. From this directory, run `pnpm build:demo` and serve `dist-demo/` with a static server. It opens the case, selected evidence and project explanation without installation or an API key. This build uses authored notes and public-safe selected evidence; it does not call the live insight engine.
+
+See the [content inventory](docs/public-demo-content.md) and [release checklist](docs/public-demo-release-checklist.md). The public URL is not published yet. The desktop workflow below remains available separately.
+
 The iterated desktop app now lives in the AgentLens workspace at **apps/desktop**. Use `pnpm desktop` from the repository root. See [migration and private-data notes](docs/repository-migration.md).
 
 **Prototype 05 — reusable analysis over recorded comparisons.**
 
-GPT-5.6 Sol/high and Terra/high completed the same historical coding task in separate clean repositories. Both passed all seven independent conditions, including the 265-test regression suite. A new desktop insight engine accepts this pair or another supported saved comparison, sends reviewed excerpts to the user's configured OpenAI-compatible endpoint and model, and validates the returned evidence references. Live AI quality evaluation is still pending. The existing setup workflow remains available with fictional sample data.
+GPT-5.6 Sol/high and Terra/high completed the same historical coding task in separate clean repositories. Both passed all seven independent conditions, including the 265-test regression suite. A desktop insight engine accepts this pair or another supported saved comparison, sends reviewed excerpts to the user's configured OpenAI-compatible endpoint and model, and validates the returned evidence references. Live evaluation has exposed overclaims and incomplete reviews; broader quality validation remains unfinished. See the [latest catalog review evaluation](qa/insight-engine/CATALOG-REVIEW-EVALUATION.md). The existing setup workflow remains available with fictional sample data.
 
 ![Real controlled comparison](qa/real-run/comparison-C01/findings/overview-1440.png)
 
@@ -31,9 +37,11 @@ Open **Comparison** in the sidebar or visit `/#/comparison`. The completed pair 
 
 Start with **Generated insights**. In Electron, open **Settings**, enter your provider's API base URL, model ID, and key (or select that the endpoint needs no key), and enable analysis. **API compatibility** selects Chat Completions or Responses and the server's JSON output support. See the [endpoint setup guide](docs/insight-compatible-endpoints.md). Saving settings makes no provider call. **Preview & generate** shows the destination, task, facts, declared controls, selected excerpts and coverage limits. Confirm the excerpts and choose **Generate insights** to make one explicit request. The comparison model names and the analysis model are separate choices.
 
-Each generated finding opens paired evidence with observations, interpretation and limitations. The engine accepts zero findings, preserves analysis revisions, rejects invalid source references and withholds stale results. These checks validate source association; they cannot establish whether every AI interpretation is correct. **Open pair** accepts the [normalized saved-comparison format](docs/insight-comparison-bundles.md). Browser preview can read saved results; configuration, import and generation require Electron.
+Saved findings start in **Unreviewed draft**, with paired evidence, observations, interpretation and limitations still accessible. **Review evidence support** offers a separate provider request after reviewing the draft, excerpts, destination and limits. The reviewer divides each section into claims and selects IDs from a fixed passage catalog; AgentLens resolves the exact source text locally. Only findings whose claims all receive supported verdicts appear as main cards. **Inspect claim checks** exposes individual assessments and quoted passages on demand, with source text, source details, task requirements and saved attempt facts labeled separately. Flagged originals remain under **Needs review**. Failed, invalid or stale reviews preserve the draft without promoting it. This is an AI assessment, not a correctness guarantee: the [latest trial passed citation validation but still missed semantic errors](qa/insight-engine/CATALOG-REVIEW-EVALUATION.md).
 
-The three existing C01 findings remain under **Example analysis**, separate from generated results. They are not included in the analysis prompt. Independent check outcomes remain separate from both kinds of analysis.
+The engine accepts zero findings, preserves analysis revisions, rejects invalid source references and withholds stale results. **Open pair** accepts the [normalized saved-comparison format](docs/insight-comparison-bundles.md). Browser preview can read saved drafts and reviews; configuration, import, generation and support-review requests require Electron.
+
+The three existing C01 findings remain under **Case study notes**, separate from generated results. They are not included in the analysis prompt. Independent check outcomes remain separate from both kinds of analysis.
 
 Evidence is preserved privately under `.local/comparison-C01/`; viewing the completed comparison does not run a model. See [the experiment report](experiments/C01/REPORT.md).
 
@@ -84,3 +92,11 @@ The source is now integrated as the `@agentlens/desktop` workspace package. The 
 ## Design references and validation
 
 See [the insight-engine verification report](qa/insight-engine/REPORT.md), [the findings verification report](qa/real-run/comparison-C01/findings/REPORT.md), [the comparison verification report](qa/real-run/comparison-C01/REPORT.md), [DESIGN.md](DESIGN.md) for references and design decisions, [the real-run verification report](qa/real-run/REPORT.md) for this iteration, [qa/ITERATION-02.md](qa/ITERATION-02.md) for the sample workflow, and [qa/REPORT.md](qa/REPORT.md) for the original iteration. The [comparison data contract](docs/comparison-data-contract.md) distinguishes this completed local pair from the remaining general execution backend.
+
+
+Insight reviewer development now includes a [repeatable semantic evaluation suite](qa/insight-engine/SEMANTIC-EVALUATION.md). It distinguishes missed overclaims from incorrectly flagged supported claims, preserves the exact inputs and reviewer protocol, and provides an offline check before any paid run. The first six synthetic cases passed the target detection/control checks; complex real-case validation remains unfinished.
+
+
+### Live recorded comparisons
+
+**Your comparison** now launches two Codex attempts from one committed Git revision in isolated working copies, with durable live activity and independent stopping. Completed pairs open in the existing comparison and insight workflow. See [live workspace acceptance and handoff](docs/live-workspace-acceptance.md) for setup, verification, fixture-only testing, and current limits.

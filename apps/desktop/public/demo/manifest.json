@@ -1,0 +1,228 @@
+{
+  "schemaVersion": 1,
+  "exportVersion": "public-demo-v1",
+  "caseId": "C01-20260906-sol-terra-high",
+  "originalManifestHash": "8f7aa61872a532d98fb593375fe40703f4070a211e4d542acb19d2386015d6aa",
+  "comparisonFile": "comparison.json",
+  "originalPromptHash": "e5d463ede4908c1a5147cf46edd04666c37fef44aba15edf4869d81a12253fd1",
+  "comparisonSha256": "1b1674f5c3a5460cdad31b6f372e55547891228e9eb8f9631382e421152be80b",
+  "comparisonBytes": 218848,
+  "narrative": "Authored case notes; not generated or verified by the live insight engine.",
+  "omissions": [
+    "Only sources linked by the three authored case notes and all independent check outputs are selected.",
+    "Uncited events and files, startup failures, local configuration, credentials, provider drafts and review history are excluded.",
+    "Run event totals describe the original recordings; this packet includes only the declared selection.",
+    "Local workspace and temporary paths are replaced. Text hashes identify the exported bytes, not the original artifact.",
+    "Original identifiers and artifact hashes are provenance references; the original archives are not included."
+  ],
+  "sources": [
+    {
+      "attemptKey": "sol",
+      "sourceId": "sol-stream-handling",
+      "originalIdentity": "650d9b2a38ae44e0aef0223fdb45b62f875f7bdfc9e2fce50e6436addd18d7b2",
+      "originalSha256": "831b5dd3e5ab45323ed98d3572b925989c94f8a2f54d7798a7483ff68e009b80",
+      "exportedSha256": "831b5dd3e5ab45323ed98d3572b925989c94f8a2f54d7798a7483ff68e009b80",
+      "transformed": false
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "terra-stream-handling",
+      "originalIdentity": "a6c57f3060c1b5c1239590ed130ada33184e15caf753667b33514a4a0a398b4a",
+      "originalSha256": "e708ac196d760a777017e24a6615a845f49e2f546e9b5da88e771456bdfe5284",
+      "exportedSha256": "e708ac196d760a777017e24a6615a845f49e2f546e9b5da88e771456bdfe5284",
+      "transformed": false
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "sol-framing-test",
+      "originalIdentity": "650d9b2a38ae44e0aef0223fdb45b62f875f7bdfc9e2fce50e6436addd18d7b2",
+      "originalSha256": "8fea673cd0fe0837cb5c2fad7c3945c8970e442b6e5307a487630a18b9ab5f99",
+      "exportedSha256": "8fea673cd0fe0837cb5c2fad7c3945c8970e442b6e5307a487630a18b9ab5f99",
+      "transformed": false
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "sol-event-67",
+      "originalIdentity": "d631fc82-169a-4cbc-884d-85d6a732dcb0",
+      "originalSha256": "cc0c4a47a71b3cddb2ad360d3067f547ceeadc2177efb581db3a8568b5371627",
+      "exportedSha256": "dd04b072e05b297a25144610bcacadda10cbb729d099ab5fdf9e12853e112458",
+      "transformed": true
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "terra-framing-test",
+      "originalIdentity": "a6c57f3060c1b5c1239590ed130ada33184e15caf753667b33514a4a0a398b4a",
+      "originalSha256": "0cb8537c9d086f1bd1c281f0a4d01fdf8e4311d953c3f4ef59a8b99e15f670f1",
+      "exportedSha256": "0cb8537c9d086f1bd1c281f0a4d01fdf8e4311d953c3f4ef59a8b99e15f670f1",
+      "transformed": false
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "terra-event-62",
+      "originalIdentity": "67f4dee8-07f9-40ba-a720-8d3118143e06",
+      "originalSha256": "b8d6e192d85a6be8ad2422a4dc112f94605a7b11f88da977a4acf842eaddf754",
+      "exportedSha256": "d9576d9aa187959c3d2874697046eb344435920a56508fe41abf83271ef78f39",
+      "transformed": true
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "sol-event-52",
+      "originalIdentity": "e3a52dc5-2eb7-4013-badb-f7aab3bf2b0f",
+      "originalSha256": "e3ea896d5e0d59f7ed8dfb8d4c7063693feaf67454e5f23efc4300b93d1b5fa6",
+      "exportedSha256": "5668eea881dc56ee74577281ec6d2d6e5909a28ba367d0ad2747c66af943ce34",
+      "transformed": true
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "sol-test-dependency",
+      "originalIdentity": "650d9b2a38ae44e0aef0223fdb45b62f875f7bdfc9e2fce50e6436addd18d7b2",
+      "originalSha256": "2841b4b9430cbba1eb42aab10fd609b3d6f1bc2ca528b5e9e5c3cf0726948294",
+      "exportedSha256": "2841b4b9430cbba1eb42aab10fd609b3d6f1bc2ca528b5e9e5c3cf0726948294",
+      "transformed": false
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "sol-event-36",
+      "originalIdentity": "725e2961-662c-4b4f-a08d-bab4fa50fce9",
+      "originalSha256": "1d3ba46ce97f7f26361d82bd8e55c046d48caba9409a1339a45927ab4bd2abec",
+      "exportedSha256": "ac4e247bdccde53dcffc6071c5d59db4271f3b133c171b51dc51b9dd0a5d2fb5",
+      "transformed": true
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "terra-event-67",
+      "originalIdentity": "d5301420-382a-40fb-99da-fa5c9ba370ec",
+      "originalSha256": "a49b9764475ee52dfbba77a834e60587586406791867c60d190dc00f941c2e99",
+      "exportedSha256": "8888bc237d7c7f07df029f63a225356ed3aa3e10a338a325110036d8b8d3f13a",
+      "transformed": false
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "terra-event-62",
+      "originalIdentity": "67f4dee8-07f9-40ba-a720-8d3118143e06",
+      "originalSha256": "b8d6e192d85a6be8ad2422a4dc112f94605a7b11f88da977a4acf842eaddf754",
+      "exportedSha256": "d9576d9aa187959c3d2874697046eb344435920a56508fe41abf83271ef78f39",
+      "transformed": true
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "terra-event-35",
+      "originalIdentity": "3c16cf78-eef3-418e-a2ca-1f0950090038",
+      "originalSha256": "1ff2e776d3c85bcea6a93c5732b1405afe7759fb245efdf5c5e4f6c99806dc41",
+      "exportedSha256": "8f2ae98a535728bf5c2f41d8aca18471108436c910f91c76861dbbd50462ff06",
+      "transformed": true
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "check:stdout-64mib",
+      "originalIdentity": "stdout-64mib",
+      "originalSha256": "c961b91bc05cff501da16ccc6aaa42a12b317632ab64323d9cde7498b83087ba",
+      "exportedSha256": "b64695a94f2a4933430e33175f0b30b106cc90a91734af70f4d4f73463068848",
+      "transformed": true
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "check:stderr-64mib",
+      "originalIdentity": "stderr-64mib",
+      "originalSha256": "c961b91bc05cff501da16ccc6aaa42a12b317632ab64323d9cde7498b83087ba",
+      "exportedSha256": "b64695a94f2a4933430e33175f0b30b106cc90a91734af70f4d4f73463068848",
+      "transformed": true
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "check:byte-limit-crlf",
+      "originalIdentity": "byte-limit-crlf",
+      "originalSha256": "c961b91bc05cff501da16ccc6aaa42a12b317632ab64323d9cde7498b83087ba",
+      "exportedSha256": "b64695a94f2a4933430e33175f0b30b106cc90a91734af70f4d4f73463068848",
+      "transformed": true
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "check:utf8-tail",
+      "originalIdentity": "utf8-tail",
+      "originalSha256": "c961b91bc05cff501da16ccc6aaa42a12b317632ab64323d9cde7498b83087ba",
+      "exportedSha256": "b64695a94f2a4933430e33175f0b30b106cc90a91734af70f4d4f73463068848",
+      "transformed": true
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "check:backpressure",
+      "originalIdentity": "backpressure",
+      "originalSha256": "c961b91bc05cff501da16ccc6aaa42a12b317632ab64323d9cde7498b83087ba",
+      "exportedSha256": "b64695a94f2a4933430e33175f0b30b106cc90a91734af70f4d4f73463068848",
+      "transformed": true
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "check:inherited-suite-with-declared-supplement",
+      "originalIdentity": "inherited-suite-with-declared-supplement",
+      "originalSha256": "25c5b6775445384757752afe184b8e47f2bd048b09b0c114bb572a039a087925",
+      "exportedSha256": "49b1b120bf255091876043b19272fdac74d21e3f0b6bca30913258d9ff40bf10",
+      "transformed": true
+    },
+    {
+      "attemptKey": "sol",
+      "sourceId": "check:typecheck",
+      "originalIdentity": "typecheck",
+      "originalSha256": "0a4914d65b6aedd699a82a4f398eda6ca9e8c2a2646380b7f2c27f86cb2da458",
+      "exportedSha256": "0a4914d65b6aedd699a82a4f398eda6ca9e8c2a2646380b7f2c27f86cb2da458",
+      "transformed": false
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "check:stdout-64mib",
+      "originalIdentity": "stdout-64mib",
+      "originalSha256": "682c87384132b164cdb6ba3cfecaa0597891920e9912336dce613f250801beea",
+      "exportedSha256": "379ad4dab155bc1967cf28e2750523dac19ecfc76fbe070310252291da492e74",
+      "transformed": true
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "check:stderr-64mib",
+      "originalIdentity": "stderr-64mib",
+      "originalSha256": "682c87384132b164cdb6ba3cfecaa0597891920e9912336dce613f250801beea",
+      "exportedSha256": "379ad4dab155bc1967cf28e2750523dac19ecfc76fbe070310252291da492e74",
+      "transformed": true
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "check:byte-limit-crlf",
+      "originalIdentity": "byte-limit-crlf",
+      "originalSha256": "682c87384132b164cdb6ba3cfecaa0597891920e9912336dce613f250801beea",
+      "exportedSha256": "379ad4dab155bc1967cf28e2750523dac19ecfc76fbe070310252291da492e74",
+      "transformed": true
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "check:utf8-tail",
+      "originalIdentity": "utf8-tail",
+      "originalSha256": "682c87384132b164cdb6ba3cfecaa0597891920e9912336dce613f250801beea",
+      "exportedSha256": "379ad4dab155bc1967cf28e2750523dac19ecfc76fbe070310252291da492e74",
+      "transformed": true
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "check:backpressure",
+      "originalIdentity": "backpressure",
+      "originalSha256": "682c87384132b164cdb6ba3cfecaa0597891920e9912336dce613f250801beea",
+      "exportedSha256": "379ad4dab155bc1967cf28e2750523dac19ecfc76fbe070310252291da492e74",
+      "transformed": true
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "check:inherited-suite-with-declared-supplement",
+      "originalIdentity": "inherited-suite-with-declared-supplement",
+      "originalSha256": "519215a2dbb4f2a899b014d405fc286b4041dd6976681d0bf6d4930b3af3839b",
+      "exportedSha256": "34cef78a157f608a4ec07fed42ff53a5a80dbbbf4a41d8834c4508b973531b0a",
+      "transformed": true
+    },
+    {
+      "attemptKey": "terra",
+      "sourceId": "check:typecheck",
+      "originalIdentity": "typecheck",
+      "originalSha256": "0a4914d65b6aedd699a82a4f398eda6ca9e8c2a2646380b7f2c27f86cb2da458",
+      "exportedSha256": "0a4914d65b6aedd699a82a4f398eda6ca9e8c2a2646380b7f2c27f86cb2da458",
+      "transformed": false
+    }
+  ]
+}

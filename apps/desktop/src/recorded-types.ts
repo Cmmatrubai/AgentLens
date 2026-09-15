@@ -1,6 +1,7 @@
 import type {
   InsightConfigureInput,
   InsightGenerateInput,
+  InsightReviewSupportInput,
   InsightResponse,
 } from "./insight-types";
 
@@ -70,7 +71,7 @@ export type RecordedResponse =
   { ok: true; run: RecordedRun } | { ok: false; error: string };
 declare global {
   interface Window {
-    agentlens?: {
+    agentlens?: import("./live-types").LiveAPI & {
       readRecordedRun: () => Promise<RecordedResponse>;
       readComparison: () => Promise<
         import("./comparison-types").ComparisonResponse
@@ -82,8 +83,11 @@ declare global {
       generateInsights: (
         input: InsightGenerateInput,
       ) => Promise<InsightResponse>;
+      reviewInsightSupport: (
+        input: InsightReviewSupportInput,
+      ) => Promise<InsightResponse>;
       forgetInsightKey: () => Promise<InsightResponse>;
-      openInsightPair: () => Promise<
+      openInsightPair: (input?: { requireChecks?: boolean }) => Promise<
         { ok: true; cancelled?: boolean } | { ok: false; error: string }
       >;
       useOriginalComparison: () => Promise<

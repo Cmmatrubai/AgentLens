@@ -4,6 +4,9 @@ import { INSIGHT_VERSION } from "./schema.mjs";
 import { analyzeOpenAI, PROMPT_VERSION } from "./provider.mjs";
 import { privateRead, privateWrite, privateList } from "./private-files.mjs";
 import { providerSettings } from "./endpoint.mjs";
+import { sanitizeDiagnostics } from "./diagnostics.mjs";
+import { createSupportService } from "./support-service.mjs";
+import { buildSupportEvidence } from "./support-schema.mjs";
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const defaults = {
   provider: "openai-compatible",
@@ -24,17 +27,25 @@ const safeErrors = new Set([
   "analysis_input_too_large",
   "credential_store_unavailable",
 ]);
-const settingsHash = (config) =>
-  createHash("sha256")
+const publicError = (error) =>
+  safeErrors.has(error) ? error : "analysis_validation_failed";
+const settingsHash = (config) => {
+  const connection = providerSettings(config);
+  const { reasoningEffort, maxOutputTokens, timeoutSeconds, ...legacy } =
+    connection;
+  // Default controls preserve identities of revisions saved before controls existed.
+  const identity =
+    reasoningEffort === "default" &&
+    maxOutputTokens === 6000 &&
+    timeoutSeconds === 90
+      ? legacy
+      : connection;
+  return createHash("sha256")
     .update(
-      JSON.stringify([
-        config.model,
-        providerSettings(config),
-        INSIGHT_VERSION,
-        PROMPT_VERSION,
-      ]),
+      JSON.stringify([config.model, identity, INSIGHT_VERSION, PROMPT_VERSION]),
     )
     .digest("hex");
+};
 const jobKey = (hash, config) =>
   createHash("sha256")
     .update(JSON.stringify([hash, settingsHash(config)]))
@@ -58,6 +69,7 @@ export function createInsightService({
   readComparison,
   credentialStore,
   analyze = analyzeOpenAI,
+  review,
   desktopRequired = false,
 }) {
   let queue = Promise.resolve();
@@ -92,6 +104,30 @@ export function createInsightService({
       : credentialStore?.has
         ? await credentialStore.has(config.baseUrl)
         : !!(await credentialStore?.get(config.baseUrl));
+  const supportService = createSupportService({
+    root,
+    credentialStore,
+    desktopRequired,
+    serialize,
+    review,
+    publicError,
+    getContext: async () => {
+      const [config, bundle, jobs] = await Promise.all([
+        settings(),
+        current(),
+        records(),
+      ]);
+      const key = jobKey(bundle.inputHash, config);
+      const job = jobs.find(
+        (j) => j.comparisonId === bundle.comparisonId && j.key === key,
+      );
+      if (!bundle.eligible || !job || job.state !== "complete")
+        throw Error("support_not_available");
+      const checked = validateInsightOutput(bundle, job.output);
+      if (!checked.findings.length) throw Error("support_not_available");
+      return { config, bundle, job, settingsHash: settingsHash(config) };
+    },
+  });
   async function read() {
     try {
       const [config, bundle, jobs] = await Promise.all([
@@ -107,6 +143,7 @@ export function createInsightService({
       const latest = relevant.find((j) => j.key === key) ?? relevant[0];
       let state = "not_analyzed",
         analysis = null,
+        diagnostics = null,
         error = null;
       if (!bundle.eligible) state = "insufficient_evidence";
       else if (latest) {
@@ -122,16 +159,21 @@ export function createInsightService({
             baseUrl: latest.baseUrl,
             apiFormat: latest.apiFormat,
             outputFormat: latest.outputFormat,
+            reasoningEffort: providerSettings(latest).reasoningEffort,
+            maxOutputTokens: providerSettings(latest).maxOutputTokens,
+            timeoutSeconds: providerSettings(latest).timeoutSeconds,
             createdAt: latest.endedAt,
             inputHash: latest.inputHash,
             ...checked,
             usage: latest.usage,
+            diagnostics: sanitizeDiagnostics(latest.diagnostics),
             analyzerVersion: latest.analyzerVersion,
             promptVersion: latest.promptVersion,
           };
         } else {
           state = "failed";
-          error = latest.error ?? "analysis_failed";
+          error = publicError(latest.error);
+          diagnostics = sanitizeDiagnostics(latest.diagnostics);
         }
       }
       return {
@@ -151,6 +193,14 @@ export function createInsightService({
           eligible: bundle.eligible,
           reason: bundle.reason,
           coverage: bundle.coverage,
+          recordedFacts: bundle.recordedFacts,
+          taskContext: JSON.stringify(bundle.task, null, 2),
+          sourceDetails: buildSupportEvidence(bundle)
+            .filter((record) => record.sourceId !== null)
+            .map(({ sourceId, label, metadataText }) => ({ sourceId, label, text: metadataText })),
+          attemptFacts: buildSupportEvidence(bundle)
+            .filter((record) => record.kind === "attempt_facts")
+            .map(({ attemptKey, label, text }) => ({ attemptKey, label, text })),
           sources: bundle.sources.map(
             ({ id, attemptKey, label, path, provenance, excerpt }) => ({
               id,
@@ -164,13 +214,26 @@ export function createInsightService({
         },
         state,
         analysis,
+        support: analysis?.findings.length
+          ? await supportService.read({
+              config,
+              bundle,
+              job: latest,
+              settingsHash: settingsHash(config),
+            })
+          : null,
         error,
+        diagnostics,
         history: relevant.slice(0, 20).map((j) => ({
           id: j.id,
           state: j.state === "running" && !alive(j) ? "interrupted" : j.state,
           createdAt: j.createdAt,
           model: j.model,
           baseUrl: j.baseUrl,
+          ...(j.state === "failed" ? { error: publicError(j.error) } : {}),
+          ...(sanitizeDiagnostics(j.diagnostics)
+            ? { diagnostics: sanitizeDiagnostics(j.diagnostics) }
+            : {}),
         })),
       };
     } catch {
@@ -190,6 +253,9 @@ export function createInsightService({
             "apiFormat",
             "outputFormat",
             "authMode",
+            "reasoningEffort",
+            "maxOutputTokens",
+            "timeoutSeconds",
           ]) ||
           typeof input.model !== "string" ||
           !/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,99}$/.test(input.model) ||
@@ -251,7 +317,12 @@ export function createInsightService({
   }
   async function finish(job, bundle, apiKey) {
     const abort = new AbortController();
-    const timer = setTimeout(() => abort.abort(), 90000);
+    const controls = providerSettings(job);
+    const timer = setTimeout(
+      () => abort.abort(),
+      controls.timeoutSeconds * 1000,
+    );
+    let completionDiagnostics = null;
     try {
       const result = await analyze({
         bundle,
@@ -259,10 +330,14 @@ export function createInsightService({
         baseUrl: job.baseUrl,
         apiFormat: job.apiFormat,
         outputFormat: job.outputFormat,
+        reasoningEffort: controls.reasoningEffort,
+        maxOutputTokens: controls.maxOutputTokens,
+        timeoutSeconds: controls.timeoutSeconds,
         apiKey,
         signal: abort.signal,
       });
-      validateInsightOutput(bundle, result.output);
+      completionDiagnostics = sanitizeDiagnostics(result.diagnostics);
+      validateInsightOutput(bundle, result.output, { profile: "concise" });
       const [now, config] = await Promise.all([current(), settings()]);
       const state =
         now.inputHash === job.inputHash &&
@@ -277,15 +352,16 @@ export function createInsightService({
         output: result.output,
         usage: result.usage ?? null,
         providerResponseId: result.providerResponseId ?? null,
+        diagnostics: completionDiagnostics,
       });
     } catch (e) {
       await privateWrite(root, `job-${job.id}.json`, {
         ...job,
         state: "failed",
         endedAt: Date.now(),
-        error: safeErrors.has(e.message)
-          ? e.message
-          : "analysis_validation_failed",
+        error: publicError(e?.message),
+        diagnostics:
+          sanitizeDiagnostics(e?.diagnostics) ?? completionDiagnostics,
       }).catch(() => {});
     } finally {
       clearTimeout(timer);
@@ -343,6 +419,7 @@ export function createInsightService({
             : await credentialStore.get(config.baseUrl);
         if (config.authMode !== "none" && !apiKey)
           return { ok: false, error: "api_key_required" };
+        const createdAt = Date.now();
         const job = {
           id: requestId,
           comparisonId: bundle.comparisonId,
@@ -352,8 +429,8 @@ export function createInsightService({
           ...providerSettings(config),
           analyzerVersion: INSIGHT_VERSION,
           promptVersion: PROMPT_VERSION,
-          createdAt: Date.now(),
-          deadlineAt: Date.now() + 95000,
+          createdAt,
+          deadlineAt: createdAt + config.timeoutSeconds * 1000 + 5000,
           pid: process.pid,
           state: "running",
           coverage: bundle.coverage,
@@ -383,5 +460,9 @@ export function createInsightService({
       }
     });
   }
-  return { read, configure, generate, forgetKey };
+  async function reviewSupport(input) {
+    const result = await supportService.generate(input);
+    return result.ok ? read() : result;
+  }
+  return { read, configure, generate, forgetKey, reviewSupport };
 }

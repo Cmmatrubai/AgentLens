@@ -42,7 +42,9 @@ A final diff shows **what changed**. AgentLens preserves how the run unfolded—
 
 The desktop comparison app now lives in this repository under **apps/desktop**. Its saved C01 example compares two actual coding attempts on the same historical task. Setup and task-library flows still use sample data; the desktop is a source-run preview, not a packaged release.
 
-![AgentLens desktop showing the saved Sol and Terra comparison](./apps/desktop/qa/real-run/comparison-C01/findings/overview-1440.png)
+A **standalone browser demo release candidate** now opens that real case with three destinations: Case study, Evidence, and About AgentLens. It uses selected recorded evidence and authored notes, with no API key or local backend required. Build it with `pnpm --filter @agentlens/desktop build:demo` and serve `apps/desktop/dist-demo/` on a static server. A public URL has not been published. See the [content inventory](apps/desktop/docs/public-demo-content.md) and [release checklist](apps/desktop/docs/public-demo-release-checklist.md).
+
+![AgentLens browser demo showing the real Sol and Terra case](./apps/desktop/docs/images/public-demo-case.png)
 
 ## Desktop app
 
@@ -53,7 +55,7 @@ pnpm install --frozen-lockfile
 pnpm desktop
 ```
 
-The Electron app includes recorded-attempt inspection, paired evidence, comparison setup, and a configurable OpenAI-compatible insight engine. Provider keys are encrypted locally; generation requires an explicit evidence review. Live full-comparison insight generation is still being evaluated: the latest TokenRouter GLM-5.3 tests returned incomplete outputs, which the app withheld.
+The Electron app includes recorded-attempt inspection, paired evidence, comparison setup, and a configurable OpenAI-compatible insight engine. Provider keys are encrypted locally; generation and the separate evidence-support review require explicit consent. TokenRouter GLM-5.3 completed two C01 analyses after response-limit tuning; semantic review still found claims that exceed their cited excerpts. Saved drafts remain accessible while failed or invalid support reviews cannot promote findings. Finding quality, cost and practical latency are being evaluated across available models. Claim inspection now links individual assessments to server-resolved passages, while invalid reviews remain withheld. See the [latest evaluation](./apps/desktop/qa/insight-engine/PASSAGE-REVIEW-EVALUATION.md).
 
 `pnpm dev:desktop` opens the browser development surface at http://127.0.0.1:5177. Configuration, comparison import and AI generation require Electron.
 

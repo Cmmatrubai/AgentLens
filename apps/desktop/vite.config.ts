@@ -1,8 +1,9 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { recordedRunPlugin } from "./server/vite-recorded.mjs";
-export default defineConfig({
-  plugins: [react(), recordedRunPlugin()],
+export default defineConfig(({mode}) => ({
+  plugins: [react(), ...(mode === 'demo' ? [] : [recordedRunPlugin()])],
+  build: {outDir: mode === 'demo' ? 'dist-demo' : 'dist'},
   base: "./",
   server: {
     fs: {
@@ -21,4 +22,4 @@ export default defineConfig({
       ],
     },
   },
-});
+}));

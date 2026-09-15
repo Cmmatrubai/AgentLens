@@ -1,0 +1,457 @@
+.demo-shell {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: #141517;
+  font-size: 16px;
+}
+.demo-shell a {
+  color: inherit;
+  text-decoration: none;
+}
+.demo-shell .skip-link {
+  position: fixed;
+  left: 16px;
+  top: 10px;
+  transform: translateY(-160%);
+  padding: 10px 16px;
+  background: #25372e;
+  border-radius: 6px;
+  z-index: 1000;
+}
+.demo-shell .skip-link:focus {
+  transform: translateY(0);
+}
+.demo-header {
+  min-height: 76px;
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  padding: 0 36px;
+  border-bottom: 1px solid var(--line);
+  background: #111214;
+}
+.demo-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 18px;
+  letter-spacing: -0.5px;
+}
+.demo-header nav {
+  display: flex;
+  align-self: stretch;
+  align-items: stretch;
+  gap: 28px;
+  margin: auto;
+}
+.demo-header nav a {
+  display: flex;
+  align-items: center;
+  position: relative;
+  color: #adb3b6;
+  font-size: 14px;
+}
+.demo-header nav a:hover,
+.demo-header nav a[aria-current] {
+  color: #eef2f1;
+}
+.demo-header nav a[aria-current]::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: 100%;
+  height: 2px;
+  background: var(--mint);
+}
+.demo-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 23px;
+}
+.demo-header-actions button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #a6adaf;
+  padding: 8px 0;
+}
+.demo-header-actions kbd {
+  font-size: 12px;
+}
+.demo-main {
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  outline: none;
+  scroll-behavior: smooth;
+}
+.demo-main .page {
+  max-width: 1160px;
+  margin: 0 auto;
+  padding: 48px 42px 28px;
+}
+.demo-main .real-comparison-heading h1 {
+  font-size: clamp(28px, 3vw, 40px);
+  letter-spacing: -1.3px;
+}
+.demo-main .real-comparison-heading > p,
+.demo-main .real-verdict > p {
+  font-size: 16px;
+  line-height: 1.65;
+}
+.demo-main .real-verdict {
+  margin-top: 30px;
+  padding: 28px 30px;
+}
+.demo-main .real-verdict h2 {
+  font-size: 26px;
+}
+.demo-main .real-controls {
+  font-size: 14px;
+  flex-wrap: wrap;
+}
+.demo-main .real-controls button,
+.demo-main .real-controls span {
+  font-size: 14px;
+}
+.demo-main .recorded-badge,
+.demo-main .eyebrow,
+.demo-main .real-verdict-kicker {
+  font-size: 12px;
+}
+.demo-result-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  border-top: 1px solid rgba(161, 222, 194, 0.15);
+  margin-top: 24px;
+  padding-top: 22px;
+}
+.demo-result-pair > div {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.demo-result-pair span {
+  font-size: 14px;
+  color: #b1b8b5;
+}
+.demo-result-pair strong {
+  font-size: 22px;
+  font-weight: 560;
+}
+.demo-result-pair small {
+  color: #a7b3ad;
+  font-size: 13px;
+  font-weight: 400;
+}
+.demo-main .comparison-findings {
+  margin-top: 34px;
+}
+.demo-main .finding-card {
+  padding: 24px;
+}
+.demo-main .finding-card h3 {
+  font-size: 20px;
+  line-height: 1.35;
+}
+.demo-main .finding-card > p {
+  font-size: 15px;
+  line-height: 1.65;
+}
+.demo-main .finding-category, .demo-main .finding-category > span { font-size: 12px; }
+.demo-main .findings-heading > div > p,
+.demo-main .compare-finding-button {
+  font-size: 14px;
+}
+.demo-main .findings-heading > span {
+  font-size: 12px;
+}
+.demo-main .real-scope p {
+  font-size: 14px;
+  line-height: 1.65;
+}
+.demo-main .real-check-row {
+  font-size: 14px;
+}
+.demo-main .real-attempt-top > div > span,
+.demo-main .real-attempt-state,
+.demo-main .real-attempt-metrics small,
+.demo-main .real-attempt-bottom {
+  font-size: 13px;
+}
+.demo-main .button.small {
+  font-size: 14px;
+}
+.public-demo-mode .dialog-description,
+.public-demo-mode .finding-observation p,
+.public-demo-mode .finding-interpretation p,
+.public-demo-mode .finding-limit p,
+.public-demo-mode .recorded-content-note {
+  font-size: 14px;
+  line-height: 1.65;
+}
+.public-demo-mode .finding-full-source summary,
+.public-demo-mode .finding-identity summary,
+.public-demo-mode .finding-source-choices button,
+.public-demo-mode .recorded-source-details summary {
+  font-size: 13px;
+}
+.public-demo-mode .finding-code,
+.public-demo-mode .recorded-output-code {
+  font-size: 12px;
+}
+.public-demo-mode .finding-comparison-modal .dialog-footer > span {
+  font-size: 12px;
+}
+.demo-main .real-attempts {
+  margin-top: 28px;
+}
+.demo-main .real-read-stamp,
+.demo-main .recorded-read-stamp {
+  font-size: 12px;
+}
+.demo-evidence-next {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  margin: 30px 0;
+  padding: 26px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.demo-evidence-next h2 {
+  font-size: 18px;
+  font-weight: 550;
+  margin: 0 0 8px;
+}
+.demo-evidence-next p {
+  color: #a5acaf;
+  font-size: 14px;
+  margin: 0;
+  line-height: 1.6;
+}
+.demo-evidence-next > a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--mint);
+  white-space: nowrap;
+  font-size: 14px;
+  padding: 10px 0;
+}
+.demo-footer {
+  max-width: 1160px;
+  margin: auto;
+  padding: 20px 42px 32px;
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  color: #949d9f;
+  font-size: 13px;
+}
+.demo-footer > span,
+.demo-footer > a {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.demo-about {
+  max-width: 850px !important;
+}
+.demo-about h1 {
+  font-size: clamp(30px, 4vw, 42px);
+  line-height: 1.18;
+  letter-spacing: -1.3px;
+  margin: 18px 0 20px;
+}
+.demo-about p {
+  font-size: 16px;
+  line-height: 1.8;
+  color: #aab2b5;
+}
+.demo-about .demo-about-lead {
+  font-size: 19px;
+  color: #cad0d1;
+}
+.demo-about section {
+  padding: 22px 0;
+  border-bottom: 1px solid var(--line);
+}
+.demo-about h2 {
+  font-size: 22px;
+  letter-spacing: -0.5px;
+  font-weight: 550;
+}
+.demo-text-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--mint) !important;
+  font-size: 15px;
+  padding: 8px 0;
+}
+.demo-evidence-types {
+  display: grid;
+  gap: 22px;
+}
+.demo-evidence-types > div {
+  display: grid;
+  grid-template-columns: 170px 1fr;
+  gap: 16px;
+}
+.demo-evidence-types dt {
+  color: #dce4e1;
+  font-size: 15px;
+  padding-top: 4px;
+}
+.demo-evidence-types dd {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.75;
+  color: #aab2b5;
+}
+.demo-snapshot-details {
+  margin-top: 30px;
+}
+.demo-snapshot-details summary {
+  cursor: pointer;
+  font-size: 15px;
+}
+.demo-snapshot-details a {
+  color: var(--mint);
+  text-decoration: underline;
+}
+.demo-github-link {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 24px;
+  margin-top: 34px;
+}
+.demo-github-link span {
+  flex: 1;
+}
+.demo-github-link small {
+  display: block;
+  font-size: 13px;
+  color: #9ca6a9;
+  margin-top: 8px;
+}
+.demo-command-modal [cmdk-root] {
+  padding: 18px 24px 24px;
+}
+.demo-command-modal [cmdk-input] {
+  font-size: 16px;
+  margin-bottom: 12px;
+}
+.demo-command-modal [cmdk-list] {
+  max-height: 360px;
+  overflow: auto;
+}
+.demo-command-modal [cmdk-item] {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 15px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.demo-command-modal [cmdk-item][data-selected="true"] {
+  background: #252d2b;
+}
+.demo-command-modal [cmdk-item] > span {
+  flex: 1;
+}
+.demo-command-modal [cmdk-item] strong {
+  font-size: 15px;
+  font-weight: 500;
+}
+.demo-command-modal [cmdk-item] small {
+  display: block;
+  color: #a7b1af;
+  font-size: 13px;
+  margin-top: 5px;
+}
+@media (max-width: 760px) {
+  .demo-header {
+    padding: 0 20px;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .demo-brand {
+    min-height: 60px;
+  }
+  .demo-header nav {
+    order: 3;
+    width: 100%;
+    justify-content: space-between;
+    gap: 14px;
+    min-height: 46px;
+  }
+  .demo-header-actions {
+    margin-left: auto;
+  }
+  .demo-header-actions kbd {
+    display: none;
+  }
+  .demo-main .page {
+    padding: 28px 20px 16px;
+  }
+  .demo-main .real-verdict {
+    padding: 22px;
+  }
+  .demo-main .finding-cards {
+    grid-template-columns: 1fr;
+  }
+  .demo-result-pair {
+    gap: 20px;
+  }
+  .demo-result-pair small {
+    display: block;
+    margin-top: 7px;
+  }
+  .demo-main .findings-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .demo-evidence-next {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .demo-main .real-check-row {
+    grid-template-columns: 1.2fr 1fr 1fr;
+    gap: 8px;
+    padding: 12px;
+  }
+  .demo-main .real-check-result {
+    padding: 8px 3px;
+  }
+  .demo-main .real-check-header {
+    font-size: 12px;
+  }
+  .demo-main .recorded-read-stamp {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .demo-evidence-types > div {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+  .demo-footer {
+    padding: 20px;
+    flex-direction: column;
+    gap: 15px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .demo-main {
+    scroll-behavior: auto;
+  }
+}

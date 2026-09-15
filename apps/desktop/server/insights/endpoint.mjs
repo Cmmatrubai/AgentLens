@@ -25,13 +25,28 @@ export function providerSettings(config) {
     apiFormat: config.apiFormat ?? "responses",
     outputFormat: config.outputFormat ?? "json_schema",
     authMode: config.authMode ?? "bearer",
+    reasoningEffort:
+      config.reasoningEffort === undefined ? "default" : config.reasoningEffort,
+    maxOutputTokens:
+      config.maxOutputTokens === undefined ? 6000 : config.maxOutputTokens,
+    timeoutSeconds:
+      config.timeoutSeconds === undefined ? 90 : config.timeoutSeconds,
   };
   if (
     !["responses", "chat_completions"].includes(result.apiFormat) ||
     !["json_schema", "json_object", "prompted_json"].includes(
       result.outputFormat,
     ) ||
-    !["bearer", "none"].includes(result.authMode)
+    !["bearer", "none"].includes(result.authMode) ||
+    !["default", "none", "low", "medium", "high", "max"].includes(
+      result.reasoningEffort,
+    ) ||
+    !Number.isSafeInteger(result.maxOutputTokens) ||
+    result.maxOutputTokens < 1000 ||
+    result.maxOutputTokens > 32000 ||
+    !Number.isSafeInteger(result.timeoutSeconds) ||
+    result.timeoutSeconds < 30 ||
+    result.timeoutSeconds > 300
   )
     throw Error("invalid_settings");
   return result;

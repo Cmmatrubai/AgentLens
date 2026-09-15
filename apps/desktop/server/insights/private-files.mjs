@@ -83,8 +83,10 @@ export async function privateRemove(root, name) {
     if (e.code !== "ENOENT") throw e;
   }
 }
-export async function privateList(root) {
+export async function privateList(root, kind = "job") {
+  if (kind !== "job" && kind !== "support") throw Error("invalid_private_kind");
+  const pattern = new RegExp(`^${kind}-[a-f0-9-]{36}\\.json$`);
   return (await directory(root))
-    ? (await readdir(root)).filter((n) => /^job-[a-f0-9-]{36}\.json$/.test(n))
+    ? (await readdir(root)).filter((n) => pattern.test(n))
     : [];
 }

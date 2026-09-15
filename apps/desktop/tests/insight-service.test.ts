@@ -433,3 +433,52 @@ test("real process restart exposes an interrupted job without resuming the provi
     await t.cleanup();
   }
 });
+
+test("recorded facts are available before AI analysis and match the outgoing evidence", async () => {
+  const initial = makePair();
+  initial.checks.push({id:"unrun", title:"Unrun check"});
+  let sent;
+  const t = await setup(args => analyzeOpenAI({...args, fetchImpl:async (_url, request) => {
+    sent = JSON.parse(JSON.parse(request.body).messages.find(message => message.role === "user").content);
+    return new Response(JSON.stringify({choices:[{finish_reason:"stop", message:{content:JSON.stringify(makeFinding(args.bundle))}}]}), {status:200});
+  }}), initial);
+  try {
+    const before = await t.service.read();
+    assert.equal(before.input.recordedFacts?.facts.filter(f => f.checkId === "unrun" && f.outcome === "unknown").length, 2);
+    assert.equal(before.analysis, null);
+    const ready = await t.service.configure({model:"offline", enabled:true, authMode:"none", apiFormat:"chat_completions"});
+    await t.service.generate({inputHash:ready.input.hash, settingsHash:ready.settingsHash, requestId:randomUUID()});
+    await waitFor(t.service, "available");
+    assert.deepEqual(sent.recordedFacts, before.input.recordedFacts);
+    assert.ok(sent.sources.every(source => source.fullSource === undefined));
+  } finally { await t.cleanup(); }
+});
+
+import { describeAnalysisAction } from '../src/insight-presentation.ts';
+test('replacing a rejected key keeps an explicit retry-preview path without automatic requests', async () => {
+  let calls = 0;
+  const t = await setup(args => analyzeOpenAI({
+    ...args,
+    fetchImpl: async () => {
+      calls++;
+      if (calls === 1) return new Response('{}', {status:401});
+      return new Response(JSON.stringify({status:'completed', output:[{type:'message', content:[{type:'output_text', text:JSON.stringify(makeFinding(args.bundle))}]}]}));
+    },
+  }), makePair());
+  try {
+    const configured = await t.service.configure({model:'test-model', apiKey:'offline-old-key-12345', enabled:true});
+    await t.service.generate({settingsHash:configured.settingsHash, inputHash:configured.input.hash, requestId:randomUUID()});
+    const failed = await waitFor(t.service, 'failed');
+    assert.equal(failed.error, 'provider_authentication');
+    const repaired = await t.service.configure({model:'test-model', apiKey:'offline-new-key-12345', enabled:true});
+    assert.equal(repaired.settingsHash, failed.settingsHash);
+    assert.equal(repaired.state, 'failed');
+    assert.equal(calls, 1, 'saving a replacement key must not trigger another request');
+    const action = describeAnalysisAction({state:repaired.state, error:repaired.error, settings:repaired.settings, eligible:repaired.input.eligible, desktop:true, busy:false, supportRunning:false});
+    assert.equal(action.canPreviewRetry, true, 'the persisted failure must not trap the user in settings');
+    await t.service.generate({settingsHash:repaired.settingsHash, inputHash:repaired.input.hash, requestId:randomUUID(), regenerate:true});
+    const finished = await waitFor(t.service, 'available');
+    assert.equal(finished.analysis.findings.length, 1);
+    assert.equal(calls, 2);
+  } finally { await t.cleanup(); }
+});

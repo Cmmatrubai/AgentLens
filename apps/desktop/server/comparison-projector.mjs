@@ -67,6 +67,7 @@ export function projectComparison(manifest, sources) {
         id,
         title: names[id] ?? c?.title ?? id,
         outcome: c?.outcome ?? "unknown",
+        outputAvailable: typeof c?.output === "string" && !!c.output.trim(),
         output: displayText(
           c?.output ??
             "Independent evaluation has not produced evidence for this check.",

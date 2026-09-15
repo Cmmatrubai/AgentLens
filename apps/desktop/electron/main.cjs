@@ -26,6 +26,16 @@ require("./insight-ipc.cjs").installInsightIPC({
   dialog,
   BrowserWindow,
 });
+const live = require("./live-ipc.cjs").installLiveIPC({ ipcMain, dialog, BrowserWindow });
+let quitReady = false;
+app.on("before-quit", (event) => {
+  if (quitReady) return;
+  event.preventDefault();
+  live.shutdown().then(() => { quitReady = true; app.quit(); }).catch(() => {
+    // Keep the app open when recorder finalization cannot be confirmed.
+    dialog.showErrorBox("Recording is still closing", "AgentLens could not confirm that recording has finished. Keep the app open and check the live workspace before quitting again.");
+  });
+});
 ipcMain.handle("agentlens:read-comparison", async (event) => {
   const frame = event.senderFrame;
   const expected = pathToFileURL(
@@ -64,7 +74,7 @@ function createWindow() {
     height: 940,
     minWidth: 820,
     minHeight: 600,
-    title: "AgentLens — Prototype",
+    title: "AgentLens",
     backgroundColor: "#111214",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 20, y: 20 },
