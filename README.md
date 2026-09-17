@@ -40,11 +40,17 @@ A final diff shows **what changed**. AgentLens preserves how the run unfolded—
 
 ## Product direction
 
-The desktop comparison app now lives in this repository under **apps/desktop**. Its saved C01 example compares two actual coding attempts on the same historical task. Setup and task-library flows still use sample data; the desktop is a source-run preview, not a packaged release.
+The desktop comparison app lives under **apps/desktop**. Its saved C01 example compares two actual coding attempts on the same historical task. The live workspace can launch two coding agents from the same committed Git revision, preserve their recordings, and run a user-provided check command against separate copies of their results. The desktop is a source-run preview, not a packaged release.
 
 A **standalone browser demo release candidate** now opens that real case with three destinations: Case study, Evidence, and About AgentLens. It uses selected recorded evidence and authored notes, with no API key or local backend required. Build it with `pnpm --filter @agentlens/desktop build:demo` and serve `apps/desktop/dist-demo/` on a static server. A public URL has not been published. See the [content inventory](apps/desktop/docs/public-demo-content.md) and [release checklist](apps/desktop/docs/public-demo-release-checklist.md).
 
 ![AgentLens browser demo showing the real Sol and Terra case](./apps/desktop/docs/images/public-demo-case.png)
+
+## Experiment: Reflexio and retry-policy adherence
+
+Two fresh coding-agent runs, one with retrieved Reflexio guidance and one without, both passed the same five checks. The guided implementation matched the taught retry scope more closely, but took longer. The write-up separates that observed difference from an unproven causal effect.
+
+**[Read the experiment and inspect the reproducible evidence](./docs/experiments/reflexio-retry-policy.md)** — includes the synthetic correction, actual retrieved guidance, both implementations, independent evaluator, and limitations. Recheck the saved code without an API key.
 
 ## Desktop app
 
@@ -55,11 +61,13 @@ pnpm install --frozen-lockfile
 pnpm desktop
 ```
 
-The Electron app includes recorded-attempt inspection, paired evidence, comparison setup, and a configurable OpenAI-compatible insight engine. Provider keys are encrypted locally; generation and the separate evidence-support review require explicit consent. TokenRouter GLM-5.3 completed two C01 analyses after response-limit tuning; semantic review still found claims that exceed their cited excerpts. Saved drafts remain accessible while failed or invalid support reviews cannot promote findings. Finding quality, cost and practical latency are being evaluated across available models. Claim inspection now links individual assessments to server-resolved passages, while invalid reviews remain withheld. See the [latest evaluation](./apps/desktop/qa/insight-engine/PASSAGE-REVIEW-EVALUATION.md).
+The Electron app includes recorded-attempt inspection, paired evidence, live comparison setup, user-defined command checks, and a configurable OpenAI-compatible insight engine. Optional dependency preparation supports the documented pnpm 11/macOS path, with setup results saved separately from agent and check outcomes. Preferences shows detected tools and the persistent data location. See [dependency preparation](./apps/desktop/docs/dependency-preparation.md) and [installation readiness](./apps/desktop/docs/desktop-installation-readiness.md) for supported behavior and remaining release gates.
+
+Provider keys are encrypted locally; generation and the separate evidence-support review require explicit consent. TokenRouter GLM-5.3 completed two C01 analyses after response-limit tuning; semantic review still found claims that exceed their cited excerpts. Saved drafts remain accessible while failed or invalid support reviews cannot promote findings. Finding quality, cost and practical latency are being evaluated across available models. Claim inspection links individual assessments to server-resolved passages, while invalid reviews remain withheld. See the [latest evaluation](./apps/desktop/qa/insight-engine/PASSAGE-REVIEW-EVALUATION.md).
 
 `pnpm dev:desktop` opens the browser development surface at http://127.0.0.1:5177. Configuration, comparison import and AI generation require Electron.
 
-Recordings and provider settings are private runtime data, excluded from Git. A fresh checkout opens the sample workspace; real comparisons require local evidence or an imported comparison bundle. See the [desktop guide](./apps/desktop/README.md), [endpoint setup](./apps/desktop/docs/insight-compatible-endpoints.md), and [migration notes](./apps/desktop/docs/repository-migration.md).
+Recordings and provider settings are private runtime data, excluded from Git. Start with the recorded example, import a comparison bundle, or launch your own comparison from a clean local project after setup checks. See the [desktop guide](./apps/desktop/README.md), [endpoint setup](./apps/desktop/docs/insight-compatible-endpoints.md), and [migration notes](./apps/desktop/docs/repository-migration.md).
 
 ## Evidence, not interpretation
 
@@ -236,7 +244,7 @@ Other intentional boundaries:
 | Evidence, Git, derivation, and assessment CLI | **Available** | `runs` and `inspect` remain non-mutating; likely tests are evidence, not grading. |
 | Production local UI | **Available** | Loopback-only run ledger, trajectory, inspector, Git evidence, and assessment presentation; bounded local reads retain explicit availability limits. |
 | AGY / Claude adapters | **Planned** | No AGY or Claude capture adapter is implemented. |
-| Desktop comparisons / Insights | **Source-run preview** | Saved C01 evidence, comparison imports, paired inspection and an insight engine are implemented. General live execution from setup and validated AI finding quality remain unfinished. |
+| Desktop comparisons / Insights | **Source-run preview** | Recorded examples, imports, paired live execution, optional dependency preparation, independent command checks and insights are implemented. Packaged installation and broadly validated AI finding quality remain unfinished. |
 
 The production UI direction is documented in the [Task 7 design](./docs/superpowers/specs/2026-08-30-agentlens-task-7-design.md), with execution gated by its [implementation plan](./docs/superpowers/plans/2026-08-30-agentlens-task-7.md).
 
@@ -247,7 +255,7 @@ The long-term direction is staged so each layer earns the next one with real evi
 1. **Single-run observability and evaluation — current.** Record Codex runs, preserve provenance, derive conservative test evidence, and support explicit human review.
 2. **Local UI and dogfooding — current implementation.** The loopback-only run ledger, execution trajectory, evidence inspector, Git review, and assessment presentation are available for local runs.
 3. **Multi-provider capture.** Add Codex + AGY capture, then Claude, while exposing provider capabilities instead of forcing false feature parity.
-4. **Controlled same-task comparisons — desktop preview.** One preserved controlled pair and imported comparisons can be inspected. General execution from the desktop setup flow remains planned.
+4. **Controlled same-task comparisons — desktop preview.** Launch recorded attempts in separate worktrees at one committed revision, inspect differences, and verify results with a user-defined command in separate copies. Packaging and broader setup support remain open.
 5. **Benchmark Case and repeated attempts.** Treat one task definition plus repeated runs as a durable case—not as a leaderboard shortcut.
 6. **Provider-capability-aware behavior features.** Extract comparable behaviors only where the provider evidence supports them; preserve unavailable states elsewhere.
 7. **Insight Layer — engine implemented, quality evaluation pending.** Explicit provider requests, bounded evidence, validation and saved revisions are present. Evaluate useful findings across real tasks before claiming reliable cross-run judgment.

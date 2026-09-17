@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "experiment_id": "agentlens-reflexio-2026-09-17",
+  "captured_at": "2026-09-17T11:25:39-04:00",
+  "result": "objective_tie_treatment_narrower_scope",
+  "claim_boundary": "One control/treatment pair on one synthetic fixture; no causal or general effectiveness claim.",
+  "models": {
+    "coding_agent": {
+      "model": "gpt-5.6-sol",
+      "reasoning_effort": "high",
+      "fresh_ephemeral_session_per_condition": true
+    },
+    "reflexio_extraction": {
+      "intended_configured_model": "openai/z-ai/glm-5.3-flash",
+      "extractor_level_model_label": "openai/z-ai/glm-5.3-flash",
+      "observed_litellm_request_log_label": "gpt-5.5",
+      "outbound_provider_request_model_observed": false,
+      "provider_response_model_observed": false,
+      "exact_served_model": "unresolved",
+      "mismatch_cause": "unresolved",
+      "fallback_models_configured": [],
+      "fallback_event_observed": false,
+      "configuration_and_low_level_label_match": false,
+      "usage": {
+        "calls": 4,
+        "input_tokens": 16985,
+        "output_tokens": 963,
+        "logged_cost_estimate_usd": 0.113815,
+        "is_billing_receipt": false
+      }
+    },
+    "embedding": "local/minilm-l6-v2"
+  },
+  "teaching": {
+    "synthetic": true,
+    "request_id": "8a8a8058-c684-4c07-9088-49fc23e85e5a",
+    "status": "done",
+    "reason": "covered",
+    "profiles_added": 1,
+    "playbooks_added": 1,
+    "warnings": []
+  },
+  "retrieval": {
+    "profile_id": "192888fa-dba5-41b2-be36-b6a9ae306ca0",
+    "user_playbook_id": "1",
+    "treatment_prompt_sha256": "0b0b5b77d8218f7237cc115e437c6f6be1d2af2632e6207b47fdb6d613e91fa2"
+  },
+  "conditions": {
+    "control": {
+      "agentlens_run_id": "7328c8d0-53ac-40c0-9ca6-c67617c7e1b7",
+      "codex_thread_id": "01a0aff0-8db0-73d1-bc7a-2c8052ef89ed",
+      "status": "completed",
+      "exit_code": 0,
+      "elapsed_ms": 81114,
+      "completed_commands": 7,
+      "failed_commands": 0,
+      "agentlens_events": 40,
+      "changed_files": [
+        "http_client.py"
+      ],
+      "implementation": {
+        "get_max_total_attempts": 3,
+        "retryable_statuses": [
+          408,
+          429,
+          500,
+          502,
+          503,
+          504
+        ],
+        "post_max_total_attempts": 1,
+        "sleep_calls_for_persistent_retryable_failure": [
+          0.1,
+          0.2
+        ]
+      },
+      "usage": {
+        "input": 242233,
+        "cached_input": 215040,
+        "output": 2916,
+        "reasoning_output": 1149
+      },
+      "evaluation": {
+        "fixed_evaluator_passed": 5,
+        "fixed_evaluator_total": 5,
+        "call_counts": [
+          1,
+          2,
+          3,
+          1,
+          1
+        ],
+        "public_tests_passed": 2,
+        "public_tests_total": 2
+      },
+      "diff_sha256": "dade0783fc75dabb3159d876e920c5b01233b08ba9e07da9832148fbf08885bb"
+    },
+    "treatment": {
+      "agentlens_run_id": "3cf7862d-23a8-43ad-81ac-bc24e284ba20",
+      "codex_thread_id": "01a0aff2-a927-7f42-b791-40ed020bb08b",
+      "status": "completed",
+      "exit_code": 0,
+      "elapsed_ms": 103433,
+      "completed_commands": 8,
+      "failed_commands": 0,
+      "agentlens_events": 42,
+      "changed_files": [
+        "http_client.py"
+      ],
+      "implementation": {
+        "get_max_total_attempts": 3,
+        "retryable_statuses": [
+          502,
+          503,
+          504
+        ],
+        "post_max_total_attempts": 1,
+        "sleep_calls_for_persistent_retryable_failure": [
+          1,
+          2
+        ]
+      },
+      "usage": {
+        "input": 272541,
+        "cached_input": 241536,
+        "output": 3227,
+        "reasoning_output": 1184
+      },
+      "evaluation": {
+        "fixed_evaluator_passed": 5,
+        "fixed_evaluator_total": 5,
+        "call_counts": [
+          1,
+          2,
+          3,
+          1,
+          1
+        ],
+        "public_tests_passed": 2,
+        "public_tests_total": 2
+      },
+      "diff_sha256": "c0270cda1fa6d0dd6e4f1e2398591772922c55afba295142ce1c6bcbd79d523c"
+    }
+  },
+  "public_export_note": "Curated experiment results; full native logs and local AgentLens database are not part of this export."
+}

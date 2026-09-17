@@ -1,0 +1,24 @@
+{
+  "user_id": "agentlens-reflexio-exp-2026-09-17",
+  "agent_version": "http-retry-policy-v1",
+  "session_id": "synthetic-teaching-v1",
+  "force_extraction": true,
+  "interactions": [
+    {
+      "role": "user",
+      "content": "SYNTHETIC TEACHING FIXTURE: Implement retry behavior for our HTTP client, including resource reads and payment submission."
+    },
+    {
+      "role": "assistant",
+      "content": "I will automatically retry every failed HTTP request up to five times, including POST /payments, so transient failures are more likely to recover."
+    },
+    {
+      "role": "user",
+      "content": "Correction for this project: retry only safe GET requests when the response is 502, 503, or 504, and use at most 3 total attempts. Never automatically replay a payment POST unless an explicit idempotency contract is present; surface the first failure instead."
+    },
+    {
+      "role": "assistant",
+      "content": "Understood. I will limit retries to GET requests with 502/503/504 responses, stop after 3 total attempts, and will not replay payment POSTs without an explicit idempotency contract."
+    }
+  ]
+}

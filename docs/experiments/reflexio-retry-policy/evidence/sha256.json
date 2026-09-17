@@ -1,0 +1,18 @@
+{
+  "description": "SHA-256 of the published fixture, implementations, prompts and curated evidence. This is an integrity manifest, not an independent attestation.",
+  "files": {
+    "control/http_client.py": "8f4ee09174b844c148f8582a957c8f12ff73ef3470ba276c4dfd70a82031b0a9",
+    "control/test_public.py": "510c1aea976d021bdb287ca8b3a3195e0c20a7d087f97755777624f317256273",
+    "evaluate.py": "b3025003345077663660ff94af2ea194bbf3c35716b42953bb679b67d8446bae",
+    "evidence/learning-to-run.json": "4d40d35d79f82769fccaa4f30ab3a4789596bb7f99cabb0d123cf3c7d203d0f5",
+    "evidence/results.json": "26468d02d2662cc216262f4617a52e70323497f2417d1a101ef69dc81466502f",
+    "evidence/teaching-input.json": "f6e6c6fff98044c410f0989b009bf7b3b0823f4ac4fba4c71b780e11ce1a169c",
+    "fixture/README.md": "d3aad61846707dabd49c8e691571d525631b9c643ccd6a541528f961babefc79",
+    "fixture/http_client.py": "58323cf6d6261ebecc565125e4de111eea38681a2074dc078d1c88bf1ec5a94b",
+    "fixture/test_public.py": "510c1aea976d021bdb287ca8b3a3195e0c20a7d087f97755777624f317256273",
+    "prompts/control.txt": "06631a64cb3650e86c26eadeffa15842429157137598ed7299fbb97b218624e8",
+    "prompts/treatment.txt": "0b0b5b77d8218f7237cc115e437c6f6be1d2af2632e6207b47fdb6d613e91fa2",
+    "treatment/http_client.py": "c12e463d5350239b6a21f4418946dd80c335daf868ff33e60c83d15fb52bc6a0",
+    "treatment/test_public.py": "510c1aea976d021bdb287ca8b3a3195e0c20a7d087f97755777624f317256273"
+  }
+}
