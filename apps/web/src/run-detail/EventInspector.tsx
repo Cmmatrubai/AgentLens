@@ -3,7 +3,8 @@ import type {
   NormalizedContentResponseV1,
   TrajectoryEventV1
 } from "@agentlens/api-contract";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { AgentLensClientError } from "../api/client.js";
 import {
@@ -16,6 +17,7 @@ import { AvailabilityNotice, type AvailabilityState } from "../evidence/Availabi
 import { CommandEvidence } from "../evidence/CommandEvidence.js";
 import { NativeEvidence } from "../evidence/NativeEvidence.js";
 import { TextEvidence } from "../evidence/TextEvidence.js";
+import { useMotionPolicy } from "../motion/motionPolicy.js";
 import { InspectorTabs, type InspectorTab, type InspectorTabId } from "./InspectorTabs.js";
 
 function requestFailure(error: unknown): AvailabilityState {
@@ -89,8 +91,10 @@ export function EventInspector(props: Readonly<{
   onRelationshipJump: (eventId: string) => void;
   session?: EventInspectorSession;
   onSessionChange?: (session: EventInspectorSession) => void;
+  children?: ReactNode;
 }>) {
   const idPrefix = useId().replaceAll(":", "");
+  const motionPolicy = useMotionPolicy();
   const eligibleNative = props.event.provenance === "observed" &&
     props.event.nativePayload.state === "available";
   const [internalSession, setInternalSession] = useState<EventInspectorSession>(initialEventInspectorSession);
@@ -133,93 +137,111 @@ export function EventInspector(props: Readonly<{
       <h2 id={`${idPrefix}-title`}>Event inspector</h2>
       <p className="event-inspector__summary">{props.event.safeSummary || "No safe summary available."}</p>
       <InspectorTabs idPrefix={idPrefix} tabs={tabs} selected={session.selectedTab} onSelect={chooseTab} />
-      {session.selectedTab === "evidence" && (
-        <div
-          role="tabpanel"
-          aria-label="Evidence"
-          aria-labelledby={`${idPrefix}-tab-evidence`}
-          id={`${idPrefix}-panel-evidence`}
-        >
-          {props.event.detail.state === "unavailable" && <AvailabilityNotice state="unsupported_kind" />}
-          {detail.isPending && props.event.detail.state === "available" && <p>Loading bounded event detail…</p>}
-          {detail.isError && <AvailabilityNotice state={requestFailure(detail.error)} />}
-          {detail.data !== undefined && (
-            <>
-              <DetailFacts detail={detail.data} />
-              {detail.data.presentationClass === "assessment" && <AssessmentFacts detail={detail.data} />}
-              {detail.data.presentationClass === "command" ? (
-                <CommandEvidence
-                  detail={detail.data}
-                  content={content.data ?? null}
-                  requestState={content.isError ? "error" : content.isFetching ? "loading" :
-                    content.data === undefined ? "idle" : "loaded"}
-                  requestError={content.isError ? requestFailure(content.error) : null}
-                  onRequestContent={() => updateSession({ contentRequested: true })}
-                />
-              ) : (
-                <GeneralEvidence
-                  detail={detail.data}
-                  content={content.data ?? null}
-                  contentError={content.isError ? requestFailure(content.error) : null}
-                  contentLoading={content.isFetching}
-                  onRequestContent={() => updateSession({ contentRequested: true })}
-                />
-              )}
-              {detail.data.presentationClass === "assessment" && detail.data.note.state === "available" && (
-                <section className="assessment-note-evidence">
-                  {note.data === undefined && !note.isError && (
-                    <button type="button" onClick={() => updateSession({ noteRequested: true })} disabled={note.isFetching}>
-                      {note.isFetching ? "Loading assessment note…" : "Load assessment note"}
-                    </button>
+      <div
+        className="event-inspector__body"
+        data-testid="event-inspector-body"
+        data-inspector-event={props.event.eventId}
+      >
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.div
+            key={`${props.event.eventId}:${session.selectedTab}`}
+            className="event-inspector__panel"
+            initial={{ opacity: 0, x: 4 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -4 }}
+            transition={motionPolicy.inspector}
+          >
+          {session.selectedTab === "evidence" && (
+            <div
+              role="tabpanel"
+              aria-label="Evidence"
+              aria-labelledby={`${idPrefix}-tab-evidence`}
+              id={`${idPrefix}-panel-evidence`}
+            >
+              {props.event.detail.state === "unavailable" && <AvailabilityNotice state="unsupported_kind" />}
+              {detail.isPending && props.event.detail.state === "available" && <p>Loading bounded event detail…</p>}
+              {detail.isError && <AvailabilityNotice state={requestFailure(detail.error)} />}
+              {detail.data !== undefined && (
+                <>
+                  <DetailFacts detail={detail.data} />
+                  {detail.data.presentationClass === "assessment" && <AssessmentFacts detail={detail.data} />}
+                  {detail.data.presentationClass === "command" ? (
+                    <CommandEvidence
+                      detail={detail.data}
+                      content={content.data ?? null}
+                      requestState={content.isError ? "error" : content.isFetching ? "loading" :
+                        content.data === undefined ? "idle" : "loaded"}
+                      requestError={content.isError ? requestFailure(content.error) : null}
+                      onRequestContent={() => updateSession({ contentRequested: true })}
+                    />
+                  ) : (
+                    <GeneralEvidence
+                      detail={detail.data}
+                      content={content.data ?? null}
+                      contentError={content.isError ? requestFailure(content.error) : null}
+                      contentLoading={content.isFetching}
+                      onRequestContent={() => updateSession({ contentRequested: true })}
+                    />
                   )}
-                  {note.isError && <AvailabilityNotice state={requestFailure(note.error)} />}
-                  {note.data !== undefined && <TextEvidence title="Redacted assessment note" text={note.data.content} />}
-                </section>
+                  {detail.data.presentationClass === "assessment" && detail.data.note.state === "available" && (
+                    <section className="assessment-note-evidence">
+                      {note.data === undefined && !note.isError && (
+                        <button type="button" onClick={() => updateSession({ noteRequested: true })} disabled={note.isFetching}>
+                          {note.isFetching ? "Loading assessment note…" : "Load assessment note"}
+                        </button>
+                      )}
+                      {note.isError && <AvailabilityNotice state={requestFailure(note.error)} />}
+                      {note.data !== undefined && <TextEvidence title="Redacted assessment note" text={note.data.content} />}
+                    </section>
+                  )}
+                </>
               )}
-            </>
+            </div>
           )}
-        </div>
-      )}
-      {session.selectedTab === "relationships" && (
-        <div
-          role="tabpanel"
-          aria-label="Relationships"
-          aria-labelledby={`${idPrefix}-tab-relationships`}
-          id={`${idPrefix}-panel-relationships`}
-        >
-          <dl className="evidence-facts">
-            <div><dt>Opaque source group</dt><dd>{props.event.source.opaqueRef}</dd></div>
-            <div><dt>Session or thread dimension</dt><dd>{props.event.source.hasSessionOrThread ? "Present" : "Absent"}</dd></div>
-            <div><dt>Turn dimension</dt><dd>{props.event.source.hasTurn ? "Present" : "Absent"}</dd></div>
-            <div><dt>Item or tool dimension</dt><dd>{props.event.source.hasItemOrTool ? "Present" : "Absent"}</dd></div>
-            <div><dt>Correlation dimension</dt><dd>{props.event.source.hasCorrelation ? "Present" : "Absent"}</dd></div>
-          </dl>
-          {props.event.relationships.length === 0 ? <p>No exact AgentLens relationships are recorded.</p> : (
-            <ul className="event-relationships">
-              {props.event.relationships.map((relationship, index) => (
-                <li key={`${relationship.type}:${relationship.eventId}:${index}`}>
-                  <code>{relationship.type}</code> · <code>{relationship.eventId}</code>
-                  <button type="button" onClick={() => props.onRelationshipJump(relationship.eventId)}>
-                    Jump to {relationship.type.replaceAll("_", " ")} event {relationship.eventId}
-                  </button>
-                </li>
-              ))}
-            </ul>
+          {session.selectedTab === "relationships" && (
+            <div
+              role="tabpanel"
+              aria-label="Relationships"
+              aria-labelledby={`${idPrefix}-tab-relationships`}
+              id={`${idPrefix}-panel-relationships`}
+            >
+              <dl className="evidence-facts">
+                <div><dt>Opaque source group</dt><dd>{props.event.source.opaqueRef}</dd></div>
+                <div><dt>Session or thread dimension</dt><dd>{props.event.source.hasSessionOrThread ? "Present" : "Absent"}</dd></div>
+                <div><dt>Turn dimension</dt><dd>{props.event.source.hasTurn ? "Present" : "Absent"}</dd></div>
+                <div><dt>Item or tool dimension</dt><dd>{props.event.source.hasItemOrTool ? "Present" : "Absent"}</dd></div>
+                <div><dt>Correlation dimension</dt><dd>{props.event.source.hasCorrelation ? "Present" : "Absent"}</dd></div>
+              </dl>
+              {props.event.relationships.length === 0 ? <p>No exact AgentLens relationships are recorded.</p> : (
+                <ul className="event-relationships">
+                  {props.event.relationships.map((relationship, index) => (
+                    <li key={`${relationship.type}:${relationship.eventId}:${index}`}>
+                      <code>{relationship.type}</code> · <code>{relationship.eventId}</code>
+                      <button type="button" onClick={() => props.onRelationshipJump(relationship.eventId)}>
+                        Jump to {relationship.type.replaceAll("_", " ")} event {relationship.eventId}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
-        </div>
-      )}
-      {session.selectedTab === "provider" && eligibleNative && (
-        <div
-          role="tabpanel"
-          aria-label="Redacted provider payload"
-          aria-labelledby={`${idPrefix}-tab-provider`}
-          id={`${idPrefix}-panel-provider`}
-        >
-          {native.isPending && <p>Loading redacted provider payload…</p>}
-          {native.isError && <AvailabilityNotice state={requestFailure(native.error)} />}
-          {native.data !== undefined && <NativeEvidence response={native.data} />}
-        </div>
-      )}
+          {session.selectedTab === "provider" && eligibleNative && (
+            <div
+              role="tabpanel"
+              aria-label="Redacted provider payload"
+              aria-labelledby={`${idPrefix}-tab-provider`}
+              id={`${idPrefix}-panel-provider`}
+            >
+              {native.isPending && <p>Loading redacted provider payload…</p>}
+              {native.isError && <AvailabilityNotice state={requestFailure(native.error)} />}
+              {native.data !== undefined && <NativeEvidence response={native.data} />}
+            </div>
+          )}
+          </motion.div>
+        </AnimatePresence>
+        {props.children}
+      </div>
     </section>
   );
 }

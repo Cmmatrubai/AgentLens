@@ -48,6 +48,21 @@ function run(overrides: Partial<RunDetailV1> = {}): RunDetailV1 {
 }
 
 describe("RunHeader frozen facts", () => {
+  it("groups the frozen facts in the run evidence summary region", () => {
+    render(<RunHeader run={run()} />);
+
+    const summary = screen.getByRole("region", { name: "Run evidence summary" });
+    expect(summary).toHaveTextContent("Lifecycle");
+    expect(summary).toHaveTextContent("Provider");
+    expect(summary).toHaveTextContent("Repository");
+    expect(summary).toHaveTextContent("Events");
+    expect(summary).toHaveTextContent("Recorder started");
+    expect(summary).toHaveTextContent("Recorder ended");
+    expect(summary).toHaveTextContent("Recorder duration");
+    expect(summary).toHaveTextContent("Test-bearing commands");
+    expect(summary).toHaveTextContent("Assessment");
+  });
+
   it("labels recorder timing, test-bearing commands, explicit human assessment, warnings, and contradictions", () => {
     render(<RunHeader run={run()} />);
     expect(screen.getByText("2026-08-31T16:00:00.000Z")).toHaveAttribute("datetime", "2026-08-31T16:00:00.000Z");

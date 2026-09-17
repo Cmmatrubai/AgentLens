@@ -149,7 +149,8 @@ test("ordinary HTTP and durable bytes contain no release privacy sentinels or br
   await navigateToRun(page, "fixture-completed-recovery");
   await drainAfter(completedRunCheckpoint, [
     { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery", search: "" },
-    { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery/events", search: "?limit=100" }
+    { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery/events", search: "?limit=100" },
+    { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed", search: "" }
   ]);
   const commandCheckpoint = requestLifecycle.checkpoint();
   await page.getByRole("button", { name: "Jump to first failure" }).click();
@@ -158,7 +159,6 @@ test("ordinary HTTP and durable bytes contain no release privacy sentinels or br
   await page.getByRole("tab", { name: "Redacted provider payload" }).click();
   await expect(page.getByRole("tabpanel", { name: "Redacted provider payload" })).toBeVisible();
   await drainAfter(commandCheckpoint, [
-    { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed", search: "" },
     { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed/content", search: "" },
     { method: "GET", pathname: "/api/v1/runs/fixture-completed-recovery/events/fixture-completed-recovery-command-failed/native", search: "" }
   ]);
@@ -170,7 +170,7 @@ test("ordinary HTTP and durable bytes contain no release privacy sentinels or br
     { method: "GET", pathname: "/api/v1/runs/fixture-metadata-only", search: "" },
     { method: "GET", pathname: "/api/v1/runs/fixture-metadata-only/events", search: "?limit=100" }
   ]);
-  const metadataDetailCheckpoint = requestLifecycle.checkpoint();
+  const metadataDetailCheckpoint = metadataRunCheckpoint;
   await page.locator('[role="option"][data-event-id="fixture-metadata-only-message"]').click();
   await expect(page.locator(".event-inspector").getByText("fixture-metadata-only-message", { exact: true })).toBeVisible();
   await drainAfter(metadataDetailCheckpoint, [{
@@ -186,7 +186,7 @@ test("ordinary HTTP and durable bytes contain no release privacy sentinels or br
     { method: "GET", pathname: "/api/v1/runs/fixture-strict-omitted", search: "" },
     { method: "GET", pathname: "/api/v1/runs/fixture-strict-omitted/events", search: "?limit=100" }
   ]);
-  const strictDetailCheckpoint = requestLifecycle.checkpoint();
+  const strictDetailCheckpoint = strictRunCheckpoint;
   await page.locator('[role="option"][data-event-id="fixture-strict-omitted-message"]').click();
   await expect(page.locator(".event-inspector").getByText("fixture-strict-omitted-message", { exact: true })).toBeVisible();
   await drainAfter(strictDetailCheckpoint, [{

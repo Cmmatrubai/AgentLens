@@ -175,6 +175,7 @@ test("a 1000-event run proves exact pages, stable anchors, bounded virtualizatio
   const pages: TrajectoryPageV1[] = [await capturedResponsePage(captured, initialRequest.request)];
   const requestedCursors: string[] = [];
   await expect(page.getByRole("heading", { name: "Execution trajectory" })).toBeVisible();
+  await page.getByRole("checkbox", { name: "Group routine events" }).uncheck();
   const loadLater = page.getByRole("button", { name: "Load later" });
   const viewport = page.locator(".trajectory-viewport");
   const rows = page.getByRole("option");

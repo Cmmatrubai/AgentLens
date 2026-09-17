@@ -30,10 +30,10 @@ export function TrajectoryToolbar(props: Readonly<{
   ] as const;
   return (
     <header className="trajectory-toolbar">
-      <div>
+      <div className="trajectory-toolbar__title">
         <p className="page-eyebrow">Canonical event sequence</p>
         <h2>Execution trajectory</h2>
-        <span data-complete={props.isComplete ? "true" : "false"}>{eventCount}</span>
+        <span className="trajectory-toolbar__count" data-complete={props.isComplete ? "true" : "false"}>{eventCount}</span>
       </div>
       <div className="trajectory-toolbar__legend" aria-label="Evidence provenance legend">
         <span>◇ Observed</span><span>◆ Derived</span><span>□ Git recovered</span>

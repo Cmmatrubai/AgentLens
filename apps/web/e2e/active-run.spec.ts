@@ -20,37 +20,38 @@ test("active zero-event tail polling appends without forcing history and stops a
     runId: "fixture-running",
     eventSearch: "?limit=100"
   });
-  releaseFixture.appendActive(10);
+  releaseFixture.appendActive(20);
   expect(releaseFixture.activeWalModes()).toEqual([0o600, 0o600, 0o600]);
-  await expect(page.getByText("10 immutable events loaded")).toBeVisible({ timeout: 7_500 });
+  await expect(page.getByText("20 immutable events loaded")).toBeVisible({ timeout: 7_500 });
   await appendedSnapshot;
+  await page.getByRole("checkbox", { name: "Group routine events" }).uncheck();
   const viewport = page.locator(".trajectory-viewport");
   await viewport.evaluate((element) => { element.scrollTop = 0; element.dispatchEvent(new Event("scroll")); });
   const idleHistoryCheckpoint = requestLifecycle.checkpoint();
   await requestLifecycle.waitForPollGeneration(idleHistoryCheckpoint, {
     runId: "fixture-running",
-    eventSearch: "?limit=100&afterSequence=9"
+    eventSearch: "?limit=100&afterSequence=19"
   });
   const historyAppendCheckpoint = requestLifecycle.checkpoint();
   const historyAppendSnapshot = requestLifecycle.waitForPollGeneration(historyAppendCheckpoint, {
     runId: "fixture-running",
-    eventSearch: "?limit=100&afterSequence=9"
+    eventSearch: "?limit=100&afterSequence=19"
   });
   releaseFixture.appendActive(2);
   await expect(page.getByRole("button", { name: "2 new events" })).toBeVisible({ timeout: 7_500 });
   await historyAppendSnapshot;
   await page.getByRole("button", { name: "2 new events" }).click();
   await expect(page.locator('[role="option"][tabindex="0"]')).toBeVisible();
-  await expect(page.getByText("Committed active event 12").first()).toBeVisible();
+  await expect(page.getByText("Committed active event 22").first()).toBeVisible();
   const idleTerminalCheckpoint = requestLifecycle.checkpoint();
   await requestLifecycle.waitForPollGeneration(idleTerminalCheckpoint, {
     runId: "fixture-running",
-    eventSearch: "?limit=100&afterSequence=11"
+    eventSearch: "?limit=100&afterSequence=21"
   });
   const terminalCheckpoint = requestLifecycle.checkpoint();
   const terminalSnapshot = requestLifecycle.waitForPollGeneration(terminalCheckpoint, {
     runId: "fixture-running",
-    eventSearch: "?limit=100&afterSequence=11"
+    eventSearch: "?limit=100&afterSequence=21"
   });
   releaseFixture.finishActive();
   await Promise.all([
@@ -132,7 +133,7 @@ test.describe("retryable active snapshot failure", () => {
       { timeout: 7_500 }
     );
     await expect(page.getByText("1 immutable events loaded")).toBeVisible();
-    await expect(page.getByText("Committed active event 1")).toBeVisible();
+    await expect(page.getByText("Committed active event 1", { exact: true }).first()).toBeVisible();
     await expect(page.getByLabel("Live evidence status")).toHaveCount(0);
     const terminalCheckpoint = requestLifecycle.checkpoint();
     const terminalPoll = requestLifecycle.waitForPollGeneration(terminalCheckpoint, {

@@ -110,7 +110,16 @@ export function RunListPage() {
         <span className="page-heading__privacy">Redacted local evidence</span>
       </header>
 
-      <RunFilters query={query} onApply={apply} />
+      <div className="run-ledger-frame">
+        <RunFilters query={query} onApply={apply} />
+        <div className="run-ledger__columns" aria-hidden="true">
+          <span>Run</span>
+          <span>Recorder / lifecycle</span>
+          <span>Tests</span>
+          <span>Review</span>
+          <span>Final Git</span>
+          <span>Timing</span>
+        </div>
 
       {retryingActiveSnapshot && (
         <p className="live-evidence-state live-evidence-state--degraded" aria-label="Live evidence status">
@@ -152,6 +161,7 @@ export function RunListPage() {
           </Link>
         </nav>
       )}
+      </div>
     </section>
   );
 }

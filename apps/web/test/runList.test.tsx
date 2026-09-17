@@ -244,6 +244,17 @@ describe("production run ledger", () => {
     queryClient.clear();
   });
 
+  it("renders the compact Flight Console shell without weakening landmarks", async () => {
+    renderApp(clientWithList(vi.fn(async () => page([]))));
+
+    expect(screen.getByLabelText("AgentLens Flight Console")).toBeVisible();
+    expect(screen.getByRole("navigation", { name: "Primary navigation" }))
+      .toHaveTextContent("Runs");
+    expect(screen.getByText("Flight Console")).toBeVisible();
+    expect(screen.getByText("Local only")).toBeVisible();
+    expect(document.querySelectorAll("main")).toHaveLength(1);
+  });
+
   it("renders the maximum contract-valid timestamp without crashing", async () => {
     const item = run("maximum-date", { state: "known", value: "completed" }, {
       startedAt: maximumEcmaScriptTimestamp,
@@ -458,6 +469,19 @@ describe("production run ledger", () => {
     expect(screen.queryByText("No runs recorded")).not.toBeInTheDocument();
     expect(screen.queryByText("agentlens record -- codex exec --json ...")).not.toBeInTheDocument();
     view.unmount();
+  });
+
+  it("renders one integrated evidence-ledger frame with accessible evidence columns", async () => {
+    const { container } = renderApp(clientWithList(vi.fn(async () => page([
+      run("ledger-frame", { state: "known", value: "completed" })
+    ]))));
+
+    await screen.findByText("Test-bearing commands: latest passed, previous failures 1");
+    expect(container.querySelector(".run-ledger-frame")).not.toBeNull();
+    expect(container.querySelector(".run-ledger__columns")).toHaveAttribute("aria-hidden", "true");
+    for (const label of ["Lifecycle", "Test-bearing commands", "Human review", "Git"]) {
+      expect(screen.getByText(label)).toBeVisible();
+    }
   });
 
   it("renders every row as a semantic destination with independent evidence labels", async () => {

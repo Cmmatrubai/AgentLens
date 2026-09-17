@@ -244,7 +244,7 @@ describe("production accessibility", () => {
     await expectNoAxeViolations(view.container);
   });
 
-  it("catches missing aria-expanded and reduced-motion policy on real lifecycle rows", async () => {
+  it("exposes expansion on the group control and honors reduced motion", async () => {
     vi.stubGlobal("matchMedia", vi.fn((query: string) => ({
       matches: query === "(prefers-reduced-motion: reduce)",
       media: query,
@@ -271,11 +271,12 @@ describe("production accessibility", () => {
       />
     );
     const row = screen.getByRole("option", { selected: true });
-    expect(row).toHaveAttribute("aria-expanded", "false");
+    expect(row).not.toHaveAttribute("aria-expanded");
+    expect(screen.getByRole("button", { name: "Expand lifecycle events" })).toHaveAttribute("aria-expanded", "false");
     expect(row.style.getPropertyValue("--selection-duration")).toBe("0ms");
   });
 
-  it("keeps derived recorder timing distinct from provider timing in an accessible lifecycle row", () => {
+  it("keeps derived recorder timing distinct from provider timing in an accessible lifecycle row", async () => {
     const lifecycleGroupKey = `grp_${"d".repeat(64)}`;
     render(
       <Trajectory
@@ -310,7 +311,7 @@ describe("production accessibility", () => {
     const row = screen.getByRole("option", { selected: true });
     expect(row).toHaveAccessibleName(/Recorder-observed elapsed · derived from receipt timestamps/);
     expect(row).not.toHaveAccessibleName(/Provider duration/);
-    expect(screen.getByText("Provider time unavailable · not captured")).toBeVisible();
+    await waitFor(() => expect(screen.getByText("Provider time unavailable · not captured")).toBeVisible());
   });
 
   it("keeps the real 800px inspector semantic and outside the execution listbox", async () => {
@@ -330,6 +331,8 @@ describe("production accessibility", () => {
     const listbox = screen.getByRole("listbox", { name: "Execution trajectory" });
 
     expect(inspector).toContainElement(screen.getByRole("tablist", { name: "Event inspector views" }));
+    expect(screen.getByTestId("event-inspector-body"))
+      .toHaveAttribute("data-inspector-event", "event-command");
     expect(listbox).not.toContainElement(inspector);
     expect(selected).toHaveAttribute("data-event-id", "event-command");
     await expectNoAxeViolations(view.container);

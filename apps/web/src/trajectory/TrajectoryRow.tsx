@@ -51,8 +51,12 @@ function recorderTimingLabel(timing: RecorderTiming) {
   );
 }
 
-function EventPresentation(props: Readonly<{ event: TrajectoryEventV1 }>) {
+function EventPresentation(props: Readonly<{
+  event: TrajectoryEventV1;
+  groupCount?: number;
+}>) {
   const presentation = status(props.event);
+  const summary = props.event.safeSummary || "No safe summary available.";
   return (
     <>
       <header>
@@ -60,8 +64,11 @@ function EventPresentation(props: Readonly<{ event: TrajectoryEventV1 }>) {
           ? "Recorder recovery"
           : props.event.kind}</span>
         <span className="trajectory-row__status"><span aria-hidden="true">{presentation.glyph}</span> {presentation.label}</span>
+        {props.groupCount !== undefined && (
+          <span className="trajectory-row__group-count">{props.groupCount} immutable lifecycle events</span>
+        )}
       </header>
-      <p>{props.event.safeSummary || "No safe summary available."}</p>
+      <p className="trajectory-row__summary" title={summary}>{summary}</p>
       {timeLabel(props.event)}
     </>
   );
@@ -186,7 +193,6 @@ export function TrajectoryRow(props: Readonly<{
             : "inset 0 0 0 rgb(0 0 0 / 0)"
         }}
         transition={motionPolicy.selection}
-        layout="size"
       >
         {props.row.type === "lifecycle_group" && props.row.expanded ? (
           <motion.div
@@ -211,43 +217,28 @@ export function TrajectoryRow(props: Readonly<{
               </section>
             ))}
           </motion.div>
-        ) : <EventPresentation event={activeEvent} />}
+        ) : <EventPresentation
+          event={activeEvent}
+          {...(props.row.type === "lifecycle_group" ? { groupCount: props.row.events.length } : {})}
+        />}
         {recorderTimingLabel(props.row.recorderTiming)}
-        {props.row.type === "lifecycle_group" && (
-          <div className="trajectory-row__group">
-            <span>{props.row.events.length} immutable lifecycle events</span>
-            {actions.filter(({ kind }) => kind === "select").map((action) => (
-              <span
-                aria-hidden="true"
-                className="trajectory-row__action"
-                data-row-action="select"
-                key={action.label}
-                onClick={(click) => { click.stopPropagation(); action.invoke(); }}
-              >{action.label}</span>
-            ))}
-            <span
-              aria-hidden="true"
-              className="trajectory-row__action"
-              data-row-action="expand"
-              onClick={(click) => { click.stopPropagation(); props.onExpandGroup(props.row.key); }}
-            >{props.row.expanded ? "Collapse lifecycle events" : "Expand lifecycle events"}</span>
+        {props.row.type === "lifecycle_group" && props.row.expanded && (
+          <div className="trajectory-row__group-count trajectory-row__group-count--expanded">
+            {props.row.events.length} immutable lifecycle events
           </div>
         )}
         {activeEvent.presentationClass === "unknown" && (
           <p className="trajectory-row__unsupported">Unsupported event kind · detail unavailable</p>
         )}
-        {relationships.length > 0 && (
-          <div className="trajectory-row__relationships" aria-hidden="true">
-            {actions.filter(({ kind }) => kind === "relationship").map((action) => (
-              <span
-                className="trajectory-row__action"
-                data-row-action="relationship"
-                key={action.label}
-                onClick={(click) => { click.stopPropagation(); action.invoke(); }}
-              >{action.label}</span>
-            ))}
-          </div>
-        )}
+        {actions.filter(({ kind }) => kind !== "select" || props.row.type === "lifecycle_group").map((action) => (
+          <span
+            aria-hidden="true"
+            className="trajectory-row__action sr-only"
+            data-row-action={action.kind}
+            key={`${action.kind}:${action.label}`}
+            onClick={(click) => { click.stopPropagation(); action.invoke(); }}
+          >{action.label}</span>
+        ))}
       </motion.article>
     </motion.div>
   );

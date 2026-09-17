@@ -122,13 +122,16 @@ afterEach(() => {
 describe("bounded event inspector", () => {
   it("fetches only event detail on selection and waits for an explicit content request", async () => {
     const api = client();
+    const selected = event();
     render(
       <Providers client={api}>
-        <EventInspector event={event()} runId="run-inspector" onRelationshipJump={vi.fn()} />
+        <EventInspector event={selected} runId="run-inspector" onRelationshipJump={vi.fn()} />
       </Providers>
     );
 
     await screen.findByText("Command lifecycle");
+    expect(screen.getByTestId("event-inspector-body"))
+      .toHaveAttribute("data-inspector-event", selected.eventId);
     expect(api.getEvent).toHaveBeenCalledOnce();
     expect(api.getEventContent).not.toHaveBeenCalled();
     expect(api.getEventNative).not.toHaveBeenCalled();
@@ -187,7 +190,7 @@ describe("bounded event inspector", () => {
     await screen.findByText("Command lifecycle");
     await userEvent.click(screen.getByRole("tab", { name: "Relationships" }));
 
-    const panel = screen.getByRole("tabpanel", { name: "Relationships" });
+    const panel = await screen.findByRole("tabpanel", { name: "Relationships" });
     expect(within(panel).getByText(source.opaqueRef)).toBeInTheDocument();
     for (const [type, id] of [
       ["derived from", "event-source"],
@@ -616,7 +619,7 @@ describe("bounded event inspector", () => {
       </Providers>
     );
     expect(screen.queryByRole("option", { selected: true })?.getAttribute("data-event-id") ?? null)
-      .toBe(initialNarrow ? selectedEventId : null);
+      .toBe(selectedEventId);
     await userEvent.click(await screen.findByRole("button", { name: "Open tracked final diff" }));
     const expand = await screen.findByRole("button", { name: "Expand diff for src/a.ts" });
     await userEvent.click(expand);

@@ -123,12 +123,13 @@ export function RunWorkspace(props: Readonly<{
         onRelationshipJump={props.onSelect}
         session={inspectorSession}
         onSessionChange={setInspectorSession}
-      />
-      <GitEvidenceSummary
-        runId={props.runId}
-        {...(props.run === undefined ? {} : { run: props.run })}
-        onOpenDiff={() => setDeepEvidenceOpen(true)}
-      />
+      >
+        <GitEvidenceSummary
+          runId={props.runId}
+          {...(props.run === undefined ? {} : { run: props.run })}
+          onOpenDiff={() => setDeepEvidenceOpen(true)}
+        />
+      </EventInspector>
     </>
   );
   const inlineInspector = narrow && selected !== null ? (
@@ -138,7 +139,6 @@ export function RunWorkspace(props: Readonly<{
       data-inline-inspector-for={selected.eventId}
       ref={restoreFocusWithin}
       initial={false}
-      layout="position"
       transition={motionPolicy.inspector}
       data-motion={motionPolicy.reduced ? "reduced" : "standard"}
       onClick={(event) => event.stopPropagation()}
@@ -159,6 +159,9 @@ export function RunWorkspace(props: Readonly<{
         onRelationshipJump={props.onSelect}
         onEscapeDeepEvidence={() => setDeepEvidenceOpen(false)}
         inlineEvidence={inlineInspector}
+        onFocusInspector={() => {
+          document.querySelector<HTMLElement>(".event-inspector [role='tab'], .event-inspector button")?.focus();
+        }}
         onExpandGroup={(key) => setExpandedGroupKeys((current) => {
           const next = new Set(current);
           next.has(key) ? next.delete(key) : next.add(key);
@@ -170,8 +173,6 @@ export function RunWorkspace(props: Readonly<{
         className="trajectory-inspector"
         aria-label="Selected evidence inspector"
         initial={false}
-        layout="position"
-        transition={motionPolicy.inspector}
         data-motion={motionPolicy.reduced ? "reduced" : "standard"}
       >
         {props.selectionState === "resolving" && <p>Resolving selected event…</p>}
@@ -179,7 +180,7 @@ export function RunWorkspace(props: Readonly<{
           <p role="alert">The selected event is unavailable in this run.</p>
         )}
         {props.selectionState === "idle" && selected === null && (
-          <p>Select a trajectory row to inspect its bounded evidence.</p>
+          <p>Select a trajectory node to inspect its bounded evidence.</p>
         )}
         {inspector}
       </motion.aside>}

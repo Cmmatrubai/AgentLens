@@ -8,6 +8,8 @@ export function useEventDetailQuery(runId: string, eventId: string, enabled = tr
   return useQuery({
     queryKey: queryKeys.eventDetail(runId, eventId),
     queryFn: ({ signal }) => client.getEvent(runId, eventId, signal),
+    // Event metadata is immutable; moving the inspector must reuse its evidence.
+    staleTime: Number.POSITIVE_INFINITY,
     enabled
   });
 }
