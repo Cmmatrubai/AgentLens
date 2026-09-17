@@ -24,6 +24,20 @@ export function liveDuration(ms: number) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 const messages: Record<string, string> = {
+  dependency_setup_unsupported:
+    "Automatic setup is not supported for this project. Review Project setup before starting.",
+  dependency_inputs_changed:
+    "Dependency files changed after project selection. Choose the project again to review the current setup.",
+  dependency_tools_unavailable:
+    "Install Node and pnpm 11, then retry. AgentLens has not started either agent.",
+  dependency_version_mismatch:
+    "The installed pnpm version does not match the project, or the tools changed between copies. No agents were started.",
+  dependency_platform_unavailable:
+    "Automatic dependency setup currently requires macOS.",
+  dependency_install_failed:
+    "Dependency setup did not finish on both copies. Open the setup output below. Neither agent started.",
+  dependency_cancelled:
+    "Setup was stopped. Neither agent started; the working copies and setup output remain saved.",
   workspace_storage_failed:
     "AgentLens could not save workspace updates. The agents were asked to stop. Check available disk space and folder permissions; existing evidence has been kept.",
   cleanup_unconfirmed:

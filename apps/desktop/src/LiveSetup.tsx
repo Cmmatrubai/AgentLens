@@ -25,6 +25,7 @@ export function LiveSetup({ onStarted }: { onStarted: (id: string) => void }) {
   );
   const { task, models, timeoutMinutes: minutes } = draft;
   const [acknowledged, setAcknowledged] = useState(false);
+  const [prepareDependencies, setPrepareDependencies] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [prerequisites, setPrerequisites] = useState<string | null>(null);
@@ -87,6 +88,7 @@ export function LiveSetup({ onStarted }: { onStarted: (id: string) => void }) {
       if (!r.ok) setError(r.error);
       else if (r.project) {
         setProject(r.project);
+        setPrepareDependencies(r.project.dependencies?.status === "supported");
         setAcknowledged(false);
       }
     } catch {
@@ -124,6 +126,7 @@ export function LiveSetup({ onStarted }: { onStarted: (id: string) => void }) {
             models,
             timeoutMinutes: minutes,
             acknowledged,
+            prepareDependencies,
           }),
         draftStorage,
       );
@@ -234,6 +237,49 @@ export function LiveSetup({ onStarted }: { onStarted: (id: string) => void }) {
           )}
           {project?.submodules && (
             <p className="first-use-error">{liveError("project_submodules")}</p>
+          )}
+          {project && (
+            <div className="live-dependency-choice">
+              <strong>Project setup</strong>
+              {project.dependencies?.status === "supported" ? (
+                <>
+                  <label className="live-launch-consent">
+                    <input
+                      type="checkbox"
+                      checked={prepareDependencies}
+                      onChange={(e) => {
+                        setPrepareDependencies(e.target.checked);
+                        setAcknowledged(false);
+                      }}
+                    />
+                    <span>
+                      Install locked dependencies in both working copies
+                    </span>
+                  </label>
+                  <p className="live-field-hint">
+                    Uses{" "}
+                    {project.dependencies.requestedVersion
+                      ? `pnpm ${project.dependencies.requestedVersion}`
+                      : "your installed pnpm 11"}{" "}
+                    and Node. Downloads packages with install scripts disabled.
+                    Neither agent starts unless both installs succeed. Setup has
+                    its own five-minute limit per copy.
+                  </p>
+                  {!prepareDependencies && (
+                    <p className="live-field-hint">
+                      Source-only comparison: installed dependencies are not
+                      copied or prepared.
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="live-field-hint">
+                  {project.dependencies?.status === "none"
+                    ? "No committed Node package manifest was found. This comparison will start from source files."
+                    : "Automatic setup is not available for this project yet. It currently supports pnpm 11 lockfiles without custom npm configuration, hooks or external file dependencies. This comparison will start from source files."}
+                </p>
+              )}
+            </div>
           )}
           <div className="live-field-heading">
             <span className="live-step">2</span>

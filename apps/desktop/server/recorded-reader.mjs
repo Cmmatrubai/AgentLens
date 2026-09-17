@@ -1,3 +1,4 @@
+import dataRoot from "./data-root.cjs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile } from "node:fs/promises";
@@ -17,7 +18,7 @@ export function readRecordedRun() {
 async function read() {
   try {
     const c = JSON.parse(
-      await readFile(join(root, ".local/connection.json"), "utf8"),
+      await readFile(join(dataRoot.getDataRoot(), "connection.json"), "utf8"),
     );
     if (
       !isAbsolute(c.repository) ||

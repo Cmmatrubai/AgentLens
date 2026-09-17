@@ -5,6 +5,11 @@ import { join, basename } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { privateRead, privateWrite } from "../insights/private-files.mjs";
 import { createCheckService } from "./check-service.mjs";
+import {
+  inspectDependencies,
+  prepareDependencies,
+  dependencyTools,
+} from "./dependencies.mjs";
 
 const exec = promisify(execFile);
 const terminal = new Set([
@@ -25,8 +30,48 @@ const boundedText = (value, limit = 4000) =>
 const count = (value) => Number.isSafeInteger(value) && value >= 0;
 const optionalTime = (value) =>
   value === undefined || (Number.isFinite(value) && value >= 0);
+function validPreparation(p) {
+  return (
+    p === undefined ||
+    (p &&
+      typeof p === "object" &&
+      [
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "unavailable",
+        "interrupted",
+      ].includes(p.state) &&
+      Number.isFinite(p.startedAt) &&
+      optionalTime(p.endedAt) &&
+      optionalTime(p.durationMs) &&
+      boundedText(p.output, 24000) &&
+      (!p.outputSha256 ||
+        (typeof p.outputSha256 === "string" &&
+          p.outputSha256 === sha(p.output))) &&
+      ["command", "nodeVersion", "pnpmVersion", "error"].every(
+        (k) => p[k] === undefined || boundedText(p[k]),
+      ))
+  );
+}
 function validSavedDetails(job) {
   return (
+    (job.dependencyPlan === undefined ||
+      (job.dependencyPlan?.status === "supported" &&
+        job.dependencyPlan.manager === "pnpm" &&
+        typeof job.dependencyPlan.fingerprint === "string" &&
+        /^[a-f0-9]{64}$/.test(job.dependencyPlan.fingerprint) &&
+        (job.dependencyPlan.requestedVersion === null ||
+          (typeof job.dependencyPlan.requestedVersion === "string" &&
+            /^11\.\d+\.\d+$/.test(job.dependencyPlan.requestedVersion))) &&
+        count(job.dependencyPlan.inputCount) &&
+        job.dependencyPlan.inputCount <= 1000)) &&
+    (job.dependencyTools === undefined ||
+      (job.dependencyTools &&
+        boundedText(job.dependencyTools.nodeVersion, 80) &&
+        boundedText(job.dependencyTools.pnpmVersion, 80))) &&
     boundedText(job.task, 20000) &&
     boundedText(job.project.name) &&
     Number.isFinite(job.timeoutMs) &&
@@ -46,6 +91,7 @@ function validSavedDetails(job) {
         optionalTime(a.startedAt) &&
         optionalTime(a.endedAt) &&
         optionalTime(a.lastActivityAt) &&
+        validPreparation(a.preparation) &&
         (a.stopReason === undefined ||
           ["stopped", "timed_out", "failed"].includes(a.stopReason)) &&
         ["runId", "recordedStatus", "error", "recordingPath"].every(
@@ -154,6 +200,8 @@ export function createLiveController({
   launchAttempt,
   preflight,
   write = privateWrite,
+  prepareProject = prepareDependencies,
+  inspectTools = dependencyTools,
 }) {
   const projects = new Map(),
     jobs = new Map(),
@@ -272,6 +320,11 @@ export function createLiveController({
               }
               if (a.state === "running" || a.state === "stopping")
                 job.cleanupUnconfirmed = true;
+              if (a.preparation?.state === "running") {
+                job.cleanupUnconfirmed = true;
+                a.preparation.state = "interrupted";
+                a.preparation.endedAt = job.endedAt;
+              }
               a.state = "interrupted";
               a.endedAt = job.endedAt;
               a.error = "app_interrupted";
@@ -454,6 +507,8 @@ export function createLiveController({
   }
 
   async function run(job) {
+    const preparationStop = new AbortController();
+    for (const a of job.attempts) handles.set(a.key, preparationStop);
     try {
       // Prepare both before either agent starts. Retain worktrees on every exit.
       for (const a of job.attempts) {
@@ -467,19 +522,81 @@ export function createLiveController({
         if ((await git(a.workspace, ["rev-parse", "HEAD"])) !== job.baseCommit)
           throw Error("worktree_mismatch");
       }
+      if (job.dependencyPlan) {
+        for (const a of job.attempts) {
+          if (
+            preparationStop.signal.aborted ||
+            job.attempts.some((a) => a.stopReason)
+          )
+            throw Error("dependency_cancelled");
+          a.preparation = {
+            state: "running",
+            startedAt: Date.now(),
+            output: "",
+            ...job.dependencyTools,
+          };
+          await persist(job);
+          let result;
+          try {
+            result = await prepareProject({
+              workspace: a.workspace,
+              root: join(directory(job.id), "preparation", a.key),
+              plan: job.dependencyPlan,
+              tools: job.dependencyTools,
+              signal: preparationStop.signal,
+            });
+          } catch (error) {
+            a.preparation.state = preparationStop.signal.aborted
+              ? "cancelled"
+              : "failed";
+            a.preparation.error = [
+              "dependency_inputs_changed",
+              "dependency_version_mismatch",
+              "dependency_tools_unavailable",
+              "dependency_platform_unavailable",
+            ].includes(error.message)
+              ? error.message
+              : "dependency_install_failed";
+            a.preparation.endedAt = Date.now();
+            throw error;
+          }
+          a.preparation = { ...a.preparation, ...result, endedAt: Date.now() };
+          if (result.cleanupConfirmed !== true) job.cleanupUnconfirmed = true;
+          await persist(job);
+          if (
+            result.state !== "completed" ||
+            result.exitCode !== 0 ||
+            result.cleanupConfirmed !== true
+          )
+            throw Error("dependency_install_failed");
+        }
+      }
+      for (const a of job.attempts) handles.delete(a.key);
+      if (
+        job.dependencyPlan &&
+        (preparationStop.signal.aborted ||
+          job.attempts.some((a) => a.stopReason))
+      )
+        throw Error("dependency_cancelled");
       job.state = "running";
       await persist(job);
       await Promise.all(job.attempts.map((a) => runSide(job, a)));
       job.state = "finished";
-    } catch {
+    } catch (error) {
+      preparationStop.abort();
       job.state = "failed";
-      job.error = "workspace_setup_failed";
+      job.error = job.dependencyPlan
+        ? job.attempts.some((a) => a.stopReason)
+          ? "dependency_cancelled"
+          : "dependency_install_failed"
+        : "workspace_setup_failed";
       for (const a of job.attempts)
         if (!terminal.has(a.state)) {
-          a.state = "failed";
+          a.state = a.stopReason ?? "failed";
           a.error = job.error;
         }
     } finally {
+      for (const a of job.attempts) handles.delete(a.key);
       job.endedAt = Date.now();
       try {
         await persist(job);
@@ -497,7 +614,12 @@ export function createLiveController({
     acknowledgeChecks: (id, confirmed) => checks.acknowledge(id, confirmed),
     async chooseProject(path) {
       await init();
-      const project = { ...(await inspectProject(path)), id: randomUUID() };
+      const inspected = await inspectProject(path);
+      const project = {
+        ...inspected,
+        dependencies: await inspectDependencies(inspected.path),
+        id: randomUUID(),
+      };
       projects.set(project.id, project);
       return copy(project);
     },
@@ -532,6 +654,20 @@ export function createLiveController({
           project.commit !== chosen.commit
         )
           throw Error("project_changed");
+        if (
+          input.prepareDependencies !== undefined &&
+          typeof input.prepareDependencies !== "boolean"
+        )
+          throw Error("invalid_launch");
+        let dependencyPlan, tools;
+        if (input.prepareDependencies) {
+          dependencyPlan = await inspectDependencies(project.path);
+          if (dependencyPlan.status !== "supported")
+            throw Error("dependency_setup_unsupported");
+          if (dependencyPlan.fingerprint !== chosen.dependencies?.fingerprint)
+            throw Error("dependency_inputs_changed");
+          tools = await inspectTools(dependencyPlan);
+        }
         await this.prerequisites();
         if (closing) throw Error("comparison_closing");
         const id = randomUUID();
@@ -544,6 +680,7 @@ export function createLiveController({
           baseCommit: project.commit,
           startedAt: Date.now(),
           timeoutMs: input.timeoutMinutes * 60000,
+          ...(dependencyPlan ? { dependencyPlan, dependencyTools: tools } : {}),
           attempts: input.models.map((m, i) => ({
             key: i === 0 ? "a" : "b",
             model: m.model,
@@ -657,6 +794,9 @@ export function createLiveController({
           controlNotes: [
             "Recorded by AgentLens in separate worktrees at the same committed revision.",
             "Same task, sandbox, and deadline; model and reasoning settings may differ.",
+            a.preparation?.state === "completed"
+              ? `Dependencies installed before recording with Node ${a.preparation.nodeVersion}, pnpm ${a.preparation.pnpmVersion}; frozen lockfile, install scripts disabled. Setup duration: ${a.preparation.durationMs} ms. Dependency input fingerprint: ${job.dependencyPlan.fingerprint}.`
+              : "Dependency installation was not performed by AgentLens before this recording.",
           ],
           coverageLimits: [
             "No independent evaluator was run. Agent-reported success and command exit codes do not prove correctness.",

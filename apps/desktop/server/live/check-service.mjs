@@ -3,6 +3,11 @@ import { join } from "node:path";
 import { mkdir, readdir } from "node:fs/promises";
 import { privateRead, privateWrite } from "../insights/private-files.mjs";
 import { snapshotAttempt } from "./check-snapshot.mjs";
+import {
+  inspectDependencies,
+  dependencyTools,
+  prepareDependencies,
+} from "./dependencies.mjs";
 import { runCheckCommand } from "./check-process.mjs";
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 const uuid = (value) =>
@@ -21,6 +26,8 @@ export function validateCheckInput(input) {
   if (
     !input ||
     input.acknowledged !== true ||
+    (input.prepareDependencies !== undefined &&
+      typeof input.prepareDependencies !== "boolean") ||
     typeof input.title !== "string" ||
     !input.title.trim() ||
     input.title.length > 120 ||
@@ -34,14 +41,61 @@ export function validateCheckInput(input) {
   )
     throw Error("invalid_check_request");
   return {
+    prepareDependencies: input.prepareDependencies === true,
     title: input.title.trim(),
     command: input.command.trim(),
     timeoutSeconds: input.timeoutSeconds,
   };
 }
+function validPreparation(p) {
+  return (
+    p === undefined ||
+    (p &&
+      [
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "unavailable",
+        "interrupted",
+      ].includes(p.state) &&
+      Number.isFinite(p.startedAt) &&
+      typeof p.output === "string" &&
+      p.output.length < 24000 &&
+      (p.state !== "completed" ||
+        (p.outputSha256 === hash(p.output) &&
+          typeof p.fingerprint === "string" &&
+          /^[a-f0-9]{64}$/.test(p.fingerprint) &&
+          typeof p.command === "string" &&
+          typeof p.nodeVersion === "string" &&
+          typeof p.pnpmVersion === "string" &&
+          Number.isFinite(p.endedAt) &&
+          p.exitCode === 0 &&
+          p.cleanupConfirmed === true)) &&
+      (p.outputSha256 === undefined || p.outputSha256 === hash(p.output)) &&
+      [
+        "command",
+        "error",
+        "nodeVersion",
+        "pnpmVersion",
+        "reason",
+        "fingerprint",
+      ].every(
+        (k) =>
+          p[k] === undefined ||
+          (typeof p[k] === "string" && p[k].length <= 4000),
+      ) &&
+      (p.durationMs === undefined ||
+        (Number.isFinite(p.durationMs) && p.durationMs >= 0)) &&
+      (p.endedAt === undefined || Number.isFinite(p.endedAt)))
+  );
+}
 function validState(s) {
   return (
     s?.schemaVersion === 1 &&
+    (s.prepareDependencies === undefined ||
+      typeof s.prepareDependencies === "boolean") &&
     uuid(s.id) &&
     uuid(s.jobId) &&
     ["running", "finished", "interrupted"].includes(s.state) &&
@@ -65,6 +119,12 @@ function validState(s) {
         a.key === (i === 0 ? "a" : "b") &&
         typeof a.runId === "string" &&
         phases.includes(a.state) &&
+        validPreparation(a.preparation) &&
+        (a.outcome === "unknown" ||
+          !s.prepareDependencies ||
+          (a.preparation?.state === "completed" &&
+            a.preparation.exitCode === 0 &&
+            a.preparation.cleanupConfirmed === true)) &&
         ["pass", "fail", "unknown"].includes(a.outcome) &&
         typeof a.output === "string" &&
         a.output.length < 24000 &&
@@ -83,6 +143,8 @@ export function createCheckService({
   getContext,
   write = privateWrite,
   runCommand = runCheckCommand,
+  prepareProject = prepareDependencies,
+  inspectTools = dependencyTools,
 }) {
   let initialized,
     root,
@@ -123,6 +185,8 @@ export function createCheckService({
           s.endedAt = Date.now();
           for (const a of s.attempts)
             if (["queued", "preparing", "running"].includes(a.state)) {
+              if (a.preparation?.state === "running")
+                a.preparation.state = "interrupted";
               a.state = "interrupted";
               a.outcome = "unknown";
             }
@@ -141,6 +205,7 @@ export function createCheckService({
   };
   async function execute(state, context, signal) {
     const runRoot = join(root, state.jobId, "check-runs", state.id);
+    const snapshots = new Map();
     try {
       await mkdir(runRoot, { recursive: true, mode: 0o700 });
       // Freeze both before either check can run. Originals are never the cwd.
@@ -154,6 +219,7 @@ export function createCheckService({
             join(runRoot, attempt.key),
             signal,
           );
+          snapshots.set(attempt.key, snapshot);
           attempt.snapshotHash = snapshot.hash;
           await write(runRoot, `snapshot-${attempt.key}.json`, snapshot);
           attempt.state = "queued";
@@ -166,10 +232,97 @@ export function createCheckService({
         }
         await save(state);
       }
+      if (state.prepareDependencies && !signal.aborted) {
+        // Setup is a barrier: no command runs against a partially prepared pair.
+        let expectedTools;
+        let ready = state.attempts.every(
+          (a) => a.snapshotHash && a.state === "queued",
+        );
+        for (const attempt of state.attempts) {
+          if (!ready || signal.aborted) break;
+          attempt.state = "preparing";
+          attempt.preparation = {
+            state: "running",
+            startedAt: Date.now(),
+            output: "",
+          };
+          await save(state);
+          try {
+            const workspace = join(runRoot, attempt.key);
+            const snapshotPaths = snapshots
+              .get(attempt.key)
+              .files.filter((f) => f[1] !== "deleted")
+              .map((f) => f[0]);
+            const plan = await inspectDependencies(workspace, snapshotPaths);
+            if (plan.status !== "supported") {
+              attempt.preparation.reason = plan.reason;
+              throw Error("check_dependencies_unsupported");
+            }
+            const tools = await inspectTools(plan);
+            if (
+              expectedTools &&
+              JSON.stringify(tools) !== JSON.stringify(expectedTools)
+            )
+              throw Error("dependency_version_mismatch");
+            expectedTools = tools;
+            Object.assign(
+              attempt.preparation,
+              { fingerprint: plan.fingerprint },
+              tools,
+            );
+            const result = await prepareProject({
+              workspace,
+              root: join(runRoot, "setup", attempt.key),
+              plan,
+              tools,
+              snapshotPaths,
+              signal,
+            });
+            Object.assign(attempt.preparation, result);
+            if (result.cleanupConfirmed !== true)
+              state.cleanupUnconfirmed = true;
+            ready =
+              result.state === "completed" &&
+              result.exitCode === 0 &&
+              result.cleanupConfirmed === true;
+            if (!ready) attempt.error = "check_dependency_setup_failed";
+          } catch (e) {
+            const known = [
+              "check_dependencies_unsupported",
+              "dependency_tools_unavailable",
+              "dependency_version_mismatch",
+              "dependency_platform_unavailable",
+              "dependency_inputs_changed",
+              "dependency_cancelled",
+            ];
+            attempt.preparation.state = signal.aborted ? "cancelled" : "failed";
+            attempt.preparation.error = known.includes(e.message)
+              ? e.message
+              : "check_dependency_setup_failed";
+            attempt.error = attempt.preparation.error;
+            ready = false;
+          }
+          attempt.preparation.endedAt = Date.now();
+          attempt.state = ready
+            ? "queued"
+            : signal.aborted
+              ? "cancelled"
+              : "unavailable";
+          await save(state);
+        }
+        if (!ready || signal.aborted) {
+          for (const a of state.attempts)
+            if (a.state === "queued") {
+              a.state = signal.aborted ? "cancelled" : "unavailable";
+              a.error = "check_dependency_pair_not_ready";
+            }
+        }
+      }
       for (const attempt of state.attempts) {
         if (signal.aborted) break;
         if (!attempt.snapshotHash || attempt.state !== "queued") continue;
         attempt.state = "running";
+        attempt.commandStartedAt = Date.now();
         await save(state);
         try {
           const result = await runCommand({
@@ -377,6 +530,8 @@ export function createCheckService({
             command: s.command,
             timeout: s.timeoutSeconds,
             id: s.id,
+            prepareDependencies: s.prepareDependencies === true,
+            preparations: s.attempts.map((a) => a.preparation ?? null),
           }),
         ),
         checks: [{ id: checkId, title }],
@@ -405,6 +560,11 @@ export function createCheckService({
             unknown: r.outcome === "unknown" ? 1 : 0,
             controlNotes: [
               ...a.controlNotes,
+              ...(r.preparation
+                ? [
+                    `Dependency setup: ${r.preparation.state}; Node ${r.preparation.nodeVersion ?? "unavailable"}; pnpm ${r.preparation.pnpmVersion ?? "unavailable"}; input fingerprint ${r.preparation.fingerprint ?? "unavailable"}. Each attempt uses its own resulting lockfile; dependency inputs may differ.`,
+                  ]
+                : []),
               "User-defined command executed separately from the agents in fresh copies; no network access and writes restricted to each evaluator copy.",
             ],
             coverageLimits: [

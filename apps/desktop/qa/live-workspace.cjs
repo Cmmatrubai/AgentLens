@@ -31,6 +31,48 @@ const prepare = async () => {
     git("config", "user.email", "fixture@example.invalid");
     git("config", "user.name", "Fixture");
     await writeFile(join(project, "task.txt"), "Initial task content\n");
+    if (process.env.AGENTLENS_LIVE_QA_DEPENDENCIES === "1") {
+      await mkdir(join(project, "packages/helper"), { recursive: true });
+      await writeFile(
+        join(project, "package.json"),
+        JSON.stringify({
+          name: "agentlens-setup-qa",
+          version: "1.0.0",
+          private: true,
+          dependencies: { "setup-helper": "workspace:*" },
+          scripts: { postinstall: "echo forbidden > unexpected-script" },
+        }),
+      );
+      await writeFile(
+        join(project, "packages/helper/package.json"),
+        JSON.stringify({
+          name: "setup-helper",
+          version: "1.0.0",
+          main: "index.cjs",
+        }),
+      );
+      await writeFile(
+        join(project, "packages/helper/index.cjs"),
+        "module.exports = 42;",
+      );
+      await writeFile(
+        join(project, "pnpm-workspace.yaml"),
+        "packages:\n  - packages/*\n",
+      );
+      await writeFile(join(project, ".gitignore"), "node_modules/\n");
+      execFileSync(
+        "pnpm",
+        [
+          "install",
+          "--lockfile-only",
+          "--offline",
+          "--ignore-scripts",
+          "--ignore-pnpmfile",
+          "--config.manage-package-manager-versions=false",
+        ],
+        { cwd: project, stdio: "pipe" },
+      );
+    }
     git("add", ".");
     git("commit", "-qm", "initial");
   }
@@ -70,7 +112,10 @@ app.whenReady().then(async () => {
           HOME: temporary,
           CODEX_HOME: join(temporary, "codex"),
           AGENTLENS_FIXTURE_DELAY_MS: "1000",
-          AGENTLENS_FIXTURE_STEPS: "35",
+          AGENTLENS_FIXTURE_STEPS:
+            process.env.AGENTLENS_LIVE_QA_DEPENDENCIES === "1" ? "5" : "35",
+          AGENTLENS_FIXTURE_REQUIRE_DEP:
+            process.env.AGENTLENS_LIVE_QA_DEPENDENCIES === "1" ? "1" : "",
         },
       }),
   });

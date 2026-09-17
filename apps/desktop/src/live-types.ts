@@ -14,6 +14,14 @@ export type LiveProject = {
   commit: string;
   dirty: boolean;
   submodules: boolean;
+  dependencies?: {
+    status: "none" | "supported" | "unsupported";
+    reason?: string;
+    manager?: string;
+    requestedVersion?: string | null;
+    fingerprint?: string;
+    inputCount?: number;
+  };
 };
 export type LiveEvent = {
   id: string;
@@ -43,6 +51,20 @@ export type LiveAttempt = {
   eventCount: number;
   omittedEvents: number;
   events: LiveEvent[];
+  preparation?: {
+    state: string;
+    startedAt: number;
+    endedAt?: number;
+    durationMs?: number;
+    output: string;
+    outputTruncated?: boolean;
+    outputSha256?: string;
+    exitCode?: number | null;
+    command?: string;
+    nodeVersion?: string;
+    pnpmVersion?: string;
+    error?: string;
+  };
 };
 export type LiveJob = {
   schemaVersion: 1;
@@ -59,6 +81,8 @@ export type LiveJob = {
   persistenceError?: boolean;
   cleanupUnconfirmed?: boolean;
   cleanupAcknowledgedAt?: number;
+  dependencyPlan?: LiveProject["dependencies"];
+  dependencyTools?: { nodeVersion: string; pnpmVersion: string };
 };
 export type LiveSnapshot = {
   job: LiveJob | null;
@@ -76,8 +100,12 @@ export type LiveInput = {
   models: { model: string; effort: string }[];
   timeoutMinutes: number;
   acknowledged: boolean;
+  prepareDependencies?: boolean;
 };
 export type LiveAPI = {
+  readDesktopEnvironment?: () => Promise<
+    LiveResult<{ environment: DesktopEnvironment }>
+  >;
   liveChecksRead: (
     id: string,
   ) => Promise<LiveResult<{ evaluation: CheckEvaluation | null }>>;
@@ -113,12 +141,14 @@ export type LiveAPI = {
 };
 
 export type CheckInput = {
+  prepareDependencies?: boolean;
   title: string;
   command: string;
   timeoutSeconds: number;
   acknowledged: boolean;
 };
 export type CheckEvaluation = {
+  prepareDependencies?: boolean;
   id: string;
   jobId: string;
   title: string;
@@ -133,6 +163,11 @@ export type CheckEvaluation = {
   attempts: {
     key: "a" | "b";
     runId: string;
+    preparation?: LiveAttempt["preparation"] & {
+      reason?: string;
+      fingerprint?: string;
+    };
+    commandStartedAt?: number;
     state:
       | "queued"
       | "preparing"
@@ -163,4 +198,18 @@ export type LiveModelCatalog = {
   source: "codex-cache";
   fetchedAt: string | null;
   models: LiveModelOption[];
+};
+
+export type DesktopEnvironment = {
+  storage: { root: string; mode: string };
+  packaged: boolean;
+  platform: string;
+  tools: {
+    id: string;
+    label: string;
+    purpose: string;
+    status: "detected" | "unsupported" | "unavailable";
+    version: string | null;
+    help: string;
+  }[];
 };

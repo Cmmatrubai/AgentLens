@@ -8,6 +8,19 @@ const {
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 require("./identity.cjs").applyDesktopIdentity(app);
+require("./environment-ipc.cjs").installEnvironmentIPC({
+  ipcMain,
+  read: async () => {
+    const { readDesktopEnvironment } = await import(
+      pathToFileURL(path.join(__dirname, "../server/desktop-environment.mjs"))
+        .href
+    );
+    return readDesktopEnvironment({
+      storage: require("../server/data-root.cjs").getStorageInfo(),
+      packaged: app.isPackaged,
+    });
+  },
+});
 let reader;
 let comparisonReader;
 const hasInstanceLock = app.requestSingleInstanceLock();
@@ -26,15 +39,28 @@ require("./insight-ipc.cjs").installInsightIPC({
   dialog,
   BrowserWindow,
 });
-const live = require("./live-ipc.cjs").installLiveIPC({ ipcMain, dialog, BrowserWindow });
+const live = require("./live-ipc.cjs").installLiveIPC({
+  ipcMain,
+  dialog,
+  BrowserWindow,
+});
 let quitReady = false;
 app.on("before-quit", (event) => {
   if (quitReady) return;
   event.preventDefault();
-  live.shutdown().then(() => { quitReady = true; app.quit(); }).catch(() => {
-    // Keep the app open when recorder finalization cannot be confirmed.
-    dialog.showErrorBox("Recording is still closing", "AgentLens could not confirm that recording has finished. Keep the app open and check the live workspace before quitting again.");
-  });
+  live
+    .shutdown()
+    .then(() => {
+      quitReady = true;
+      app.quit();
+    })
+    .catch(() => {
+      // Keep the app open when recorder finalization cannot be confirmed.
+      dialog.showErrorBox(
+        "Recording is still closing",
+        "AgentLens could not confirm that recording has finished. Keep the app open and check the live workspace before quitting again.",
+      );
+    });
 });
 ipcMain.handle("agentlens:read-comparison", async (event) => {
   const frame = event.senderFrame;
@@ -91,8 +117,26 @@ function createWindow() {
     query: { desktop: "1" },
   });
 }
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!hasInstanceLock) return;
+  try {
+    const { resolveDesktopStorage } = await import(
+      pathToFileURL(path.join(__dirname, "../server/desktop-storage.mjs")).href
+    );
+    const storage = await resolveDesktopStorage({
+      userData: app.getPath("userData"),
+      legacyRoot: path.join(__dirname, "../.local"),
+    });
+    require("../server/data-root.cjs").configureDataRoot(storage);
+  } catch {
+    dialog.showErrorBox(
+      "AgentLens storage needs attention",
+      "The saved data location is missing, unreadable, or cannot be written. AgentLens has preserved the existing location setting and has not created replacement recordings. Restore access to that folder and reopen the app.",
+    );
+    quitReady = true;
+    app.quit();
+    return;
+  }
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

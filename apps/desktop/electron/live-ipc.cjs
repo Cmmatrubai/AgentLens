@@ -2,6 +2,13 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { trustedFrame } = require("./insight-ipc.cjs");
 const errors = new Set([
+  "dependency_setup_unsupported",
+  "dependency_inputs_changed",
+  "dependency_tools_unavailable",
+  "dependency_version_mismatch",
+  "dependency_platform_unavailable",
+  "dependency_install_failed",
+  "dependency_cancelled",
   "invalid_check_request",
   "check_busy",
   "check_not_running",
@@ -71,7 +78,10 @@ function installLiveIPC({
           .href
       );
       return createLiveController({
-        root: path.join(__dirname, "../.local/live-workspace"),
+        root: path.join(
+          require("../server/data-root.cjs").getDataRoot(),
+          "live-workspace",
+        ),
       });
     })());
   const handle = (name, action) =>

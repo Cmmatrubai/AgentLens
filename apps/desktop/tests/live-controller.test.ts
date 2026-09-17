@@ -17,7 +17,7 @@ import { privateWrite } from "../server/insights/private-files.mjs";
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-async function setup(t: any, launchAttempt: any) {
+async function setup(t: any, launchAttempt: any, overrides: any = {}) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), "agentlens-live-")));
   const repo = join(dir, "repo");
   git(dir, "init", "-q", repo);
@@ -30,6 +30,7 @@ async function setup(t: any, launchAttempt: any) {
     root: join(dir, "saved"),
     preflight: async () => ({ version: "fixture" }),
     launchAttempt,
+    ...overrides,
   };
   const service = createLiveController(options);
   t.after(async () => {
@@ -75,6 +76,179 @@ const fakeRun = (input: any) => ({
   eventCount: 0,
 });
 
+async function enablePreparation(f: any) {
+  await writeFile(
+    join(f.repo, "package.json"),
+    '{"name":"fixture","version":"1.0.0"}',
+  );
+  await writeFile(join(f.repo, "pnpm-lock.yaml"), "lockfileVersion: 9.0\n");
+  await writeFile(join(f.repo, ".gitignore"), "node_modules/\n");
+  git(f.repo, "add", ".");
+  git(f.repo, "commit", "-qm", "dependencies");
+  const project = await f.service.chooseProject(f.repo);
+  return {
+    ...f.input,
+    projectId: project.id,
+    baseCommit: project.commit,
+    prepareDependencies: true,
+  };
+}
+test("both installations finish before either agent starts and setup is saved separately", async (t) => {
+  const prepared: string[] = [];
+  const tools = { nodeVersion: "v26.7.0", pnpmVersion: "11.25.0" };
+  const f = await setup(
+    t,
+    async (input: any) => {
+      assert.equal(prepared.length, 2);
+      return fakeRun(input);
+    },
+    {
+      inspectTools: async () => tools,
+      prepareProject: async (input: any) => {
+        prepared.push(input.workspace);
+        return {
+          state: "completed",
+          exitCode: 0,
+          cleanupConfirmed: true,
+          output: "installed",
+          durationMs: 100,
+          ...tools,
+        };
+      },
+    },
+  );
+  const job = await f.service.start(await enablePreparation(f));
+  const result = await terminal(f.service, job.id);
+  assert.deepEqual(
+    result.attempts.map((a: any) => a.state),
+    ["completed", "completed"],
+  );
+  assert.ok(
+    result.attempts.every(
+      (a: any) =>
+        a.preparation.state === "completed" &&
+        a.startedAt >= a.preparation.endedAt,
+    ),
+  );
+});
+test("asymmetric dependency failure launches no agents and preserves both preparation records", async (t) => {
+  let installs = 0,
+    launches = 0;
+  const f = await setup(
+    t,
+    async (input: any) => {
+      launches++;
+      return fakeRun(input);
+    },
+    {
+      inspectTools: async () => ({
+        nodeVersion: "v26.7.0",
+        pnpmVersion: "11.25.0",
+      }),
+      prepareProject: async () => ({
+        state: ++installs === 1 ? "completed" : "failed",
+        exitCode: installs === 1 ? 0 : 1,
+        cleanupConfirmed: true,
+        output: "result",
+        durationMs: 100,
+      }),
+    },
+  );
+  const job = await f.service.start(await enablePreparation(f));
+  const result = await terminal(f.service, job.id);
+  assert.equal(launches, 0);
+  assert.equal(result.error, "dependency_install_failed");
+  assert.deepEqual(
+    result.attempts.map((a: any) => a.preparation.state),
+    ["completed", "failed"],
+  );
+});
+
+test("stopping setup cancels installation and starts neither agent", async (t) => {
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let launches = 0;
+  const f = await setup(
+    t,
+    async (input: any) => {
+      launches++;
+      return fakeRun(input);
+    },
+    {
+      inspectTools: async () => ({
+        nodeVersion: "v26.7.0",
+        pnpmVersion: "11.25.0",
+      }),
+      prepareProject: async ({ signal }: any) =>
+        new Promise((resolve) => {
+          entered();
+          signal.addEventListener(
+            "abort",
+            () =>
+              resolve({
+                state: "cancelled",
+                exitCode: null,
+                output: "stopped",
+                durationMs: 5,
+                cleanupConfirmed: true,
+              }),
+            { once: true },
+          );
+        }),
+    },
+  );
+  const job = await f.service.start(await enablePreparation(f));
+  await started;
+  await f.service.stop(job.id, "all");
+  const result = await terminal(f.service, job.id);
+  assert.equal(launches, 0);
+  assert.equal(result.attempts[0].preparation.state, "cancelled");
+  assert.equal(result.error, "dependency_cancelled");
+  assert.ok(!result.cleanupUnconfirmed);
+});
+test("quit during dependency setup waits for cancellation and never starts agents", async (t) => {
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let launches = 0;
+  const f = await setup(
+    t,
+    async (input: any) => {
+      launches++;
+      return fakeRun(input);
+    },
+    {
+      inspectTools: async () => ({
+        nodeVersion: "v26.7.0",
+        pnpmVersion: "11.25.0",
+      }),
+      prepareProject: async ({ signal }: any) =>
+        new Promise((resolve) => {
+          entered();
+          signal.addEventListener(
+            "abort",
+            () =>
+              resolve({
+                state: "cancelled",
+                exitCode: null,
+                output: "stopped",
+                durationMs: 5,
+                cleanupConfirmed: true,
+              }),
+            { once: true },
+          );
+        }),
+    },
+  );
+  const job = await f.service.start(await enablePreparation(f));
+  await started;
+  await f.service.shutdown();
+  assert.equal(launches, 0);
+  assert.equal((await f.service.read(job.id)).activeId, null);
+});
 test("two workers start from one frozen revision and cannot edit the source checkout", async (t) => {
   const f = await setup(t, async (input: any) => {
     assert.equal(git(input.workspace, "rev-parse", "HEAD"), input.baseCommit);
@@ -494,6 +668,20 @@ test("damaged nested saved activity is skipped instead of reaching the renderer"
     },
     (j: any) => {
       j.cleanupAcknowledgedAt = "trusted";
+    },
+    (j: any) => {
+      j.dependencyPlan = { status: "supported", fingerprint: {} };
+    },
+    (j: any) => {
+      j.dependencyTools = { nodeVersion: {}, pnpmVersion: "11.25.0" };
+    },
+    (j: any) => {
+      j.attempts[0].preparation = {
+        state: "completed",
+        startedAt: 1,
+        output: "changed",
+        outputSha256: "0".repeat(64),
+      };
     },
   ];
   for (let i = 0; i < mutations.length; i++) {

@@ -184,3 +184,22 @@ Completed workspaces now run a user-named command on fresh copies of both retain
 Native Electron testing on the real draft-retention pair produced a concrete difference: Sol passed the nested-field exclusion assertion, Terra failed it. No new model call was needed. Validation: 281 desktop tests, root typecheck, desktop build and public-demo build passed. See [command verification](../../apps/desktop/docs/command-verification.md).
 
 Next priority: explicit, consistent dependency preparation for both agent and check copies, followed by installer/runtime readiness. The macOS-only command runner currently omits installed dependencies and denies network access. Broader assertion grading, cross-platform execution and the content audit remain open.
+
+### Execution update — live dependency preparation, first path
+
+Live setup now offers detected pnpm 11 dependency installation into both isolated copies on macOS. Both installs must finish successfully before either agent starts; setup output, versions and time are retained separately. Source-only runs remain available. Lockfile changes, asymmetric failure, cancellation and interrupted recovery have explicit handling. Real local dependency installation and native Electron fixture recording passed without provider calls. See [the supported path and validation limits](../../apps/desktop/docs/dependency-preparation.md).
+
+The dependency milestone remains open: next prepare command-verification copies, validate remote registry/network failures, then complete installer/runtime readiness on a fresh machine. This implementation does not install global runtimes or establish general support for pnpm configuration, native build scripts or authenticated registries.
+
+
+### Execution update — dependency preparation for verification
+
+The check runner now offers pnpm 11 setup on both fresh result copies, including result-time manifest changes. Setup is recorded separately; neither check starts unless both installs succeed. Cancellation and setup failures remain unknown correctness outcomes. The native desktop exercised real installs, dependency-backed assertions and comparison projection; separate real regression checks preserve divergent pass/fail outcomes. All 294 desktop tests, root typecheck and desktop/public-demo builds passed. See [verification acceptance and limits](../../apps/desktop/docs/command-verification.md).
+
+Next: installer/runtime strategy and application-data storage migration, followed by clean-machine install/upgrade verification. Remote registry failure acceptance, private registry support and broader platform support remain open; development tests are not installer readiness.
+
+### Execution update — desktop storage and local setup
+
+New native installations now route evidence/settings to application data. Existing installations persist a reference to their canonical data directory, preserving absolute worktree and evidence paths. Missing/corrupt locations block startup rather than opening an empty replacement. Preferences shows the actual location and detected required tools. Native restart preserved all four inspected personal evidence/config records byte-for-byte; 300 desktop tests, typecheck and both builds passed.
+
+This is a storage-routing foundation, not a completed data relocation or installer. Next remove the recorder's source-TypeScript/monorepo runtime dependency and validate a distributable package. See [installation readiness and remaining release gates](../../apps/desktop/docs/desktop-installation-readiness.md).

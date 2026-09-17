@@ -1,3 +1,4 @@
+import { DesktopEnvironmentPanel } from "./DesktopEnvironmentPanel";
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Command } from "cmdk";
@@ -715,7 +716,7 @@ export function Preferences({
         if (!v) close();
       }}
       title="Workspace preferences"
-      description="A little more comfortable, your way."
+      description="Appearance, local storage, and desktop setup."
     >
       <div className="dialog-inner">
         <div className="preference-row">
@@ -762,8 +763,9 @@ export function Preferences({
         </div>
         <p className="form-hint">
           <ShieldCheck size={14} />
-          Preferences and saved cases stay in this local preview.
+          Preferences are saved on this device.
         </p>
+        {open && <DesktopEnvironmentPanel />}
       </div>
       <div className="dialog-footer">
         <Button variant="primary" onClick={close}>

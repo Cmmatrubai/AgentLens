@@ -10,10 +10,16 @@ import {
 } from "lucide-react";
 import { Button } from "./ui";
 import type { CheckEvaluation } from "./live-types";
-import { liveDuration } from "./live-presentation";
+import { liveDuration, liveError } from "./live-presentation";
 const messages: Record<string, string> = {
   invalid_check_request:
     "Give the check a name, a command, and a time limit between 1 and 600 seconds.",
+  check_dependencies_unsupported:
+    "This copy does not have a supported pnpm 11 setup. Check its package manifest and lockfile, or run without dependency installation.",
+  check_dependency_setup_failed:
+    "Dependency setup did not finish successfully. Open setup output for details. The check outcome is unknown.",
+  check_dependency_pair_not_ready:
+    "Both copies must finish dependency setup before either check runs. Review the setup result, then try again.",
   check_busy:
     "Another check is still running. Wait for it to finish before starting a new one.",
   check_cleanup_unconfirmed:
@@ -62,6 +68,7 @@ export function LiveChecks({
   const [title, setTitle] = useState(""),
     [command, setCommand] = useState(""),
     [seconds, setSeconds] = useState(60),
+    [prepareDependencies, setPrepareDependencies] = useState(false),
     [consent, setConsent] = useState(false),
     [cleanup, setCleanup] = useState(false),
     [form, setForm] = useState(true);
@@ -117,6 +124,7 @@ export function LiveChecks({
               command,
               timeoutSeconds: seconds,
               acknowledged: consent,
+              prepareDependencies,
             })
           : kind === "stop"
             ? await api.liveChecksStop(id)
@@ -160,7 +168,10 @@ export function LiveChecks({
           <Button
             small
             variant="ghost"
-            onClick={() => { setError(null); setRevision((v) => v + 1); }}
+            onClick={() => {
+              setError(null);
+              setRevision((v) => v + 1);
+            }}
           >
             Reload checks
           </Button>
@@ -193,7 +204,9 @@ export function LiveChecks({
                         ? "Command passed"
                         : a.outcome === "fail"
                           ? "Command failed"
-                          : phase[a.state]}
+                          : a.preparation?.state === "running"
+                            ? "Installing dependencies"
+                            : phase[a.state]}
                     </strong>
                     <small>
                       {a.durationMs !== null
@@ -214,12 +227,52 @@ export function LiveChecks({
                   )}
                 </summary>
                 <div className="live-check-result-detail">
-                  {a.error && (
-                    <p>
-                      {messages[a.error] ??
-                        "The outcome could not be established."}
-                    </p>
+                  {a.preparation && (
+                    <details className="live-checks-command-disclosure">
+                      <summary>
+                        Dependency setup ·{" "}
+                        {a.preparation.state === "completed"
+                          ? "Installed"
+                          : a.preparation.state === "running"
+                            ? "Installing"
+                            : "Not completed"}
+                      </summary>
+                      <p>
+                        {a.preparation.nodeVersion
+                          ? `Node ${a.preparation.nodeVersion} · pnpm ${a.preparation.pnpmVersion}`
+                          : "Tool versions unavailable"}
+                        {a.preparation.durationMs !== undefined &&
+                          ` · ${Math.round(a.preparation.durationMs)} ms setup time`}
+                      </p>
+                      {a.preparation.error && (
+                        <p>
+                          {messages[a.preparation.error] ??
+                            liveError(a.preparation.error)}
+                        </p>
+                      )}
+                      {a.preparation.command && (
+                        <code className="live-checks-command">
+                          {a.preparation.command}
+                        </code>
+                      )}
+                      <pre
+                        tabIndex={0}
+                        aria-label={`Agent ${a.key.toUpperCase()} dependency setup output`}
+                      >
+                        {a.preparation.output || "No setup output saved yet."}
+                      </pre>
+                      {a.preparation.outputTruncated && (
+                        <p>Setup output was shortened at the capture limit.</p>
+                      )}
+                      {a.preparation.fingerprint && (
+                        <p className="live-check-identity">
+                          Dependency inputs{" "}
+                          <code>{a.preparation.fingerprint}</code>
+                        </p>
+                      )}
+                    </details>
                   )}
+                  {a.error && <p>{messages[a.error] ?? liveError(a.error)}</p>}
                   <p>
                     Exit code: {a.exitCode ?? "not available"} ·{" "}
                     {phase[a.state]}
@@ -229,7 +282,9 @@ export function LiveChecks({
                     aria-label={`Agent ${a.key.toUpperCase()} check output`}
                   >
                     {(a.output.startsWith(`Command: ${evaluation.command}\n`)
-                      ? a.output.slice(`Command: ${evaluation.command}\n`.length)
+                      ? a.output.slice(
+                          `Command: ${evaluation.command}\n`.length,
+                        )
                       : a.output) || "No command output recorded yet."}
                   </pre>
                   {a.outputTruncated && (
@@ -276,6 +331,9 @@ export function LiveChecks({
                   setTitle(evaluation.title);
                   setCommand(evaluation.command);
                   setSeconds(evaluation.timeoutSeconds);
+                  setPrepareDependencies(
+                    evaluation.prepareDependencies === true,
+                  );
                   setConsent(false);
                   setForm(true);
                 }}
@@ -363,9 +421,30 @@ export function LiveChecks({
           </label>
           <p className="live-field-hint">
             Fresh copies preserve the original work. Ignored files, installed
-            dependencies and Git metadata are not copied. Network access is
-            disabled; automatic dependency setup is coming separately.
+            dependencies and Git metadata are not copied. The check command runs
+            with network access disabled.
           </p>
+          <label className="live-launch-consent">
+            <input
+              type="checkbox"
+              checked={prepareDependencies}
+              disabled={busy}
+              onChange={(e) => {
+                setPrepareDependencies(e.target.checked);
+                setConsent(false);
+              }}
+            />
+            <span>Install locked dependencies before checking</span>
+          </label>
+          {prepareDependencies && (
+            <p className="live-field-hint">
+              Requires installed pnpm 11 and a supported lockfile in both
+              results. Setup can download packages, with install scripts
+              disabled and a five-minute limit per copy. Both installs must
+              succeed before either check runs. Each result uses its own
+              dependencies; setup time is saved separately.
+            </p>
+          )}
           <label className="live-launch-consent">
             <input
               type="checkbox"

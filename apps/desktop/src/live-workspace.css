@@ -837,3 +837,66 @@
 .reduce-motion .live-workspace :is(button, summary) {
   transition: none;
 }
+.live-dependency-choice {
+  margin: 16px 0 26px;
+  padding: 16px 18px;
+  border: 1px solid var(--border, #353a38);
+  border-radius: 12px;
+}
+.live-dependency-choice > strong {
+  font-size: 13px;
+}
+.live-dependency-choice .live-launch-consent {
+  margin: 12px 0 8px;
+}
+.live-dependency-choice .live-field-hint {
+  margin-bottom: 0;
+}
+.live-dependency-progress {
+  padding: 20px;
+  margin: 16px 0 22px;
+  background: #191c1b;
+  border: 1px solid #353a38;
+  border-radius: 12px;
+}
+.live-dependency-progress h2 {
+  font-size: 16px;
+  margin: 0 0 6px;
+}
+.live-dependency-progress p {
+  color: #a3aba6;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.live-dependency-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 14px;
+}
+.live-dependency-sides details {
+  border: 1px solid #353a38;
+  border-radius: 8px;
+  padding: 12px;
+  min-width: 0;
+}
+.live-dependency-sides summary {
+  cursor: pointer;
+  font-size: 12px;
+}
+.live-dependency-sides summary span {
+  margin-left: 12px;
+  color: #b5c6bd;
+}
+.live-dependency-sides pre {
+  font: 11px/1.6 var(--font-mono, monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 240px;
+  overflow: auto;
+}
+@media (max-width: 900px) {
+  .live-dependency-sides {
+    grid-template-columns: 1fr;
+  }
+}

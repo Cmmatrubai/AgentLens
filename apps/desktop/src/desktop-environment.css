@@ -1,0 +1,68 @@
+.desktop-environment {
+  border-top: 1px solid var(--border, #343b38);
+  margin-top: 20px;
+  padding-top: 20px;
+  min-width: 0;
+}
+.desktop-environment h3 {
+  font-size: 14px;
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+.desktop-environment h4 {
+  font-size: 12px;
+  margin: 14px 0 6px;
+}
+.desktop-environment p {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #a7b3ac;
+  margin: 6px 0 10px;
+}
+.desktop-environment .environment-build {
+  font-size: 11px;
+  color: #b5d6c1;
+}
+.environment-path {
+  display: block;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  padding: 10px 12px;
+  background: #121615;
+  border: 1px solid #343b38;
+  border-radius: 7px;
+  font-size: 11px;
+  line-height: 1.6;
+  user-select: text;
+}
+.desktop-environment details {
+  margin: 16px 0 8px;
+}
+.desktop-environment summary {
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 0;
+}
+.desktop-environment summary:focus-visible {
+  outline: 2px solid #a2dcb6;
+  outline-offset: 3px;
+}
+.desktop-environment ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.desktop-environment li {
+  padding: 10px 0;
+  border-bottom: 1px solid #343b38;
+}
+.desktop-environment li > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.desktop-environment li > div span {
+  color: #b5d6c1;
+}

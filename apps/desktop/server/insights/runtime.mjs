@@ -1,3 +1,4 @@
+import dataRoot from "../data-root.cjs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { privateRead, privateWrite } from "./private-files.mjs";
@@ -9,7 +10,7 @@ import { createInsightService } from "./service.mjs";
 import { DEFAULT_BASE_URL } from "./endpoint.mjs";
 import { parseSelectedComparison } from "../live/selection.mjs";
 export const prototypeRoot = fileURLToPath(new URL("../../", import.meta.url));
-export const insightRoot = join(prototypeRoot, ".local/insight-engine");
+export const insightRoot = join(dataRoot.getDataRoot(), "insight-engine");
 export async function readSelectedComparison(root) {
   try {
     const selected = await privateRead(root, "selected-pair.json");

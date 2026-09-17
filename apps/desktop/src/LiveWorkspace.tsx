@@ -423,11 +423,13 @@ export function LiveWorkspace({
                 {running ? "LIVE WORKSPACE" : "RECORDED WORKSPACE"}
               </div>
               <h1>
-                {running
-                  ? "Live comparison"
-                  : complete
-                    ? "Recordings complete"
-                    : "Comparison ended"}
+                {job.state === "preparing" && job.dependencyPlan
+                  ? "Preparing both copies"
+                  : running
+                    ? "Live comparison"
+                    : complete
+                      ? "Recordings complete"
+                      : "Comparison ended"}
               </h1>
               <details className="live-task">
                 <summary>
@@ -447,10 +449,76 @@ export function LiveWorkspace({
             {running && (
               <Button small disabled={busy} onClick={() => void stop("all")}>
                 <Square size={12} />
-                Stop both
+                {job.state === "preparing" && job.dependencyPlan
+                  ? "Stop setup"
+                  : "Stop both"}
               </Button>
             )}
           </header>
+          {job.dependencyPlan && (
+            <section
+              className="live-dependency-progress"
+              aria-label="Dependency preparation"
+            >
+              <div>
+                <h2>Project setup</h2>
+                <p>
+                  Both copies must be ready before either agent starts. Install
+                  scripts are disabled; agent time starts after setup.
+                </p>
+              </div>
+              {job.error?.startsWith("dependency_") && (
+                <p role="alert">{liveError(job.error)}</p>
+              )}
+              <div className="live-dependency-sides">
+                {job.attempts.map((a) => (
+                  <details key={a.key}>
+                    <summary>
+                      <strong>Agent {a.key.toUpperCase()}</strong>
+                      <span>
+                        {a.preparation?.state === "completed"
+                          ? "Dependencies installed"
+                          : a.preparation?.state === "running"
+                            ? "Installing dependencies…"
+                            : a.preparation
+                              ? a.preparation.state === "timed_out"
+                                ? "Setup timed out"
+                                : a.preparation.state === "cancelled" ||
+                                    a.preparation.state === "interrupted"
+                                  ? "Setup stopped"
+                                  : "Setup needs attention"
+                              : job.state === "preparing"
+                                ? "Waiting for setup"
+                                : "Setup did not run"}
+                      </span>
+                    </summary>
+                    {a.preparation && (
+                      <>
+                        <p>
+                          {a.preparation.nodeVersion &&
+                            `Node ${a.preparation.nodeVersion} · pnpm ${a.preparation.pnpmVersion}`}
+                          {a.preparation.durationMs !== undefined &&
+                            ` · ${a.preparation.durationMs < 1000 ? `${Math.round(a.preparation.durationMs)} ms` : liveDuration(a.preparation.durationMs)} setup time`}
+                        </p>
+                        {a.preparation.error && (
+                          <p>{liveError(a.preparation.error)}</p>
+                        )}
+                        <pre
+                          tabIndex={0}
+                          aria-label={`Agent ${a.key.toUpperCase()} setup output`}
+                        >
+                          {a.preparation.output || "No setup output saved yet."}
+                        </pre>
+                        {a.preparation.outputTruncated && (
+                          <p>Only the first 16 KiB of output was retained.</p>
+                        )}
+                      </>
+                    )}
+                  </details>
+                ))}
+              </div>
+            </section>
+          )}
           {job.persistenceError && (
             <p className="first-use-error" role="alert">
               Some workspace updates could not be saved. Recording evidence may

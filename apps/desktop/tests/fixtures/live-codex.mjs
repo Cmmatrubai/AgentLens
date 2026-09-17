@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { join } from "node:path";
 const args = process.argv.slice(2);
 if (args.includes("--version")) {
   console.log("codex fixture");
@@ -17,6 +19,11 @@ if (args.includes("--help")) {
 if (args[0] === "login")
   process.exit(process.env.AGENTLENS_FIXTURE_SIGNED_OUT ? 1 : 0);
 const model = args[args.indexOf("-m") + 1];
+if (process.env.AGENTLENS_FIXTURE_REQUIRE_DEP === "1") {
+  const require = createRequire(join(process.cwd(), "package.json"));
+  if (require("setup-helper") !== 42)
+    throw Error("fixture_dependency_unavailable");
+}
 if (process.env.AGENTLENS_FIXTURE_PID)
   writeFileSync(process.env.AGENTLENS_FIXTURE_PID, String(process.pid));
 const emit = (value) => process.stdout.write(JSON.stringify(value) + "\n");

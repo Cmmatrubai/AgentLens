@@ -271,3 +271,222 @@ test("missing snapshot evidence preserves recordings without projecting a pass",
   assert.deepEqual(projected.attempts, comparison.attempts);
   assert.deepEqual(projected.checks, []);
 });
+
+async function addDependencies(f: any) {
+  for (const a of f.context.attempts) {
+    const cwd = a.workspace;
+    await mkdir(join(cwd, "packages/helper"), { recursive: true });
+    await writeFile(
+      join(cwd, "package.json"),
+      JSON.stringify({
+        name: "check-fixture",
+        version: "1.0.0",
+        private: true,
+        dependencies: { "setup-helper": "workspace:*" },
+        scripts: {
+          postinstall: "echo forbidden > unexpected-script",
+          test: "node check.cjs",
+        },
+      }),
+    );
+    await writeFile(
+      join(cwd, "packages/helper/package.json"),
+      JSON.stringify({
+        name: "setup-helper",
+        version: "1.0.0",
+        main: "index.cjs",
+      }),
+    );
+    await writeFile(
+      join(cwd, "packages/helper/index.cjs"),
+      "module.exports=42;",
+    );
+    await writeFile(
+      join(cwd, "check.cjs"),
+      "require('node:assert/strict').equal(require('setup-helper'),42); require('node:assert/strict').equal(require('node:fs').readFileSync('answer.txt','utf8'),'correct');",
+    );
+    await writeFile(
+      join(cwd, "pnpm-workspace.yaml"),
+      "packages:\n  - packages/*\n",
+    );
+    await writeFile(join(cwd, ".gitignore"), "node_modules/\n");
+    execFileSync(
+      "pnpm",
+      [
+        "install",
+        "--lockfile-only",
+        "--offline",
+        "--ignore-scripts",
+        "--ignore-pnpmfile",
+        "--config.manage-package-manager-versions=false",
+      ],
+      { cwd, stdio: "pipe" },
+    );
+  }
+}
+test(
+  "check preparation installs real dependencies in Git-free copies and preserves divergent outcomes",
+  { skip: process.platform !== "darwin" },
+  async (t) => {
+    const f = await fixture(t);
+    await addDependencies(f);
+    t.after(() => f.service.shutdown());
+    await f.service.start(id, {
+      ...input,
+      command: "pnpm --config.manage-package-manager-versions=false test",
+      prepareDependencies: true,
+    });
+    const result = await settled(f.service);
+    assert.deepEqual(
+      result.attempts.map((a: any) => a.outcome),
+      ["pass", "fail"],
+    );
+    assert.ok(
+      result.attempts.every(
+        (a: any) =>
+          a.preparation?.state === "completed" && a.preparation.outputSha256,
+      ),
+    );
+    const latest = Math.max(
+      ...result.attempts.map((a: any) => a.preparation.endedAt),
+    );
+    assert.ok(result.attempts.every((a: any) => a.commandStartedAt >= latest));
+    for (const a of f.context.attempts) {
+      await assert.rejects(readFile(join(a.workspace, "unexpected-script")));
+      await assert.rejects(
+        readFile(join(a.workspace, "node_modules/setup-helper/index.cjs")),
+      );
+    }
+    const reopened = createCheckService(f.opts);
+    t.after(() => reopened.shutdown());
+    assert.deepEqual((await reopened.read(id)).evaluation, result);
+  },
+);
+test("unsupported setup on one check copy prevents both commands and leaves outcomes unknown", async (t) => {
+  const f = await fixture(t);
+  await addDependencies(f);
+  await rm(join(f.root, "b/pnpm-lock.yaml"));
+  let calls = 0;
+  const service = createCheckService({
+    ...f.opts,
+    runCommand: async () => {
+      calls++;
+      return {
+        state: "completed",
+        exitCode: 0,
+        output: "",
+        cleanupConfirmed: true,
+      };
+    },
+  });
+  t.after(() => service.shutdown());
+  await service.start(id, { ...input, prepareDependencies: true });
+  const r = await settled(service);
+  assert.equal(calls, 0);
+  assert.ok(r.attempts.every((a: any) => a.outcome === "unknown"));
+  assert.equal(
+    r.attempts[1].preparation.error,
+    "check_dependencies_unsupported",
+  );
+});
+
+test("stopping or quitting during check dependency setup starts no commands", async (t) => {
+  for (const stop of ["stop", "shutdown"]) {
+    const f = await fixture(t);
+    await addDependencies(f);
+    let entered!: () => void;
+    const started = new Promise<void>((r) => {
+      entered = r;
+    });
+    let calls = 0;
+    const service = createCheckService({
+      ...f.opts,
+      inspectTools: async () => ({
+        nodeVersion: "v26.7.0",
+        pnpmVersion: "11.25.0",
+      }),
+      prepareProject: async ({ signal }: any) =>
+        new Promise((resolve) => {
+          entered();
+          signal.addEventListener(
+            "abort",
+            () =>
+              resolve({
+                state: "cancelled",
+                exitCode: null,
+                cleanupConfirmed: true,
+                output: "cancelled",
+                durationMs: 1,
+              }),
+            { once: true },
+          );
+        }),
+      runCommand: async () => {
+        calls++;
+        throw Error("must not run");
+      },
+    });
+    await service.start(id, { ...input, prepareDependencies: true });
+    await started;
+    if (stop === "stop") await service.stop(id);
+    else await service.shutdown();
+    const r = await settled(service);
+    assert.equal(calls, 0);
+    assert.ok(r.attempts.every((a: any) => a.outcome === "unknown"));
+    assert.equal(r.attempts[0].preparation.state, "cancelled");
+    await service.shutdown();
+  }
+});
+test("installation failure is saved separately and is never a failed assertion", async (t) => {
+  const f = await fixture(t);
+  await addDependencies(f);
+  let calls = 0;
+  const service = createCheckService({
+    ...f.opts,
+    inspectTools: async () => ({
+      nodeVersion: "v26.7.0",
+      pnpmVersion: "11.25.0",
+    }),
+    prepareProject: async () => ({
+      state: "failed",
+      exitCode: 1,
+      cleanupConfirmed: true,
+      output: "Registry unavailable",
+      durationMs: 20,
+    }),
+    runCommand: async () => {
+      calls++;
+      throw Error("must not run");
+    },
+  });
+  t.after(() => service.shutdown());
+  await service.start(id, { ...input, prepareDependencies: true });
+  const r = await settled(service);
+  assert.equal(calls, 0);
+  assert.ok(
+    r.attempts.every(
+      (a: any) => a.outcome === "unknown" && a.exitCode === null,
+    ),
+  );
+  assert.equal(r.attempts[0].preparation.output, "Registry unavailable");
+  assert.equal(r.attempts[0].preparation.exitCode, 1);
+});
+test("recovered setup cannot promote a pass when preparation evidence is missing", async (t) => {
+  const f = await fixture(t);
+  await f.service.start(id, input);
+  const r = await settled(f.service);
+  await f.service.shutdown();
+  r.prepareDependencies = true;
+  for (const a of r.attempts)
+    a.preparation = {
+      state: "completed",
+      startedAt: 1,
+      endedAt: 2,
+      output: "installed",
+      exitCode: 0,
+      cleanupConfirmed: true,
+    };
+  await privateWrite(join(f.store, id), "check-state.json", r);
+  const reopened = createCheckService(f.opts);
+  await assert.rejects(reopened.read(id), /check_evidence_unavailable/);
+});
